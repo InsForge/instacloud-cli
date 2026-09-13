@@ -188,6 +188,66 @@ export async function deviceGrant(post: DevicePoster, wait: (s: number) => Promi
   throw new Error(`device login expired before it was approved — run \`insta login${open ? '' : ' --device'}\` again`)
 }
 
+// auth.md user claimed flow (service_auth). The agent knows the user's email; InstaCloud gives a
+// 6-digit code and a console link; only a session for that email can type the code. We poll the
+// standard token endpoint with the WorkOS claim grant and get an insta_ key back. Poster + wait
+// are injected like deviceGrant's. JSON bodies: the platform's token route accepts them.
+const CLAIM_GRANT = 'urn:workos:agent-auth:grant-type:claim'
+type ClaimBlock = { user_code: string; expires_in: number; verification_uri: string; interval?: number }
+type ClaimStart = { registration_id: string; claim_token: string; claim_token_expires: string; claim: ClaimBlock }
+export type ClaimPoster = (path: string, body: Record<string, unknown>) => Promise<any>
+
+export async function claimGrant(email: string, client: string, post: ClaimPoster, wait: (s: number) => Promise<void> = sleepSeconds, open?: (url: string) => boolean): Promise<string> {
+  const start = (await post('/agent/auth', { type: 'service_auth', login_hint: email, client })) as ClaimStart
+  if (!start?.claim_token || !start.claim?.user_code || !start.claim.verification_uri) {
+    throw new Error('malformed registration response (missing claim) — is the platform up to date?')
+  }
+  const expiresAt = Date.parse(start.claim_token_expires)
+  const deadline = Math.min(Number.isFinite(expiresAt) ? expiresAt : Infinity, Date.now() + 86_400_000)
+  const show = (block: ClaimBlock, fresh: boolean) => {
+    if (fresh) info('the code expired — here is a new one.')
+    if (!fresh && open) { info('opening your browser…'); open(block.verification_uri) }
+    info(`to authorize this agent, open this link, sign in as ${email}, and enter this code: ${block.user_code}`)
+    info(`  ${block.verification_uri}`)
+  }
+  show(start.claim, false)
+  info(`waiting for ${email} to confirm… (ctrl-c to abort)`)
+  const rawInterval = Number(start.claim.interval)
+  let interval = Number.isFinite(rawInterval) ? Math.max(rawInterval, 1) : 5
+  let reminted = false
+  const expired = () => new Error(`the request expired before ${email} confirmed it — run \`insta login --claim ${email}\` again`)
+  while (Date.now() < deadline) {
+    await wait(interval)
+    let grant: { access_token?: string } | null = null
+    try {
+      grant = (await post('/api/auth/oauth2/token', { grant_type: CLAIM_GRANT, claim_token: start.claim_token })) as { access_token?: string }
+    } catch (e) {
+      if (!(e instanceof ApiError)) continue // transport blip — keep polling until the deadline
+      const code = e.message
+      if (code === 'authorization_pending') continue
+      if (code === 'slow_down' || e.status === 429) { interval += 5; continue }
+      if (code === 'expired_token') {
+        if (reminted) throw expired()
+        reminted = true
+        let again: { claim_attempt?: ClaimBlock }
+        try {
+          again = (await post('/agent/auth/claim', { claim_token: start.claim_token, email })) as { claim_attempt?: ClaimBlock }
+        } catch (re) {
+          if (re instanceof ApiError && re.message === 'claim_expired') throw expired()
+          throw re
+        }
+        if (!again?.claim_attempt?.user_code) throw new Error('malformed claim response (missing claim_attempt)')
+        show(again.claim_attempt, true)
+        continue
+      }
+      throw e // invalid_grant and friends: not retryable
+    }
+    if (!grant?.access_token) throw new Error('malformed token response (missing access_token)')
+    return grant.access_token
+  }
+  throw expired()
+}
+
 // Start a loopback server, open the browser at the platform bridge, and await the token.
 function browserOauth(apiUrl: string, provider: string): Promise<string> {
   return new Promise<string>((resolve, reject) => {
