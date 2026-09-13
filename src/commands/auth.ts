@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { ApiClient, ApiError, linkedProject } from '../api.js'
+import { agentMode } from '../agent.js'
 import { ENVS, ENV_NAMES, envForApiUrl, isEnvName } from '../env.js'
 import { info, die, printJson, promptPassword, openUrl } from '../util.js'
 
@@ -15,13 +16,23 @@ function targetApiUrl(opts: { apiUrl?: string; env?: string }): string | undefin
   return ENVS[want].api
 }
 
-// `device` is injectable so the dispatch itself is testable (repo pattern: DI fakes, no mocks).
-export async function login(opts: { email?: string; password?: string; apiUrl?: string; env?: string; oauth?: string; device?: boolean; apiKey?: string }, device: typeof loginDevice = loginDevice): Promise<void> {
+// `device`/`claim` are injectable so the dispatch itself is testable (repo pattern: DI fakes, no mocks).
+export async function login(
+  opts: { email?: string; password?: string; apiUrl?: string; env?: string; oauth?: string; device?: boolean; apiKey?: string; claim?: string },
+  device: typeof loginDevice = loginDevice,
+  claim: typeof loginClaim = loginClaim,
+): Promise<void> {
   // Login modes are exclusive — pick one. Check presence (not truthiness) so an explicit
   // empty --api-key= is rejected by validation rather than silently falling through.
   if (opts.apiKey !== undefined) {
-    if (opts.device || opts.oauth || opts.email) die('choose one login mode: --api-key, --device, --oauth, or --email')
+    if (opts.device || opts.oauth || opts.email || opts.claim !== undefined) die('choose one login mode: --api-key, --claim, --device, --oauth, or --email')
     return loginApiKey(opts.apiKey, opts)
+  }
+  if (opts.claim !== undefined) {
+    if (opts.device || opts.oauth || opts.email) die('choose one login mode: --api-key, --claim, --device, --oauth, or --email')
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(opts.claim)) die('--claim needs an email address: the account that will authorize this agent')
+    // The human types the code on the console; open it here only when a browser is on this machine.
+    return claim(opts.claim, opts, agentMode() ? undefined : openUrl)
   }
   if (opts.device) return device(opts)
   if (opts.oauth) return loginOauth(opts.oauth, opts)
@@ -74,6 +85,19 @@ export async function loginDevice(opts: { apiUrl?: string; env?: string }, open?
   api.setSession({ accessToken: token, refreshToken: token }, me.user)
   await api.persist()
   info(`logged in as ${me.user.email ?? me.user.id} @ ${api.apiUrl}`)
+}
+
+// `insta login --claim <email>`: the auth.md user claimed flow. The named user confirms a code on
+// the console, the platform mints an insta_ key, and it is stored exactly as --api-key stores one.
+export async function loginClaim(email: string, opts: { apiUrl?: string; env?: string }, open?: (url: string) => boolean, grant: typeof claimGrant = claimGrant): Promise<void> {
+  const api = await ApiClient.load()
+  const target = targetApiUrl(opts)
+  if (target) api.setApiUrl(target)
+  const client = agentMode()?.client ?? 'unknown'
+  const key = await grant(email, client, (path, body) => api.request('POST', path, body, { auth: false }), sleepSeconds, open)
+  const user = await applyApiKeyLogin(api, key)
+  await api.persist()
+  info(`logged in as ${user.email ?? user.id} @ ${api.apiUrl}`)
 }
 
 // Non-interactive login with a durable insta_ key (minted via POST /tokens): store it and confirm against /me. No browser, no polling.

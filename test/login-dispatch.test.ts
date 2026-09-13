@@ -4,7 +4,7 @@
 // reason to stderr and throws CliExit('exit 1'), so rejections assert 'exit 1' and the message
 // is read from a captured stderr where it matters.
 import { describe, expect, it } from 'vitest'
-import { login, loginDevice } from '../src/commands/auth.js'
+import { login, loginClaim, loginDevice } from '../src/commands/auth.js'
 import { openUrl } from '../src/util.js'
 
 type DeviceRunner = typeof loginDevice
@@ -16,6 +16,14 @@ function fakeDevice() {
 }
 
 const mustNotRun: DeviceRunner = async () => { throw new Error('flow must not start') }
+
+type ClaimRunner = typeof loginClaim
+function fakeClaim() {
+  const calls: Array<{ email: string; open: unknown }> = []
+  const run: ClaimRunner = async (email, _opts, open) => { calls.push({ email, open }) }
+  return { run, calls }
+}
+const claimMustNotRun: ClaimRunner = async () => { throw new Error('claim must not start') }
 
 async function stderrOf(fn: () => Promise<unknown>): Promise<string> {
   const lines: string[] = []
@@ -66,5 +74,18 @@ describe('login dispatch', () => {
   it('an explicitly empty --email is an error, not a bare browser login', async () => {
     const err = await stderrOf(() => expect(login({ email: '' }, mustNotRun)).rejects.toThrow('exit 1'))
     expect(err).toContain('--email must not be empty')
+  })
+
+  it('--claim <email> runs the claim ceremony with the local browser opener outside agent mode', async () => {
+    const { run, calls } = fakeClaim()
+    await login({ claim: 'me@example.com' }, mustNotRun, run)
+    expect(calls).toEqual([{ email: 'me@example.com', open: openUrl }])
+  })
+
+  it('--claim refuses to combine with another mode and needs an email', async () => {
+    await expect(login({ claim: 'me@example.com', device: true }, mustNotRun, claimMustNotRun)).rejects.toThrow('exit 1')
+    expect(await stderrOf(() => login({ claim: 'me@example.com', apiKey: 'insta_x' }, mustNotRun, claimMustNotRun).catch(() => {}))).toMatch(/choose one login mode/)
+    expect(await stderrOf(() => login({ claim: '' }, mustNotRun, claimMustNotRun).catch(() => {}))).toMatch(/--claim needs an email/)
+    expect(await stderrOf(() => login({ claim: 'not-an-email' }, mustNotRun, claimMustNotRun).catch(() => {}))).toMatch(/--claim needs an email/)
   })
 })
