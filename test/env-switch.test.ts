@@ -235,7 +235,7 @@ describe('config + env use', () => {
   // — it returned the staging host with the prod session still attached, so api.ts's 401 path would
   // POST prod's REFRESH token to staging's /auth/refresh.
   it('drops the stored session when INSTA_ENV points at a different deployment', async () => {
-    await writeConfig({ apiUrl: PROD_API, accessToken: 'prod-a', refreshToken: 'prod-r', user: { id: 'u', email: null, name: null } })
+    await writeConfig({ apiUrl: PROD_API, accessToken: 'prod-a', refreshToken: 'prod-r', user: { id: 'u', email: null, name: null }, agentCredential: true })
     process.env.INSTA_ENV = 'staging'
     const { readGlobal } = await freshConfig()
     const c = await readGlobal()
@@ -243,6 +243,7 @@ describe('config + env use', () => {
     expect(c.accessToken).toBeUndefined()
     expect(c.refreshToken).toBeUndefined()
     expect(c.user).toBeUndefined()
+    expect(c.agentCredential).toBeUndefined()
   })
 
   it('drops the stored session when INSTA_API_URL points at a custom host', async () => {
@@ -319,7 +320,7 @@ describe('config + env use', () => {
   // api.ts's 401 path POSTs the refresh token to whatever apiUrl now resolves to, so carrying a
   // session across a switch would hand one deployment's credential to another.
   it('env use drops the stored session when changing deployment', async () => {
-    await writeConfig({ apiUrl: PROD_API, accessToken: 'a', refreshToken: 'r', user: { id: 'u', email: null, name: null } })
+    await writeConfig({ apiUrl: PROD_API, accessToken: 'a', refreshToken: 'r', user: { id: 'u', email: null, name: null }, agentCredential: true })
     vi.resetModules()
     const { envUse } = await import('../src/commands/env.js')
     await envUse('staging')
@@ -328,6 +329,7 @@ describe('config + env use', () => {
     expect(c.accessToken).toBeUndefined()
     expect(c.refreshToken).toBeUndefined()
     expect(c.user).toBeUndefined()
+    expect(c.agentCredential).toBeUndefined()
   })
 
   it('env use is a no-op that keeps the session when already on that environment', async () => {

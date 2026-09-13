@@ -16,6 +16,7 @@ export type GlobalConfig = {
   refreshToken?: string
   user?: { id: string; email: string | null; name: string | null }
   autoUpdate?: boolean // self-update on new releases (default true while pre-1.0)
+  agentCredential?: boolean // the stored insta_ key was minted by agent auth: the platform already treats it as an agent, so agent mode sends no enrollment evidence
 }
 
 export type ProjectConfig = { projectId: string; orgId: string; branch: string }
@@ -53,6 +54,7 @@ export async function readGlobal(): Promise<GlobalConfig> {
       delete scrubbed.accessToken
       delete scrubbed.refreshToken
       delete scrubbed.user
+      delete scrubbed.agentCredential
       return scrubbed
     }
     return { ...parsed, apiUrl: override ?? persisted }

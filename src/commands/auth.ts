@@ -114,24 +114,24 @@ export type AuthedUser = { id: string; email: string | null; name: string | null
 
 // The client surface applyApiKeyLogin needs — ApiClient in prod, faked in tests.
 export type ApiKeyClient = {
-  request: (method: string, path: string) => Promise<any>
-  setApiKey: (token: string, user?: AuthedUser) => void
+  request: (method: string, path: string, body?: unknown, opts?: { evidence?: boolean }) => Promise<any>
+  setApiKey: (token: string, user?: AuthedUser, agentCredential?: boolean) => void
 }
 
-// Verify an insta_ key and store it: set it first so the /me probe is authed with the key itself, then re-store with the resolved user (401 → bad/revoked).
+// Verify an insta_ key with a bare /me probe (an agent-minted key cannot enroll a session, and /me says which kind this is), then store it with the user and that kind.
 export async function applyApiKeyLogin(client: ApiKeyClient, key: string): Promise<AuthedUser> {
   key = key.trim() // tolerate a trailing newline / stray whitespace from `--api-key "$(cat token)"`
   if (!key.startsWith('insta_')) throw new Error('--api-key expects an insta_ token (mint one with POST /tokens)')
   client.setApiKey(key)
-  let me: { user?: AuthedUser }
+  let me: { user?: AuthedUser; agentCredential?: boolean }
   try {
-    me = await client.request('GET', '/me')
+    me = await client.request('GET', '/me', undefined, { evidence: false })
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) throw new Error('that insta_ API key was rejected (invalid or revoked) — check it or mint a new one')
     throw e
   }
   if (!me?.user) throw new Error('unexpected response while verifying the API key')
-  client.setApiKey(key, me.user)
+  client.setApiKey(key, me.user, me.agentCredential === true)
   return me.user
 }
 

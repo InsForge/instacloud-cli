@@ -3,7 +3,7 @@ import { generateKeyPairSync, verify, createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ACCOUNT_ROUTES, agentHeaders, configureAgent, detectAgent, loadAgentSession, saveAgentSession } from '../src/agent.js'
+import { ACCOUNT_ROUTES, agentHeaders, configureAgent, detectAgent, loadAgentSession, saveAgentSession, setupProjectAgentSession } from '../src/agent.js'
 import { ApiClient, AgentApprovalRequired } from '../src/api.js'
 import { writeProject } from '../src/config.js'
 import { splitExecArgs } from '../src/commands/compute.js'
@@ -96,4 +96,38 @@ it('signs a project-owned request that lacks /projects/ in its path with the nam
   expect((fetcher.mock.calls[0] as any[])[1].headers['Insta-Agent-Session']).toBe('ags_test')
   // A session for another project is still refused: the scope is a selector, not a bypass.
   await expect(api.request('GET', '/template-deployments/d1', undefined, { projectId: 'other' })).rejects.toThrow(/insta setup agent/)
+})
+it('an agent-minted key sends the bearer alone and needs no session', async () => {
+  // No .insta/agent-session.json anywhere near cwd — agentCredential must skip enrollment regardless.
+  configureAgent({ source: 'cli-detected', client: 'codex' })
+  const fetcher = vi.fn(async () => new Response('{}', { status: 200 }))
+  const api = new ApiClient({ apiUrl: 'https://test.invalid', accessToken: 'insta_k', agentCredential: true }, fetcher)
+  await expect(api.request('GET', '/projects/p/services')).resolves.toEqual({})
+  expect(fetcher).toHaveBeenCalledOnce()
+  const headers = (fetcher.mock.calls[0] as any[])[1].headers
+  expect(headers.Authorization).toBe('Bearer insta_k')
+  expect(Object.keys(headers).some((k) => k.startsWith('Insta-Agent') || k === 'Insta-Actor-Type')).toBe(false)
+})
+it('agentHeaders sends no evidence for an agent-minted key even in agent mode', async () => {
+  configureAgent({ source: 'cli-detected', client: 'codex' })
+  const headers = await agentHeaders(
+    { apiUrl: 'https://test.invalid', agentCredential: true, request: async () => { throw new Error('must not run') } },
+    'GET', '/me', '',
+  )
+  expect(headers).toEqual({})
+})
+it('setupProjectAgentSession is a no-op for an agent-minted key', async () => {
+  const request = vi.fn(async () => { throw new Error('must not run') })
+  await expect(setupProjectAgentSession({ apiUrl: 'https://test.invalid', agentCredential: true, request }, 'p')).resolves.toBe(false)
+  expect(request).not.toHaveBeenCalled()
+})
+it('evidence: false sends the bearer alone for a human credential in agent mode', async () => {
+  configureAgent({ source: 'cli-detected', client: 'codex' })
+  const fetcher = vi.fn(async () => new Response('{}', { status: 200 }))
+  const api = new ApiClient({ apiUrl: 'https://test.invalid', accessToken: 'user-token' }, fetcher)
+  await expect(api.request('GET', '/me', undefined, { evidence: false })).resolves.toEqual({})
+  expect(fetcher).toHaveBeenCalledOnce()
+  const headers = (fetcher.mock.calls[0] as any[])[1].headers
+  expect(headers.Authorization).toBe('Bearer user-token')
+  expect(Object.keys(headers).some((k) => k.startsWith('Insta-Agent') || k === 'Insta-Actor-Type')).toBe(false)
 })

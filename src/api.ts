@@ -16,10 +16,12 @@ export class AgentApprovalRequired extends Error {
 }
 
 // Store a durable insta_ key as the credential: set it as the bearer and drop any refresh token (an insta_ key never rotates; a stale one would leak to /auth/refresh on a 401).
-export function storeApiKeyCredential(cfg: GlobalConfig, token: string, user?: GlobalConfig['user']): void {
+export function storeApiKeyCredential(cfg: GlobalConfig, token: string, user?: GlobalConfig['user'], agentCredential = false): void {
   cfg.accessToken = token
   delete cfg.refreshToken
   if (user) cfg.user = user
+  if (agentCredential) cfg.agentCredential = true
+  else delete cfg.agentCredential
 }
 
 type RawResult = { status: number; body: any }
@@ -27,7 +29,8 @@ type RawResult = { status: number; body: any }
 // mode signs with that project's session instead of a projectless bootstrap one (see agentHeaders).
 // `signal` bounds one request: a poll loop hands in the time it has left, so a stalled endpoint
 // cannot hold the CLI past the caller's own deadline.
-type RequestOpts = { auth?: boolean; signal?: AbortSignal } & AgentScope
+// evidence: false sends the bearer alone; the /me probe at login uses it before the key's kind is known
+type RequestOpts = { auth?: boolean; signal?: AbortSignal; evidence?: boolean } & AgentScope
 
 export class ApiClient {
   constructor(private cfg: GlobalConfig, private readonly fetchImpl: typeof fetch = fetch) {}
@@ -45,17 +48,21 @@ export class ApiClient {
     this.cfg.accessToken = tokens.accessToken
     this.cfg.refreshToken = tokens.refreshToken
     if (user) this.cfg.user = user
+    delete this.cfg.agentCredential
   }
 
   // Adopt a durable insta_ key as the credential (non-interactive `login --api-key`).
-  setApiKey(token: string, user?: GlobalConfig['user']): void {
-    storeApiKeyCredential(this.cfg, token, user)
+  setApiKey(token: string, user?: GlobalConfig['user'], agentCredential?: boolean): void {
+    storeApiKeyCredential(this.cfg, token, user, agentCredential)
   }
+
+  get agentCredential(): boolean { return this.cfg.agentCredential === true }
 
   clearSession(): void {
     delete this.cfg.accessToken
     delete this.cfg.refreshToken
     delete this.cfg.user
+    delete this.cfg.agentCredential
   }
 
   // Returns parsed body for status < 400 (incl. 202); throws ApiError otherwise.
@@ -84,7 +91,7 @@ export class ApiClient {
   private async fetch(method: string, path: string, body: unknown, auth: boolean, scope: RequestOpts = {}): Promise<RawResult> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Insta-Hints': '1', 'User-Agent': USER_AGENT }
     if (auth && this.cfg.accessToken) headers.Authorization = `Bearer ${this.cfg.accessToken}`
-    if (auth) Object.assign(headers, await agentHeaders(this, method, path, body === undefined ? '' : JSON.stringify(body), scope))
+    if (auth && scope.evidence !== false) Object.assign(headers, await agentHeaders(this, method, path, body === undefined ? '' : JSON.stringify(body), scope))
     const res = await this.fetchImpl(this.apiUrl + path, {
       method,
       headers,
