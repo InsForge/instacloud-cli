@@ -1,6 +1,6 @@
 import { ApiClient, ApiError, requireProject } from '../api.js'
-import { info, printJson, handleApproval, relayExitCode } from '../util.js'
-import { resolveComputeServiceId, q, parseVolumeGib } from './services.js'
+import { info, printJson, handleApproval, relayExitCode, writeFileAtomicSync } from '../util.js'
+import { resolveComputeServiceId, resolveSoleService, q, parseVolumeGib } from './services.js'
 
 type Opts = { branch?: string; group?: string; json?: boolean }
 
@@ -752,35 +752,105 @@ export async function computeLimits(serviceName: string | undefined, opts: Limit
 
 // ---- ssh (interactive sessions) --------------------------------------------
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { renderConfigBlock, upsertCertAuthority, upsertConfigBlock } from './ssh-config.js'
+import {
+  aliasFor, isSafeAlias, renderConfigBlock, upsertCertAuthority, upsertConfigBlock, type HostEntry,
+} from './ssh-config.js'
 
 /** Where this CLI keeps its own SSH material. Deliberately NOT ~/.ssh: we never
  *  touch a key the user already had, and a dedicated key pairs with
  *  IdentitiesOnly to avoid being identified by the wrong one. */
 export const instaSSHDir = () => join(homedir(), '.insta', 'ssh')
 export const instaKeyPath = () => join(instaSSHDir(), 'id_ed25519')
-export const instaCertPath = () => instaKeyPath() + '-cert.pub'
+/** One certificate file per alias. A certificate is issued for ONE service, so
+ *  a single shared file cannot serve a project with two compute services. */
+export const instaCertPath = (alias: string) => join(instaSSHDir(), `${alias}-cert.pub`)
+export const instaAliasStorePath = () => join(instaSSHDir(), 'aliases.json')
+
+/** The renewal-hook command prefix. ssh-config.ts appends the validated alias. */
+export const ENSURE_CERT_COMMAND = 'insta compute ssh --ensure-cert'
 
 type SSHOpts = LifeOpts & { setup?: boolean; ensureCert?: string; json?: boolean }
 
-/** Read a certificate's remaining life without shelling out for the common case. */
-export function certNeedsRenewal(certPath: string, now = Date.now(), marginMs = 5 * 60_000): boolean {
+/** What an alias stands for. The renewal hook is handed nothing but the alias —
+ *  no positional argument, no guarantee the cwd is even a linked project — so
+ *  everything needed to re-issue THE SAME certificate has to be recorded here.
+ *  Without the branch, a renewal silently picks a different branch's service. */
+export type AliasRecord = {
+  projectId: string
+  branch?: string
+  serviceId: string
+  host: string
+  username: string
+}
+
+export type AliasStore = Record<string, AliasRecord>
+
+/** Never throws: a missing or hand-mangled store must degrade to "nothing is
+ *  set up", not break `ssh` for every alias. */
+export function readAliasStore(path = instaAliasStorePath()): AliasStore {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as AliasStore) : {}
+  } catch {
+    return {}
+  }
+}
+
+export function writeAliasStore(store: AliasStore, path = instaAliasStorePath()): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  writeFileAtomicSync(path, JSON.stringify(store, null, 2) + '\n', { mode: 0o600 })
+}
+
+/** The ssh_config entries for everything set up so far. Rendered from the whole
+ *  store, not just the service being set up: our block is replaced wholesale,
+ *  so rendering one entry would delete the stanzas of every other service. */
+export function hostEntries(store: AliasStore): HostEntry[] {
+  return Object.entries(store)
+    .filter(([alias]) => isSafeAlias(alias))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([alias, r]) => ({ alias, hostName: r.host, user: r.username, certificateFile: instaCertPath(alias) }))
+}
+
+/**
+ * When `ssh-keygen -L` output says the certificate stops being valid, or
+ * `undefined` when that cannot be established.
+ *
+ * `undefined` is not "valid forever". Both the no-match case and a date the
+ * platform formats differently have to read as "cannot confirm", because a
+ * NaN comparison is false and would otherwise pass for healthy.
+ */
+export function parseCertValidUntil(keygenOutput: string): number | undefined {
+  const m = /Valid:.*to (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/.exec(keygenOutput)
+  if (!m || !m[1]) return undefined
+  const until = new Date(m[1]).getTime()
+  return Number.isNaN(until) ? undefined : until
+}
+
+/** Reads a certificate's validity. Injected in tests; ssh-keygen in production. */
+export type CertReader = (certPath: string) => string
+
+const sshKeygenReadCert: CertReader = (certPath) =>
+  execFileSync('ssh-keygen', ['-L', '-f', certPath], { encoding: 'utf8' })
+
+/**
+ * Whether the certificate at `certPath` should be re-issued.
+ *
+ * Every uncertain case renews. "Cannot confirm it is valid" and "it is valid"
+ * must not collapse into the same answer: an unnecessary renewal costs one
+ * HTTPS call, and the opposite costs a login that fails with no explanation.
+ */
+export function certNeedsRenewal(
+  certPath: string,
+  { now = Date.now(), marginMs = 5 * 60_000, read = sshKeygenReadCert }: { now?: number; marginMs?: number; read?: CertReader } = {},
+): boolean {
   if (!existsSync(certPath)) return true
   try {
-    // ssh-keygen is the only thing that can read a cert's validity honestly.
-    // A parse failure means renew: "cannot confirm it is valid" and "it is
-    // valid" must not collapse into the same answer.
-    const out = execFileSync('ssh-keygen', ['-L', '-f', certPath], { encoding: 'utf8' })
-    const m = /Valid:.*to (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/.exec(out)
-    if (!m || !m[1]) return true
-    const until = new Date(m[1]).getTime()
-    // NaN from an unparsable date must mean RENEW, not "valid forever": a
-    // comparison against NaN is false, which would read as healthy.
-    if (Number.isNaN(until)) return true
+    const until = parseCertValidUntil(read(certPath))
+    if (until === undefined) return true
     return until - marginMs <= now
   } catch {
     return true
@@ -798,62 +868,95 @@ function ensureKeyPair(): string {
   return readFileSync(key + '.pub', 'utf8').trim()
 }
 
-async function mintCert(api: ApiClient, projectId: string, serviceId: string, publicKey: string) {
+type CertResponse = { certificate: string; host: string; username: string; expiresAt: string; caPublicKey?: string }
+
+async function mintCert(api: ApiClient, projectId: string, serviceId: string, publicKey: string, alias: string): Promise<CertResponse> {
   const res = await api.rawRequest('POST', `/projects/${projectId}/services/${serviceId}/ssh-cert`, { publicKey })
   if (res.status < 200 || res.status >= 300) {
     throw new ApiError(res.status, res.body?.error ?? 'could not issue an ssh certificate')
   }
-  writeFileSync(instaCertPath(), res.body.certificate.trim() + '\n', { mode: 0o644 })
-  return res.body as { certificate: string; host: string; username: string; expiresAt: string; caPublicKey?: string }
+  writeFileAtomicSync(instaCertPath(alias), res.body.certificate.trim() + '\n', { mode: 0o644 })
+  return res.body as CertResponse
+}
+
+/** One line covers every node in every region, which is the whole reason for a
+ *  host CA: the TOFU alternative is a fingerprint per node and a REMOTE HOST
+ *  IDENTIFICATION HAS CHANGED for a random fraction of reconnects behind a load
+ *  balancer. Re-run on every renewal too, so a rotated CA is trusted before the
+ *  retired one stops signing rather than at the user's next `--setup`. */
+function installCertAuthority(hostPattern: string, caPublicKey: string): void {
+  const knownHosts = join(homedir(), '.ssh', 'known_hosts')
+  mkdirSync(dirname(knownHosts), { recursive: true, mode: 0o700 })
+  const existing = existsSync(knownHosts) ? readFileSync(knownHosts, 'utf8') : ''
+  writeFileAtomicSync(knownHosts, upsertCertAuthority(existing, hostPattern, caPublicKey), { mode: 0o600 })
+}
+
+function installConfigBlock(store: AliasStore): void {
+  const cfg = join(homedir(), '.ssh', 'config')
+  mkdirSync(dirname(cfg), { recursive: true, mode: 0o700 })
+  const existing = existsSync(cfg) ? readFileSync(cfg, 'utf8') : ''
+  const block = renderConfigBlock({
+    entries: hostEntries(store),
+    identityFile: instaKeyPath(),
+    ensureCertCommand: ENSURE_CERT_COMMAND,
+  })
+  // Backed up: this is the file that decides whether the user can ssh anywhere
+  // at all, and our block goes at the TOP of it.
+  writeFileAtomicSync(cfg, upsertConfigBlock(existing, block), { mode: 0o600, backup: true })
+}
+
+/**
+ * The renewal hook OpenSSH runs while PARSING the config, before it connects.
+ *
+ * Two properties, both load-bearing, and both about the fact that this runs on
+ * EVERY ssh invocation — including `scp`, `ssh -G` and an IDE's connections:
+ *
+ *  - Cheap when there is nothing to do. The local certificate is checked FIRST;
+ *    a valid one returns before any config, project or API work happens.
+ *  - Silent and fail-safe. An unlinked directory, an expired login or a network
+ *    outage must not print anything or fail the parse: the existing certificate
+ *    stays in place and the login then fails with SSH's own message, not a CLI
+ *    error spliced into the middle of an ssh session.
+ */
+async function ensureCertForAlias(alias: string): Promise<void> {
+  try {
+    if (!isSafeAlias(alias)) return
+    if (!certNeedsRenewal(instaCertPath(alias))) return
+    // The alias is the ONLY input: it carries the project, branch and service
+    // the certificate was issued for, so renewal cannot drift to another one.
+    const rec = readAliasStore()[alias]
+    if (!rec) return
+    const api = await ApiClient.load()
+    const out = await mintCert(api, rec.projectId, rec.serviceId, ensureKeyPair(), alias)
+    if (out.caPublicKey) installCertAuthority(hostPatternFor(out.host), out.caPublicKey)
+  } catch {
+    // Deliberately swallowed. See above.
+  }
 }
 
 export async function computeSSH(serviceName: string | undefined, opts: SSHOpts): Promise<void> {
+  if (opts.ensureCert !== undefined) return ensureCertForAlias(opts.ensureCert)
+
   const api = await ApiClient.load()
   const p = await requireProject()
   const branch = opts.branch ?? p.branch
   const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
-  const id = resolveComputeServiceId(services, serviceName)
+  const svc = resolveSoleService(services as ComputeRow[], 'compute', serviceName)
+  const alias = aliasFor(svc.name)
 
-  // --ensure-cert is the renewal hook OpenSSH runs while PARSING the config,
-  // before it connects. It must be silent on the happy path and must never
-  // fail the connection: a renewal that cannot run leaves the existing
-  // certificate in place, and the login then fails with SSH's own message
-  // rather than ours.
-  if (opts.ensureCert !== undefined) {
-    if (!certNeedsRenewal(instaCertPath())) return
-    try {
-      await mintCert(api, p.projectId, id, ensureKeyPair())
-    } catch {
-      // Deliberately swallowed. See above.
-    }
-    return
-  }
+  const out = await mintCert(api, p.projectId, svc.id, ensureKeyPair(), alias)
 
-  const pub = ensureKeyPair()
-  const out = await mintCert(api, p.projectId, id, pub)
+  const store = readAliasStore()
+  store[alias] = { projectId: p.projectId, ...(branch ? { branch } : {}), serviceId: svc.id, host: out.host, username: out.username }
+  writeAliasStore(store)
 
   if (opts.setup) {
-    const knownHosts = join(homedir(), '.ssh', 'known_hosts')
-    if (out.caPublicKey) {
-      mkdirSync(dirname(knownHosts), { recursive: true, mode: 0o700 })
-      const existing = existsSync(knownHosts) ? readFileSync(knownHosts, 'utf8') : ''
-      // One line covers every node in every region, which is the whole reason
-      // for a host CA: the TOFU alternative is a fingerprint per node and a
-      // REMOTE HOST IDENTIFICATION HAS CHANGED for a random fraction of
-      // reconnects behind a load balancer.
-      writeFileSync(knownHosts, upsertCertAuthority(existing, hostPatternFor(out.host), out.caPublicKey), { mode: 0o600 })
-    }
-    const cfg = join(homedir(), '.ssh', 'config')
-    const existing = existsSync(cfg) ? readFileSync(cfg, 'utf8') : ''
-    writeFileSync(cfg, upsertConfigBlock(existing, renderConfigBlock({
-      hostPattern: '*.insta',
-      identityFile: instaKeyPath(),
-      ensureCertCommand: 'insta compute ssh --ensure-cert %h',
-    })), { mode: 0o600 })
+    if (out.caPublicKey) installCertAuthority(hostPatternFor(out.host), out.caPublicKey)
+    installConfigBlock(store)
   }
 
-  if (opts.json) return printJson({ host: out.host, username: out.username, expiresAt: out.expiresAt })
-  info(`ssh ${out.username}@${out.host}`)
+  if (opts.json) return printJson({ alias, host: out.host, username: out.username, expiresAt: out.expiresAt })
+  info(`ssh ${alias}  →  ${out.username}@${out.host}`)
   info(`  certificate valid until ${out.expiresAt}`)
 }
 

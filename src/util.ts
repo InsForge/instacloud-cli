@@ -1,6 +1,35 @@
 // Output + small pure helpers (env serialization is unit-tested).
 import { createInterface } from 'node:readline'
 import { spawn } from 'node:child_process'
+import { chmodSync, copyFileSync, existsSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
+import { randomBytes } from 'node:crypto'
+
+/**
+ * Replace a file's contents in one step: write a sibling temporary file, then
+ * rename it over the target.
+ *
+ * For files the USER also owns — `~/.ssh/config`, `known_hosts` — a plain
+ * writeFileSync is a truncate followed by a write, so an interrupt, a full disk
+ * or a crash between the two leaves the user with a half a config and no way to
+ * ssh anywhere. rename(2) is atomic, so a reader sees either the old file or
+ * the new one. `backup` additionally leaves the previous contents recoverable.
+ */
+export function writeFileAtomicSync(path: string, data: string, opts: { mode?: number; backup?: boolean } = {}): void {
+  const mode = opts.mode ?? 0o600
+  const tmp = join(dirname(path), `.${basename(path)}.insta-${process.pid}-${randomBytes(6).toString('hex')}`)
+  try {
+    writeFileSync(tmp, data, { mode })
+    // writeFileSync applies `mode` only when it CREATES the file, and a umask
+    // can clear bits even then. ssh refuses a group-readable config outright.
+    chmodSync(tmp, mode)
+    if (opts.backup && existsSync(path)) copyFileSync(path, path + '.insta-bak')
+    renameSync(tmp, path)
+  } catch (e) {
+    try { unlinkSync(tmp) } catch { /* never created, or already gone */ }
+    throw e
+  }
+}
 
 /** How to launch the default browser for `url` on `platform`. Pure so the Windows encoding is
  *  testable. On Windows NO shell may ever parse the URL: cmd.exe splits at bare `&` (which #138
