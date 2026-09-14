@@ -25,7 +25,7 @@ import { readGlobal, writeGlobal } from '../config.js'
 import { resolveSpawnable } from '../spawn.js'
 import { info } from '../util.js'
 
-const INSTALL_SH = 'https://raw.githubusercontent.com/InsForge/insta-cli/main/install.sh'
+const INSTALL_SH = 'https://raw.githubusercontent.com/InsForge/instacloud-cli/main/install.sh'
 // The dist-tag document is the authoritative, tiny (~50 byte) answer for `latest`. The full
 // `latest` manifest is the fallback if that route is ever unavailable.
 const REGISTRY_DIST_TAGS = 'https://registry.npmjs.org/-/package/insta/dist-tags'

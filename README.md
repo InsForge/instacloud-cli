@@ -16,7 +16,7 @@ Native binary, no Node required (macOS / Linux / WSL). Installs to `~/.insta/bin
 verifies the download against `SHA256SUMS`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/InsForge/insta-cli/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-cli/main/install.sh | sh
 ```
 
 From npm:
@@ -48,7 +48,7 @@ On macOS/Linux without Node, the native-binary installer puts the `insta` CLI on
 skill + MCP steps it then runs still need Node — the skills tool runs via npx). Never run it
 on native Windows — PowerShell's `curl` alias and the WSL `bash` shim break it; use npx
 above, or download `insta-windows-x64.exe` from the
-[releases page](https://github.com/InsForge/insta-cli/releases):
+[releases page](https://github.com/InsForge/instacloud-cli/releases):
 
 ```bash
 curl -fsSL agents.instacloud.com | sh
@@ -74,7 +74,9 @@ insta deploy .
 opt-in, so you add only what you need. `secrets` writes the current branch's user-defined
 secrets to `./.env` (the postgres connection string is read with `insta db url`). `deploy .`
 builds the directory remotely and ships it to the branch's compute
-service; it needs a `Dockerfile`, but no local Docker.
+service, with no local Docker. Whether it needs a `Dockerfile` depends on where the
+service runs: on insta-compute it is optional, and a directory without one is built
+by nixpacks on the build gateway; on Fly-backed services one is still required.
 
 ## Authentication
 
@@ -119,6 +121,14 @@ only. Provider-minted service credentials (`DATABASE_URL`, `BUCKET_NAME`,
 `insta secrets bind` rules, and the postgres connection string is read directly with
 `insta db url` (or `insta db connect` for a psql session).
 
+Secrets can be scoped per compute service, so several services may each define the same name — and
+a flat bundle cannot carry two values for one name. Such a name is **withheld** from the bundle and
+reported on stderr (which services define it, and how to read one). `insta run` then **refuses to
+start the command** rather than let it inherit a stale value for that name from your shell; re-run
+it as `insta run --service compute/<name>` to inject exactly what that one service receives, or
+`--ignore-collisions` to run with the name removed from the child environment altogether.
+`insta secrets --service compute/<name>` reads the same scoped env into `.env`.
+
 ### Destructive actions can require approval
 
 Agent requests are governed by the project's `agent-policy`; human requests use normal RBAC.
@@ -149,7 +159,7 @@ other, so switching environments drops the stored session and you log in again.
 | control plane | `api.instacloud.com` | `api.staging.instacloud.com` |
 | MCP server | `mcp.instacloud.com/mcp` | `mcp.staging.instacloud.com/mcp` |
 | MCP registers as | `insta-cloud` | `insta-cloud-staging` |
-| agent skills | `InsForge/insta-skills` | `InsForge/insta-skills#devel` |
+| agent skills | `InsForge/instacloud-skills` | `InsForge/instacloud-skills#devel` |
 | CLI channel | latest stable release | newest prerelease, else stable |
 
 ```bash
@@ -172,7 +182,7 @@ That host is a CloudFront cache, so after a change to the installer it can serve
 previous copy for up to about a day. This form is equivalent and always current:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/InsForge/insta-cli/main/install.sh | sh -s -- --agents --staging
+curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-cli/main/install.sh | sh -s -- --agents --staging
 ```
 
 If the environment cannot be applied — an installed CLI older than 0.0.23 has no `insta
@@ -196,7 +206,7 @@ build never reaches a production installer.
 ## Commands
 
 `insta --help` is the authoritative list. For flags, approval gates and plan limits, see the
-[full command reference](https://github.com/InsForge/insta-skills/blob/main/insta/cli-reference.md).
+[full command reference](https://github.com/InsForge/instacloud-skills/blob/main/insta/cli-reference.md).
 
 | Command | What it covers |
 |---|---|
@@ -212,6 +222,7 @@ build never reaches a production installer.
 | `insta run <cmd>` | Run a command with the branch bundle injected, nothing written to disk |
 | `insta deploy [dir]` | Deploy a source directory (built remotely) or `--image <url>` |
 | `insta compute` | `start` · `stop` · `suspend` · `status` · `set-domain` · `check-domain` · `remove-domain` |
+| `insta domain` | Buy a domain through InstaCloud: `search` · `buy` · `attach` · `list` · `status` · `contact` |
 | `insta db` | `url` (print the postgres DSN) · `connect` (psql session) · `limits` · `stats` · `always-on` · `volume` |
 | `insta regions` | Regions available for postgres and compute |
 | `insta manifest` | Agent-legible view of every branch and its URLs |
@@ -229,6 +240,7 @@ build never reaches a production installer.
 |---|---|
 | `~/.insta/config.json` | API URL, access and refresh tokens, user, auto-update preference |
 | `./.insta/project.json` | Project id, org id, current branch |
+| `./.insta/link-plane.json` | The control-plane URL this machine linked against. Gitignored and per machine; a link made against a different control plane is refused rather than reused. The home directory is never a project |
 
 | Variable | Effect |
 |---|---|
@@ -243,7 +255,7 @@ build never reaches a production installer.
 ## Agent skills
 
 The `insta` skill and its task guides live in
-[InsForge/insta-skills](https://github.com/InsForge/insta-skills). `insta setup agent`
+[InsForge/instacloud-skills](https://github.com/InsForge/instacloud-skills). `insta setup agent`
 installs it user-globally for every coding agent on the machine. `insta project create` and
 `insta project link` additionally install the stack skills (Tigris, Better Auth) into the
 project, along with the `insta observe` credential-audit hook. Postgres needs no stack

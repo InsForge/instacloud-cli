@@ -6,7 +6,7 @@
 #
 # (agents.staging.instacloud.com is a CloudFront edge cache of this file, the staging sibling of
 #  agents.instacloud.com → agents.sh. The raw fallback also works:
-#  curl -fsSL https://raw.githubusercontent.com/InsForge/insta-cli/main/agents-staging.sh | sh)
+#  curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-cli/main/agents-staging.sh | sh)
 #
 # Identical to agents.sh except that everything it installs points at staging:
 #
@@ -15,7 +15,7 @@
 #   API      api.staging.instacloud.com   (us-west-1, a separate deployment from prod)
 #   MCP      mcp.staging.instacloud.com, registered as `insta-cloud-staging` so it can coexist
 #            with a production registration on the same machine
-#   skills   the staging ref of InsForge/insta-skills, so the agent reads skill text that
+#   skills   the staging ref of InsForge/instacloud-skills, so the agent reads skill text that
 #            describes the staging control plane
 #
 # One command, and every piece is staging. This script itself ships from `main` (same as
@@ -32,7 +32,7 @@ set -eu
 # only the exit code to go on.
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
-if ! curl -fsSL https://raw.githubusercontent.com/InsForge/insta-cli/main/install.sh -o "$tmp"; then
+if ! curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-cli/main/install.sh -o "$tmp"; then
   echo "error: could not download install.sh (network, or GitHub raw unavailable)" >&2
   exit 1
 fi

@@ -31,12 +31,12 @@ export const ENVS: Record<EnvName, EnvHosts> = {
   prod: {
     api: 'https://api.instacloud.com',
     mcp: 'https://mcp.instacloud.com/mcp',
-    skills: 'InsForge/insta-skills',
+    skills: 'InsForge/instacloud-skills',
   },
   staging: {
     api: 'https://api.staging.instacloud.com',
     mcp: 'https://mcp.staging.instacloud.com/mcp',
-    skills: 'InsForge/insta-skills#devel',
+    skills: 'InsForge/instacloud-skills#devel',
   },
 }
 

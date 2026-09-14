@@ -124,7 +124,8 @@ const sleepSeconds = (s: number) => new Promise<void>((r) => setTimeout(r, s * 1
 
 // Drives the device grant against the platform's Better Auth mount (/api/auth/device*) and
 // returns the approved session token. Injectable poster + wait keep this testable without a
-// network or real timers. Poll errors arrive as ApiError with the OAuth error code as message.
+// network or real timers. Poll errors arrive as ApiError with the OAuth error code as message
+// (or a bare `HTTP 429` from the platform's rate limiter, treated as slow_down).
 // `open` (the default browser-login path) launches the verification link locally on top of
 // printing it; without it (--device) the link is print-only, for a browser on another machine.
 export async function deviceGrant(post: DevicePoster, wait: (s: number) => Promise<void> = sleepSeconds, open?: (url: string) => boolean): Promise<string> {
@@ -170,6 +171,11 @@ export async function deviceGrant(post: DevicePoster, wait: (s: number) => Promi
       const code = e.message
       if (code === 'authorization_pending') continue
       if (code === 'slow_down') { interval += 5; continue } // RFC 8628 §3.5: back off by 5s
+      // The platform's per-IP limiter answers a bare HTTP 429 (no OAuth error code) when a poll
+      // trips it — seen on prod 2026-09-10 after ~8 min of steady 5s polling. That is the same
+      // instruction as slow_down: the code is still pending, so back off and keep waiting rather
+      // than abort a login the human may be one click away from approving.
+      if (e.status === 429) { interval += 5; continue }
       if (code === 'expired_token') break
       if (code === 'access_denied') throw new Error('login request was denied in the console')
       throw e // a definite API-level error (invalid_grant, …) — not retryable

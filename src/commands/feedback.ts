@@ -4,7 +4,7 @@
 // server, the platform, the skills, the docs. Never for problems in the app the user is building.
 //
 // The backend is InstaCloud dogfooding itself: the "InstaCloud Agent Feedback" project runs the
-// ingest service (InsForge/insta-feedback repo) on a postgres + compute pair. It is NOT the
+// ingest service (InsForge/instacloud-feedback repo) on a postgres + compute pair. It is NOT the
 // control-plane API on purpose — feedback must work logged-out, unlinked, and from insta-oss,
 // and a control-plane outage is exactly when we most want reports to still arrive.
 import { readFileSync, statSync } from 'node:fs'

@@ -14,7 +14,7 @@ import { ApiClient } from '../api.js'
 import { setupProjectAgentSession } from '../agent.js'
 import { readPersistedGlobal, resolveEnv, type GlobalConfig } from '../config.js'
 import { DEFAULT_ENV, ENVS, ENV_NAMES, envForApiUrl, envFromEnvVar, isEnvName, mcpServerName, type EnvName } from '../env.js'
-import { info, openUrl } from '../util.js'
+import { fail, info, openUrl } from '../util.js'
 import { isRunnableFile, resolveSpawnable } from '../spawn.js'
 import { loginDevice } from './auth.js'
 import { projectCreate, projectLink, slugifyName } from './project.js'
@@ -221,25 +221,25 @@ export async function resolveMcpTarget(): Promise<{ name: string; url: string }>
 
 // Headless fallback only (`--mcp-token`): the MCP config outlives the CLI's refreshable
 // session, so a static-header registration needs a durable `insta_` API token — minted once,
-// named after this machine. Returns null when not logged in (or the mint fails); the caller
-// prints the login hint.
+// named after this machine. Null means no credential, not a denied/failed mint. Let API errors
+// reach the command guard so their status/body survive and automation gets a nonzero exit.
 export type TokenMinter = () => Promise<string | null>
-const defaultMinter: TokenMinter = async () => {
-  try {
-    const api = await ApiClient.load()
-    if (!api.config.accessToken) return null
-    const { token } = await api.request<{ token?: string }>('POST', '/tokens', { name: `mcp-${os.hostname()}` })
-    return token ?? null
-  } catch { return null }
+export async function mintMcpToken(api: Pick<ApiClient, 'config' | 'request'>): Promise<string | null> {
+  if (!api.config.accessToken) return null
+  const result = await api.request<{ token?: unknown }>('POST', '/tokens', { name: `mcp-${os.hostname()}` })
+  if (typeof result?.token !== 'string' || !result.token.trim()) {
+    throw new Error('MCP token creation did not return a token; registration was not written')
+  }
+  return result.token
 }
+const defaultMinter: TokenMinter = async () => mintMcpToken(await ApiClient.load())
 
 // Register the insta-cloud remote MCP server with Claude Code (user scope, so it follows the
 // machine like the skill install above). Default is OAuth: register with NO credential — the
 // platform's Better Auth MCP authorization server is discovered via RFC 9728 and Claude runs
 // the browser flow on first `/mcp` use, so no static token ever lands on disk. `--mcp-token`
-// is the headless fallback (CI, no browser): mint a durable token into the header instead.
-// Idempotent — an existing registration is left alone. Best-effort: the skill install is the
-// primary outcome; agents without an MCP registry are covered by the skill alone.
+// avoids MCP browser auth by minting a durable token into the header instead, but requires
+// token-creation permission; agent governance still applies. Existing registrations stay intact.
 /** Outcome of the Claude Code MCP registration. `announce` controls the SUCCESS lines only —
  *  `setup agent` passes false and folds Claude Code into one combined MCP line with the
  *  config-file agents; `insta mcp install` keeps the default self-narration. Failure surfaces
@@ -268,9 +268,19 @@ export async function registerMcp(run: Runner = defaultRunner, mint: TokenMinter
   }
   if (announce) {
     info(`✓ MCP — ${name} registered with Claude Code (\`claude mcp list\` to verify)`)
-    if (!useToken) info('  first use: run `/mcp` in Claude Code and authorize in the browser (headless machines: `insta setup agent --mcp-token`)')
+    if (!useToken) info('  first use: run `/mcp` in Claude Code and authorize in the browser (--mcp-token requires token-creation permission)')
   }
   return 'new'
+}
+
+/** Callers decide when an optional probe becomes a required registration (after the interactive
+ *  login retry in setup). An OAuth registration for another client cannot satisfy --mcp-token. */
+export function requireMcpRegistration(status: McpStatus): boolean {
+  if (status === 'new' || status === 'existing') return true
+  fail(status === 'no-claude'
+    ? 'Claude Code MCP registration incomplete: Claude Code is not available on PATH'
+    : 'Claude Code MCP registration incomplete; see the error above')
+  return false
 }
 
 /** The environment `setup agent` should target, and whether the machine must be switched to it
@@ -444,7 +454,8 @@ export async function setupAgent(
   // Default into login on an interactive terminal (see shouldOfferLogin) BEFORE the MCP summary:
   // a --mcp-token registration needs the session to mint, so a post-login retry must land in the
   // same combined line instead of announcing Claude Code separately. Best-effort: a declined
-  // prompt or a failed browser flow leaves a completed setup plus the manual hint, never an error.
+  // prompt or a failed browser flow leaves the manual hint. Explicit --mcp-token still requires
+  // registration to finish; without that flag, login remains optional.
   const stored = await readStored()
   let loggedIn = !!(stored.accessToken || stored.user)
   if (shouldOfferLogin(!!opts.yes, loggedIn, loginFlow.stdinTty, loginFlow.stdoutTty)) {
@@ -452,13 +463,16 @@ export async function setupAgent(
       try {
         await loginFlow.login()
         loggedIn = true
-        if (opts.mcpToken) claude = await registerMcp(run, mint, true, false)
       } catch (e) {
-        info(`  login did not complete (${e instanceof Error ? e.message : String(e)}) — no problem, setup itself is done.`)
+        info(`  login did not complete (${e instanceof Error ? e.message : String(e)})`)
         info('  run `insta login` to try again — the sign-in link it prints works from a browser on any device.')
       }
+      // Keep token-creation errors outside the browser-login catch. A signed-in caller can be
+      // forbidden from minting; relabeling that as a login failure hides the real platform error.
+      if (opts.mcpToken && loggedIn) claude = await registerMcp(run, mint, true, false)
     }
   }
+  if (opts.mcpToken && !requireMcpRegistration(claude)) return
   // --project / --create: bind this directory to a project inside the SAME process. Never split
   // this back into `setup agent && insta project <cmd>` as one paste: no shell joiner survives
   // every Windows shell, and in shells without bracketed paste the queued second line is eaten
@@ -497,7 +511,7 @@ export async function setupAgent(
   const mcpOk = claude === 'new' || claude === 'existing' || others.length > 0
   info(`${summarizeInstall(res.output ?? '')} — ready to use InstaCloud${mcpOk ? ' (CLI + skill + MCP; restart any open tools)' : ''}`)
   if (claude === 'new' && !opts.mcpToken) {
-    info('  Claude Code first use: run `/mcp` and authorize in the browser (headless machines: `insta setup agent --mcp-token`)')
+    info('  Claude Code first use: run `/mcp` and authorize in the browser (--mcp-token requires token-creation permission)')
   }
   // The user's next move: one concrete action, not a concept. The agents drive `insta` themselves
   // (project create/link, deploys, login via the device flow), so the human just asks for the

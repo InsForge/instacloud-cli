@@ -1,9 +1,9 @@
 // The installer's "Next steps" banner is the CLI's onboarding surface — and, because the binary
 // upgrade channel re-runs `curl install.sh | sh` with inherited stdio, its upgrade banner too. It
-// used to recommend `insta deploy . --port 3000` unqualified, which errors for any app without a
-// Dockerfile (the common "just ship my app" case): a directory deploy builds the directory's own
-// Dockerfile, and the no-Dockerfile nixpacks lane is server-side, GitHub-connected repos only.
-// These assertions pin the banner to what the CLI can actually do.
+// used to recommend `insta deploy . --port 3000` unqualified, back when that errored for any app
+// without a Dockerfile. The requirement is now PER-TARGET: optional on insta-compute, where the
+// gateway builds the directory with nixpacks, still required on a Fly-backed service. A banner
+// cannot know which the reader has, so these assertions pin it to claiming neither.
 import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 
@@ -16,8 +16,11 @@ describe('installer next-steps banner', () => {
     expect(deployLine).toBeDefined()
   })
 
-  it('says a directory deploy needs a Dockerfile — it must not promise what deploy rejects', () => {
-    expect(deployLine.toLowerCase()).toContain('dockerfile')
+  // The requirement is now per-target: optional on insta-compute, required on Fly. A banner cannot
+  // know which the reader has, so it must claim NEITHER rather than promise what deploy rejects.
+  it('makes no Dockerfile claim either way, since the answer depends on the target', () => {
+    expect(deployLine.toLowerCase()).not.toContain('dockerfile')
+    expect(deployLine.toLowerCase()).not.toContain('no docker')
   })
 
   it('points at `insta build` first, so the user sees the plan before the deploy can dead-end', () => {

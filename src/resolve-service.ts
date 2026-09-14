@@ -18,8 +18,7 @@ export type ServiceKind = {
   needsImage?: boolean
 }
 
-// Same order, labels and default names as the dashboard's Add Service menu. Github Repo is left
-// out: the platform has no repo path yet, so a CLI entry could only say "coming soon".
+// The CLI connects repos to existing services only; "GitHub Repo" is not a service kind here.
 export const SERVICE_KINDS: readonly ServiceKind[] = [
   { id: 'image', label: 'Docker Image', type: 'compute', hint: 'run an existing container image', needsImage: true },
   { id: 'postgres', label: 'Postgres', type: 'postgres', hint: 'relational DB, usable as soon as it is added', defaultName: 'main-db' },

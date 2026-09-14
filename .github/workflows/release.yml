@@ -114,9 +114,10 @@ jobs:
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             dist-bin/insta-* dist-bin/SHA256SUMS install.sh
 
-  # npm half of the release: publishes `insta` to the registry with a GRANULAR AUTOMATION token
-  # (repo secret NPM_TOKEN — bypasses the interactive 2FA/OTP that blocks CI). Gated on the
-  # binaries building, tag pushes only. --provenance attests the build (public repo + OIDC).
+  # npm half of the release: publishes `insta` to the registry via OIDC trusted publishing — no
+  # token secret, no NPM_TOKEN, and nothing to rotate (the step comment below carries the detail
+  # and the one setting it depends on). Gated on the binaries building, tag pushes only.
+  # --provenance attests the build (public repo + OIDC).
   publish-npm:
     needs: release
     if: startsWith(github.ref, 'refs/tags/')
@@ -131,7 +132,10 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
       # OIDC trusted publishing: npm trusts this workflow's identity directly (configured on
-      # npmjs.com → package `insta` → Trusted Publisher: InsForge/insta-cli, release.yml).
+      # npmjs.com → package `insta` → Trusted Publisher). That setting MUST name
+      # InsForge/instacloud-cli, release.yml. npm does NOT follow GitHub repo renames, so if it
+      # still says the pre-rename InsForge/insta-cli this publish step fails — check it before
+      # the next release.
       # No token secret. Needs npm ≥ 11.5 for the OIDC exchange; Node 22 bundles an older one.
       - run: npm install -g npm@latest
       - run: npm ci

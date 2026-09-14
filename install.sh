@@ -2,11 +2,11 @@
 # InstaCloud CLI installer. Downloads the prebuilt native binary for your platform from GitHub
 # releases, verifies it against SHA256SUMS, and installs it. macOS / Linux / WSL.
 #
-#   curl -fsSL https://raw.githubusercontent.com/InsForge/insta-cli/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-cli/main/install.sh | sh
 #
 # Agent one-liner (installs the CLI AND sets up coding-agent skills; on a human terminal it also
 # offers the browser login — unattended runs stay fully non-interactive):
-#   curl -fsSL https://raw.githubusercontent.com/InsForge/insta-cli/main/agents.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-cli/main/agents.sh | sh
 #   (equivalent to piping this script with:  sh -s -- --agents; add -y for a hard non-interactive run)
 #
 # Flags:
@@ -52,7 +52,7 @@ case "$ENV_NAME" in
   *) echo "error: unknown environment '$ENV_NAME' (expected prod or staging)" >&2; exit 1 ;;
 esac
 
-REPO="InsForge/insta-cli"
+REPO="InsForge/instacloud-cli"
 BIN="insta"
 INSTALL_DIR="${INSTA_INSTALL_DIR:-$HOME/.insta/bin}"
 
@@ -283,10 +283,10 @@ fi
 echo "Next steps:"
 echo "  insta login                    # connect to the cloud (or run insta-oss locally to skip)"
 echo "  insta project create demo      # postgres + storage + compute, provisioned in one shot"
-# A directory deploy needs a Dockerfile in the directory (there is no local no-Dockerfile lane), so
-# the banner says so rather than recommending a command that errors for a Dockerfile-less app.
+# Whether a directory deploy needs a Dockerfile depends on the target: optional on insta-compute
+# (nixpacks builds it server-side), still required on Fly. The banner does not promise either.
 echo "  insta build .                  # check what would ship (Dockerfile, start command, port)"
-echo "  insta deploy . --port 3000     # ship your app -- needs a Dockerfile -- and get a live URL"
+echo "  insta deploy . --port 3000     # ship your app and get a live URL"
 echo "  insta branch create preview    # clone db + storage + app into an isolated env"
 echo
 echo "Your coding agents now know InstaCloud — you can just ask them to do the above."

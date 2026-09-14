@@ -36,7 +36,7 @@ test('installSkills adds insta + the service stack skills, non-interactively, an
   expect(calls.map((c) => c.cmd)).toEqual(['npx', 'npx', 'npx'])
   // Leading -y is npx's OWN auto-install flag; the trailing -y answers the skills tool.
   expect(calls.map((c) => c.args.join(' '))).toEqual([
-    '-y skills add InsForge/insta-skills -s insta -a claude-code -a codex -y --copy',
+    '-y skills add InsForge/instacloud-skills -s insta -a claude-code -a codex -y --copy',
     '-y skills add tigrisdata/skills -s tigris-object-operations -s file-storage -s tigris-sdk-guide -s tigris-security-access-control -s tigris-image-optimization -s tigris-s3-migration -s tigris-static-assets -s tigris-agent-kit -a claude-code -a codex -y --copy',
     '-y skills add better-auth/skills -s better-auth-best-practices -s email-and-password-best-practices -s better-auth-security-best-practices -a claude-code -a codex -y --copy',
   ])

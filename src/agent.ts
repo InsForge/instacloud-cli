@@ -64,16 +64,33 @@ export async function loadAgentSession(apiUrl: string, projectId: string, cwd = 
   } catch { throw new Error(guidance) }
 }
 
-export async function agentHeaders(api: SessionApi, method: string, path: string, rawBody: string): Promise<Record<string, string>> {
+// Which project a request is scoped to, when the path itself does not say. Some project-owned
+// resources are addressed by their own id (e.g. GET /template-deployments/:id): the platform
+// resolves the owning project from the row and rejects a session bound to any other project —
+// including the projectless bootstrap session — so the caller has to name the project it means.
+export type AgentScope = { projectId?: string }
+
+// Routes the CLI may call on an account-level (bootstrap) session, by first path segment. Every
+// other route is project-owned: either its path names the project or the caller passes
+// scope.projectId. A miss fails HERE, naming the route, instead of on the platform as a
+// "for a different project" 403 whose setup hint cannot help — keep this list in step with the
+// account-level paths in src/commands/.
+export const ACCOUNT_ROUTES: ReadonlySet<string> = new Set(['agent', 'auth', 'me', 'orgs', 'regions', 'templates', 'tokens', 'github'])
+
+export async function agentHeaders(api: SessionApi, method: string, path: string, rawBody: string, scope: AgentScope = {}): Promise<Record<string, string>> {
   if (!mode) return {}
   if (canonicalTarget(path) === '/agent/sessions' && method === 'POST') return {
     'Insta-Actor-Type': 'agent', 'Insta-Agent-Source': mode.source, 'Insta-Agent-Client': mode.client,
   }
   const target = canonicalTarget(path)
   const match = target.match(/^\/projects\/([^/?]+)/)
+  const projectId = scope.projectId ?? (match ? decodeURIComponent(match[1]!) : undefined)
+  if (!projectId && !ACCOUNT_ROUTES.has(target.split('/')[1]?.split('?')[0] ?? '')) {
+    throw new Error(`${method.toUpperCase()} ${target} is a project route but no project was given — this is an insta CLI bug; please report it with \`insta feedback\``)
+  }
   // Account reads/project creation have no project policy yet. Mint a short-lived bootstrap
   // assertion in memory. It cannot access project routes; never downgrade to a human request.
-  const session = match ? await loadAgentSession(api.apiUrl, decodeURIComponent(match[1]!)) : await issueAgentSession(api)
+  const session = projectId ? await loadAgentSession(api.apiUrl, projectId) : await issueAgentSession(api)
   const timestamp = String(Math.floor(Date.now() / 1000))
   const nonce = randomUUID()
   const proof = [method.toUpperCase(), target, hash(rawBody), session.agentSessionId, timestamp, nonce, mode.source, session.client].join('\n')

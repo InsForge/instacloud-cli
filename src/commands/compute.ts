@@ -260,7 +260,7 @@ export function domainConflictMessage(host: string, e: ApiError, services: Compu
 // Resolve branch + target service, so every domain verb names the service AND its region, and an
 // ambiguous project is refused with the list instead of the platform's `default` fallback picking
 // one silently.
-async function domainTarget(api: DomainApi, projectId: string, branch: string | undefined, host: string, group?: string): Promise<{ target: ComputeRow; services: ComputeRow[] }> {
+export async function domainTarget(api: DomainApi, projectId: string, branch: string | undefined, host: string, group?: string): Promise<{ target: ComputeRow; services: ComputeRow[] }> {
   const { services } = await api.request('GET', `/projects/${projectId}/services${q(branch)}`)
   return { target: resolveDomainTarget(services, host, group), services }
 }
@@ -269,8 +269,8 @@ async function domainTarget(api: DomainApi, projectId: string, branch: string | 
 // explicit `group` on every call, --json passthrough, 409 mapping — is testable without a network
 // mock (r2d2 round 1 Suggestion). Production passes a real ApiClient.
 export type DomainApi = Pick<ApiClient, 'request' | 'rawRequest'>
-export type DomainDeps = { api: DomainApi; project: { projectId: string; branch?: string } }
-async function domainDeps(deps?: DomainDeps): Promise<DomainDeps> {
+export type DomainDeps = { api: DomainApi; project: { projectId: string; orgId?: string; branch?: string } }
+export async function domainDeps(deps?: DomainDeps): Promise<DomainDeps> {
   if (deps) return deps
   const [api, project] = [await ApiClient.load(), await requireProject()]
   return { api, project }

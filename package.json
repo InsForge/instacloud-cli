@@ -1,6 +1,6 @@
 {
   "name": "insta",
-  "version": "0.0.63",
+  "version": "0.0.70",
   "type": "module",
   "description": "InstaCloud CLI — a thin client of the platform control-plane API.",
   "keywords": [
@@ -12,13 +12,13 @@
     "platform"
   ],
   "license": "Apache-2.0",
-  "homepage": "https://github.com/InsForge/insta-cli#readme",
+  "homepage": "https://github.com/InsForge/instacloud-cli#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/InsForge/insta-cli.git"
+    "url": "git+https://github.com/InsForge/instacloud-cli.git"
   },
   "bugs": {
-    "url": "https://github.com/InsForge/insta-cli/issues"
+    "url": "https://github.com/InsForge/instacloud-cli/issues"
   },
   "bin": {
     "insta": "dist/index.js"
@@ -44,6 +44,8 @@
   "dependencies": {
     "@clack/prompts": "^0.9.1",
     "commander": "^12.1.0",
+    "fflate": "0.8.3",
+    "ignore": "7.0.9",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

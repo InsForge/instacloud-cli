@@ -1,14 +1,22 @@
 // CLI config: global (~/.insta/config.json: api url + tokens) and per-project (./.insta/project.json).
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { ensureGitignore } from './gitignore.js'
+import { die } from './util.js'
 import { DEFAULT_ENV, ENVS, envForApiUrl, envFromEnvVar, normalizeUrl, type EnvName } from './env.js'
 
 const GLOBAL_DIR = join(homedir(), '.insta')
 const GLOBAL_FILE = join(GLOBAL_DIR, 'config.json')
 const PROJECT_DIR = '.insta'
 const PROJECT_FILE = 'project.json'
+// Machine-local, gitignored: which project this machine linked here, and on which control plane.
+// It is NOT in project.json because that file is the team's committed binding — a URL chosen by one
+// machine (a staging switch, a local box, a transient INSTA_API_URL) would make every teammate's
+// CLI treat the shared link as foreign. It records the project id too, because project.json is
+// committed and this file is not: a pull or checkout can replace the project underneath it.
+const LINK_PLANE_FILE = 'link-plane.json'
 
 export type GlobalConfig = {
   apiUrl: string
@@ -105,11 +113,49 @@ export async function writeGlobal(c: GlobalConfig): Promise<void> {
   await writeFile(GLOBAL_FILE, JSON.stringify(c, null, 2))
 }
 
+/** The home directory is never a project root. `~/.insta/` is this CLI's GLOBAL config directory,
+ *  so a project.json there is not a project link: honouring one made every directory under the home
+ *  dir inherit it, and `insta project link` run anywhere below home silently overwrote it. */
+function isHomeDir(dir: string): boolean {
+  return canonicalDir(dir) === canonicalDir(homedir())
+}
+
+/** A directory's filesystem identity rather than its spelling: the native real path, which resolves
+ *  symlinks and returns the on-disk case on case-insensitive filesystems (macOS, Windows). Comparing
+ *  spellings let a symlinked or differently-cased path to home through the home check. A path that
+ *  doesn't exist has no identity to resolve, so it falls back to its resolved spelling. */
+function canonicalDir(dir: string): string {
+  try {
+    return realpathSync.native(resolve(dir))
+  } catch {
+    return resolve(dir)
+  }
+}
+
+export const HOME_LINK_REFUSAL = 'refusing to link the home directory — ~/.insta is the insta CLI\'s global config, not a project. Run this inside a project directory'
+
+/** Where a link written from `cwd` lands: the existing project root, or `cwd` itself. */
+async function linkTarget(cwd: string): Promise<string> {
+  return (await findProjectRoot(cwd)) ?? resolve(cwd)
+}
+
+/** True when a link written from `cwd` would land in the home directory, which never holds one.
+ *  Lets a caller refuse BEFORE it does anything else with side effects. */
+export async function isHomeLinkTarget(cwd = process.cwd()): Promise<boolean> {
+  return isHomeDir(await linkTarget(cwd))
+}
+
 /** Git-style ancestor lookup: the nearest directory at-or-above `cwd` containing
- *  .insta/project.json — so "link once" works from any subdirectory of the project. */
+ *  .insta/project.json — so "link once" works from any subdirectory of the project. The search
+ *  stops at the home directory (see isHomeDir): neither home nor anything above it is a project
+ *  root for a directory inside home. */
 export async function findProjectRoot(cwd = process.cwd()): Promise<string | null> {
   let dir = resolve(cwd)
   for (;;) {
+    // Stop AT the home directory rather than skipping it: a link above home is not a project for
+    // home or anything below it, and climbing past home let `insta project link` run in ~ resolve
+    // to, and overwrite, an ancestor's link after the home-directory check had passed.
+    if (isHomeDir(dir)) return null
     try {
       await readFile(join(dir, PROJECT_DIR, PROJECT_FILE), 'utf8')
       return dir
@@ -120,30 +166,164 @@ export async function findProjectRoot(cwd = process.cwd()): Promise<string | nul
   }
 }
 
-export async function readProject(cwd = process.cwd()): Promise<ProjectConfig | null> {
+/** Why a link is not for this control plane. `plane`: this machine linked this project against a
+ *  different control plane. `changed`: project.json names a different project than the one this
+ *  machine recorded — it was replaced by a pull or checkout, so its control plane is unknown. */
+export type ForeignLink = {
+  reason: 'plane' | 'changed'
+  file: string
+  projectId: string
+  linkedProjectId: string
+  linkedApiUrl: string
+  currentApiUrl: string
+}
+
+/** The link that applies to `cwd`, and whether it was made against a DIFFERENT control plane. A
+ *  project id means nothing on another control plane (cloud, staging and every insta-oss box each
+ *  have their own), and the CLI used to reuse a link against whatever API it was pointed at. */
+export async function resolveProjectLink(cwd = process.cwd()): Promise<{ link: ProjectConfig; foreign?: ForeignLink } | null> {
   // Linkless targeting (CI / one-offs / agents): INSTA_PROJECT_ID resolves the project with no
   // link file, and beats one when both exist — an explicit parameter outranks ambient state.
   if (process.env.INSTA_PROJECT_ID) {
     return {
-      projectId: process.env.INSTA_PROJECT_ID,
-      orgId: process.env.INSTA_ORG_ID ?? '',
-      branch: process.env.INSTA_BRANCH ?? 'main',
+      link: {
+        projectId: process.env.INSTA_PROJECT_ID,
+        orgId: process.env.INSTA_ORG_ID ?? '',
+        branch: process.env.INSTA_BRANCH ?? 'main',
+      },
     }
   }
   const root = await findProjectRoot(cwd)
   if (!root) return null
+  let link: ProjectConfig
   try {
-    return JSON.parse(await readFile(join(root, PROJECT_DIR, PROJECT_FILE), 'utf8')) as ProjectConfig
+    link = JSON.parse(await readFile(join(root, PROJECT_DIR, PROJECT_FILE), 'utf8')) as ProjectConfig
+  } catch {
+    return null
+  }
+  // No sidecar — a link from before this existed, or a teammate who just cloned — resolves as it
+  // always did: there is nothing to say which control plane it belongs to.
+  const record = await readLinkPlane(root)
+  if (record) {
+    const current = safeUrl((await readGlobal()).apiUrl)
+    const base = {
+      file: join(root, PROJECT_DIR, PROJECT_FILE), projectId: String(link.projectId),
+      linkedProjectId: record.projectId, linkedApiUrl: record.apiUrl, currentApiUrl: current,
+    }
+    // The record vouches for the project it was written for, and only that one. A record for
+    // another project says nothing about this one: trusting it would send this project to the
+    // control plane of the project it replaced, or refuse it for a reason that is not true. Fail
+    // closed with the real reason instead.
+    if (record.projectId !== base.projectId) return { link, foreign: { reason: 'changed', ...base } }
+    if (normalizeUrl(record.apiUrl) !== normalizeUrl(current)) return { link, foreign: { reason: 'plane', ...base } }
+  }
+  return { link }
+}
+
+/** The link for this control plane, or null. A foreign link is NOT returned (it names a project
+ *  that does not exist here); callers that must act on a project use requireProject, which stops
+ *  with guidance instead of treating a foreign link as "unlinked". */
+export async function readProject(cwd = process.cwd()): Promise<ProjectConfig | null> {
+  const r = await resolveProjectLink(cwd)
+  if (!r) return null
+  if (r.foreign) {
+    if (!warnedForeignLinks.has(r.foreign.file)) {
+      warnedForeignLinks.add(r.foreign.file)
+      process.stderr.write(`note: ${foreignLinkMessage(r.foreign)}\n`)
+    }
+    return null
+  }
+  return r.link
+}
+
+const warnedForeignLinks = new Set<string>()
+
+export function foreignLinkMessage(f: ForeignLink): string {
+  // Every field can come from a file (a committed project.json, a copied or hand-edited record),
+  // so all of it is stripped of control characters before it reaches a terminal.
+  const file = safeText(f.file)
+  const id = safeText(f.projectId)
+  const linked = safeUrl(f.linkedApiUrl)
+  const current = safeUrl(f.currentApiUrl)
+  if (f.reason === 'changed') {
+    return `${file} now links project ${id}, but this machine linked project ${safeText(f.linkedProjectId)} there, on ${linked}. `
+      + `The link changed since (a pull or checkout), so its control plane is unknown. `
+      + `Confirm it for ${current} with \`insta project link ${id}\`.`
+  }
+  return `${file} links project ${id} on ${linked}, but the CLI is pointed at ${current}. `
+    + `Link this directory for ${current} with \`insta project link <id>\`, or point the CLI back at ${linked}.`
+}
+
+async function readLinkPlane(root: string): Promise<{ projectId: string; apiUrl: string } | null> {
+  try {
+    const raw = JSON.parse(await readFile(join(root, PROJECT_DIR, LINK_PLANE_FILE), 'utf8')) as { projectId?: unknown; apiUrl?: unknown }
+    // Validated, not cast: a malformed record is ignored rather than crashing every command. A
+    // record with no project id cannot say which project it vouches for, so it is ignored too.
+    if (!raw || typeof raw.projectId !== 'string' || !raw.projectId || typeof raw.apiUrl !== 'string' || !raw.apiUrl) return null
+    // Untrusted input (it may have been copied or edited), so sanitized before it is compared or printed.
+    return { projectId: raw.projectId, apiUrl: safeUrl(raw.apiUrl) }
   } catch {
     return null
   }
 }
 
+/** Text safe to echo to a terminal: C0 and C1 control characters and DEL removed — ESC and the
+ *  single-byte C1 introducers (U+009B CSI among them) alike, so no escape sequence survives. */
+function safeText(text: string): string {
+  return String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+}
+
+/** A control-plane URL safe to persist and to print: control characters removed, surrounding
+ *  whitespace trimmed, and any userinfo (INSTA_API_URL may carry credentials) removed.
+ *
+ *  Userinfo is removed with the same WHATWG parser fetch uses, not with a pattern. That parser is
+ *  lenient in ways a pattern keeps missing: it accepts leading whitespace, `\` for `/`, and a
+ *  missing `//` on special schemes, and each of those defeated an anchored pattern while fetch
+ *  would still have sent the credentials. A value the parser rejects is never requested, but it can
+ *  still be stored or printed, so everything up to its last `@` is dropped. The same goes for a
+ *  value that parses under any other scheme: `user:token@host` parses as scheme `user:` with the
+ *  credentials in its path, where clearing username and password removes nothing. */
+export function safeUrl(url: string): string {
+  const text = safeText(url).trim()
+  const pastLastAt = () => (text.includes('@') ? text.slice(text.lastIndexOf('@') + 1) : text)
+  let parsed: URL
+  try {
+    parsed = new URL(text)
+  } catch {
+    return pastLastAt()
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return pastLastAt()
+  if (!parsed.username && !parsed.password) return text
+  parsed.username = ''
+  parsed.password = ''
+  return parsed.href
+}
+
 /** Writes to the existing project root when inside a linked project (branch switches from a
- *  subdirectory must not mint a nested link); a fresh `link` in an unlinked tree writes to cwd. */
+ *  subdirectory must not mint a nested link); a fresh `link` in an unlinked tree writes to cwd.
+ *  Records the control plane in the machine-local sidecar beside it. Never writes into the home
+ *  directory: `~/.insta/` is the global config, not a project. */
 export async function writeProject(c: ProjectConfig, cwd = process.cwd()): Promise<void> {
-  const target = (await findProjectRoot(cwd)) ?? cwd
+  const target = await linkTarget(cwd)
+  if (isHomeDir(target)) die(HOME_LINK_REFUSAL)
+  const { apiUrl } = await readGlobal()
   await mkdir(join(target, PROJECT_DIR), { recursive: true })
   ensureGitignore(target, ['.insta/agent-session.json'], '# Local agent credentials')
+  ensureGitignore(target, [`.insta/${LINK_PLANE_FILE}`], '# Local: the control plane this machine linked against')
   await writeFile(join(target, PROJECT_DIR, PROJECT_FILE), JSON.stringify(c, null, 2))
+  // Owner-only, like agent-session.json: it can name a private self-hosted box. writeFile's mode
+  // applies only when it creates the file, so an existing record is chmod-ed too.
+  const record = join(target, PROJECT_DIR, LINK_PLANE_FILE)
+  await writeFile(record, JSON.stringify({ projectId: c.projectId, apiUrl: safeUrl(apiUrl) }, null, 2), { mode: 0o600 })
+  await chmod(record, 0o600)
+}
+
+/** Save a link that auto-resolution chose. Unlike an explicit `insta project link`, the command it
+ *  was resolved for must still run: in the home directory the choice is used for this command and
+ *  simply not remembered, rather than showing the picker and then failing the command. Returns
+ *  whether the link was saved. */
+export async function persistAutoLink(c: ProjectConfig, cwd = process.cwd()): Promise<boolean> {
+  if (await isHomeLinkTarget(cwd)) return false
+  await writeProject(c, cwd)
+  return true
 }

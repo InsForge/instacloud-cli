@@ -1,10 +1,10 @@
 // Thin API client over the platform control-plane. Handles bearer auth + one-shot refresh on 401.
 // 2xx (including 202 approval_required) returns the parsed body; >=400 throws ApiError.
-import { readGlobal, writeGlobal, readProject, writeProject, type GlobalConfig, type ProjectConfig } from './config.js'
+import { readGlobal, writeGlobal, readProject, persistAutoLink, resolveProjectLink, foreignLinkMessage, type GlobalConfig, type ProjectConfig } from './config.js'
 import { autoResolveProject, promptChoice, type ProjectItem } from './resolve-project.js'
 import { die } from './util.js'
 import { USER_AGENT } from './version.js'
-import { agentHeaders, agentMode } from './agent.js'
+import { agentHeaders, agentMode, type AgentScope } from './agent.js'
 
 export class ApiError extends Error {
   // body carries the parsed error payload for callers that branch on machine-readable errors
@@ -23,6 +23,11 @@ export function storeApiKeyCredential(cfg: GlobalConfig, token: string, user?: G
 }
 
 type RawResult = { status: number; body: any }
+// projectId: the project this request acts on when the path does not carry /projects/:id, so agent
+// mode signs with that project's session instead of a projectless bootstrap one (see agentHeaders).
+// `signal` bounds one request: a poll loop hands in the time it has left, so a stalled endpoint
+// cannot hold the CLI past the caller's own deadline.
+type RequestOpts = { auth?: boolean; signal?: AbortSignal } & AgentScope
 
 export class ApiClient {
   constructor(private cfg: GlobalConfig, private readonly fetchImpl: typeof fetch = fetch) {}
@@ -54,41 +59,37 @@ export class ApiClient {
   }
 
   // Returns parsed body for status < 400 (incl. 202); throws ApiError otherwise.
-  async request<T = any>(method: string, path: string, body?: unknown, opts: { auth?: boolean } = {}): Promise<T> {
-    const res = await this.raw(method, path, body, opts.auth ?? true)
+  async request<T = any>(method: string, path: string, body?: unknown, opts: RequestOpts = {}): Promise<T> {
+    const res = await this.raw(method, path, body, opts.auth ?? true, opts)
     if (agentMode() && res.status === 202 && res.body?.status === 'approval_required') throw new AgentApprovalRequired(res.body)
     if (res.status >= 400) throw new ApiError(res.status, res.body?.error ?? `HTTP ${res.status}`, res.body)
     return res.body as T
   }
 
   // Like request but returns {status, body} so callers can branch on 202 (approval_required).
-  async rawRequest(method: string, path: string, body?: unknown, opts: { auth?: boolean; signal?: AbortSignal } = {}): Promise<RawResult> {
-    const res = await this.raw(method, path, body, opts.auth ?? true, opts.signal)
+  async rawRequest(method: string, path: string, body?: unknown, opts: RequestOpts = {}): Promise<RawResult> {
+    const res = await this.raw(method, path, body, opts.auth ?? true, opts)
     if (res.status >= 400) throw new ApiError(res.status, res.body?.error ?? `HTTP ${res.status}`, res.body)
     return res
   }
 
-  private async raw(method: string, path: string, body: unknown, auth: boolean, signal?: AbortSignal): Promise<RawResult> {
-    let r = await this.fetch(method, path, body, auth, signal)
+  private async raw(method: string, path: string, body: unknown, auth: boolean, scope: RequestOpts = {}): Promise<RawResult> {
+    let r = await this.fetch(method, path, body, auth, scope)
     if (r.status === 401 && auth && this.cfg.refreshToken) {
-      if (await this.refresh()) r = await this.fetch(method, path, body, auth, signal)
+      if (await this.refresh(scope.signal)) r = await this.fetch(method, path, body, auth, scope)
     }
     return r
   }
 
-  // `signal` is threaded rather than wrapped in a Promise.race by the caller:
-  // a race leaves the request in flight, so the CLI would return but the
-  // process would stay alive until the socket settled -- exactly the hang the
-  // deadline exists to prevent. Aborting frees the event loop.
-  private async fetch(method: string, path: string, body: unknown, auth: boolean, signal?: AbortSignal): Promise<RawResult> {
+  private async fetch(method: string, path: string, body: unknown, auth: boolean, scope: RequestOpts = {}): Promise<RawResult> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Insta-Hints': '1', 'User-Agent': USER_AGENT }
     if (auth && this.cfg.accessToken) headers.Authorization = `Bearer ${this.cfg.accessToken}`
-    if (auth) Object.assign(headers, await agentHeaders(this, method, path, body === undefined ? '' : JSON.stringify(body)))
+    if (auth) Object.assign(headers, await agentHeaders(this, method, path, body === undefined ? '' : JSON.stringify(body), scope))
     const res = await this.fetchImpl(this.apiUrl + path, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal,
+      signal: scope.signal,
     })
     const text = await res.text()
     let parsed: any = null
@@ -96,15 +97,19 @@ export class ApiClient {
     return { status: res.status, body: parsed }
   }
 
-  private async refresh(): Promise<boolean> {
+  private async refresh(signal?: AbortSignal): Promise<boolean> {
     try {
-      const res = await this.fetch('POST', '/auth/refresh', { refreshToken: this.cfg.refreshToken }, false)
+      const res = await this.fetch('POST', '/auth/refresh', { refreshToken: this.cfg.refreshToken }, false, { signal })
       if (res.status >= 400) return false
       this.cfg.accessToken = res.body.accessToken
       this.cfg.refreshToken = res.body.refreshToken
       await this.persist()
       return true
-    } catch {
+    } catch (e) {
+      // Refresh belongs to the original request's time budget. Do not turn its cancellation
+      // into the earlier 401: the caller needs the abort to report a timeout or cancellation.
+      signal?.throwIfAborted()
+      if (e instanceof Error && (e.name === 'AbortError' || e.name === 'TimeoutError')) throw e
       return false
     }
   }
@@ -113,11 +118,21 @@ export class ApiClient {
 // Resolve the linked project (./.insta/project.json), or null.
 export async function linkedProject(): Promise<ProjectConfig | null> { return readProject() }
 
+// Injected for tests (the convention in CONTRIBUTING): `cwd` to resolve from, and `autoResolve` to
+// stand in for the interactive/API resolution below.
+export type RequireProjectDeps = { cwd?: string; autoResolve?: () => Promise<ProjectConfig> }
+
 // Resolve the linked project or exit with guidance.
-export async function requireProject(): Promise<ProjectConfig> {
-  const p = await readProject()
-  if (p) return p
+export async function requireProject(deps: RequireProjectDeps = {}): Promise<ProjectConfig> {
+  const r = await resolveProjectLink(deps.cwd)
+  // Fail CLOSED on a link made against another control plane. Treating it as "unlinked" sent this
+  // into auto-resolve, which with exactly one project on the new plane picks it without a prompt
+  // and SAVES — so a read-only command replaced the committed team binding, and pointing back
+  // flipped it again. Only an explicit `insta project link` may replace a link.
+  if (r?.foreign) die(foreignLinkMessage(r.foreign))
+  if (r) return r.link
   if (agentMode()) die('agent mode requires a linked project — run `insta setup agent --project <id>`')
+  if (deps.autoResolve) return deps.autoResolve()
   // One command, just works: unlinked ≠ error. Resolve the project (auto when there's one,
   // one-keystroke picker when several) and persist the choice so this happens once per dir.
   const api = await ApiClient.load()
@@ -129,10 +144,15 @@ export async function requireProject(): Promise<ProjectConfig> {
         (await api.request<{ projects: ProjectItem[] }>('GET', `/orgs/${orgId}/projects`)).projects,
       promptChoice,
       save: async (c) => {
-        await writeProject(c)
         // stderr: this is a diagnostic that can precede ANY command's output — under --json,
         // stdout must stay one parseable document.
-        process.stderr.write(`auto-linked project ${c.projectId} → ./.insta/project.json\n`)
+        if (await persistAutoLink(c, deps.cwd)) {
+          process.stderr.write(`auto-linked project ${c.projectId} → ./.insta/project.json\n`)
+        } else {
+          // The home directory never holds a link (~/.insta is the global config): use the choice
+          // for this command instead of failing it after the picker has already run.
+          process.stderr.write(`using project ${c.projectId} for this command — not saving a link in the home directory; run inside a project directory to remember it\n`)
+        }
       },
       tty: !!process.stdin.isTTY && !!process.stderr.isTTY,
     })

@@ -12,7 +12,7 @@ test('run injects the bundle into the child env and passes the exit code through
   const code = await runWithSecrets(
     process.execPath,
     ['-e', 'process.exit(process.env.DATABASE_URL === "pg://branch-db" && process.env.MY_FLAG === "on" ? 7 : 1)'],
-    { fetchBundle: async () => ({ DATABASE_URL: 'pg://branch-db', MY_FLAG: 'on' }) },
+    { fetchBundle: async () => ({ secrets: { DATABASE_URL: 'pg://branch-db', MY_FLAG: 'on' }, collisions: [] }) },
   )
   expect(code).toBe(7) // exact child exit code, proving env arrived AND passthrough works
 })
@@ -20,7 +20,7 @@ test('run injects the bundle into the child env and passes the exit code through
 test('run writes nothing to disk', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'insta-run-'))
   await runWithSecrets(process.execPath, ['-e', 'process.exit(0)'],
-    { fetchBundle: async () => ({ SECRET: 'x' }), cwd: dir })
+    { fetchBundle: async () => ({ secrets: { SECRET: 'x' }, collisions: [] }), cwd: dir })
   expect(existsSync(join(dir, '.env'))).toBe(false)
 })
 

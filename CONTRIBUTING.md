@@ -39,8 +39,8 @@ Two conventions worth knowing before you write code:
   tested without mocking globals. See `ensure-skills.ts`, `commands/setup.ts` and
   `test/deploy-port.test.ts`.
 - **A command or flag change is only half done until it is mirrored in the agent-facing
-  command reference**, [`insta/cli-reference.md`](https://github.com/InsForge/insta-skills/blob/main/insta/cli-reference.md)
-  in `InsForge/insta-skills`. That file is how coding agents learn the CLI surface, and this
+  command reference**, [`insta/cli-reference.md`](https://github.com/InsForge/instacloud-skills/blob/main/insta/cli-reference.md)
+  in `InsForge/instacloud-skills`. That file is how coding agents learn the CLI surface, and this
   repo's README links to it rather than duplicating it. Update it in the same change set.
 
 ## Pull requests

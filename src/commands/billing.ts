@@ -5,7 +5,7 @@ import { cycleLine, dimensionLines } from './metrics.js'
 type OrgOpt = { org?: string }
 
 // Resolve the target org: explicit --org, else the linked project's org.
-async function resolveOrgId(opts: OrgOpt): Promise<string> {
+export async function resolveOrgId(opts: OrgOpt): Promise<string> {
   if (opts.org) return opts.org
   return (await requireProject()).orgId
 }
@@ -13,7 +13,11 @@ async function resolveOrgId(opts: OrgOpt): Promise<string> {
 export type BillingOverview = {
   window: { from: number; to: number }
   tier: string; billingStatus: string; subscriptionStatus: string | null
-  totals: { usedUsd: number; includedUsd: number; overageUsd: number; creditsUsd: number; forecastUsd: number }
+  // `creditBalanceUsd` is the wallet, and nothing else. The API also returns a legacy `creditsUsd`
+  // that adds the remaining plan allowance to the wallet balance — a single number that means
+  // neither thing. It is deliberately NOT read here: included usage and credits feed different
+  // calculations (usage vs amount payable) and must never be summed.
+  totals: { usedUsd: number; includedUsd: number; overageUsd: number; creditBalanceUsd: number; forecastUsd: number }
   byDimension: Array<{ dimension: string; quantity: number; unit: string; costUsd?: number }>
   byProject: Array<{ name: string; totalCostUsd: number }>
 }
@@ -25,16 +29,19 @@ export type BillingOverview = {
 export function billingLines(s: BillingOverview, org?: string): string[] {
   const t = s.totals
   const lines = [
-    `tier:      ${s.tier}`,
-    `status:    ${s.billingStatus}`,
+    `tier:            ${s.tier}`,
+    `status:          ${s.billingStatus}`,
     cycleLine(s.window),
-    `included:  $${Number(t.includedUsd).toFixed(2)}`,
-    `used:      $${Number(t.usedUsd).toFixed(4)}`,
-    `overage:   $${Number(t.overageUsd).toFixed(4)}`,
-    `credits:   $${Number(t.creditsUsd).toFixed(2)}`,
-    `forecast:  $${Number(t.forecastUsd).toFixed(4)}  (predicted full cycle)`,
+    // Two separate figures, never added together: the plan's allowance for this cycle, and the
+    // org's wallet. "included usage" is the name the console and the pricing page use for the
+    // former; "credits" now means the wallet alone.
+    `included usage:  $${Number(t.includedUsd).toFixed(2)}`,
+    `used:            $${Number(t.usedUsd).toFixed(4)}`,
+    `overage:         $${Number(t.overageUsd).toFixed(4)}`,
+    `credits:         $${Number(t.creditBalanceUsd).toFixed(2)}`,
+    `forecast:        $${Number(t.forecastUsd).toFixed(4)}  (predicted full cycle)`,
   ]
-  if (s.subscriptionStatus) lines.push(`subscription: ${s.subscriptionStatus}`)
+  if (s.subscriptionStatus) lines.push(`subscription:    ${s.subscriptionStatus}`)
   if (s.billingStatus === 'suspended') {
     // Four causes, five messages, and every one is a dead end for the others. Tier first: only a
     // free org can spend a prepaid wallet, and waiting for the next cycle genuinely fixes that one.
@@ -117,7 +124,7 @@ export async function billingPortal(opts: OrgOpt & { open?: boolean; json?: bool
 // "opening", not "opened": a launcher that starts and then fails reports it asynchronously,
 // so openUrl's true return is an attempt, not a confirmation (see util.ts) — and the URL is
 // already printed above for exactly that case.
-function presentUrl(url: string, label: string, open?: boolean): void {
+export function presentUrl(url: string, label: string, open?: boolean): void {
   info(label)
   info(`  ${url}`)
   if (open !== false && openUrl(url)) info('(opening in your default browser…)')

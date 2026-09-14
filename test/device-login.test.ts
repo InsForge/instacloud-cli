@@ -26,6 +26,9 @@ function fakeFlow(polls: string[], start: Record<string, unknown> = START) {
       const next = polls.shift()
       if (!next) throw new Error('poll after script ended')
       if (next.startsWith('token:')) return { access_token: next.slice('token:'.length) }
+      // 'http:<status>' = a non-OAuth answer, as the platform's rate limiter gives (body has no
+      // `error`, so the real client's message is the bare `HTTP <status>`).
+      if (next.startsWith('http:')) { const s = Number(next.slice('http:'.length)); throw new ApiError(s, `HTTP ${s}`) }
       throw new ApiError(400, next)
     }
     throw new Error(`unexpected path ${path}`)
@@ -50,6 +53,21 @@ describe('deviceGrant', () => {
     const { post, wait, waits } = fakeFlow(['slow_down', 'authorization_pending', 'token:sess-x'])
     await expect(deviceGrant(post, wait)).resolves.toBe('sess-x')
     expect(waits).toEqual([5, 10, 10])
+  })
+
+  // The platform's per-IP limiter answers a bare HTTP 429 (no OAuth code). Seen on prod: a steady
+  // 5s poll tripped it after ~8 min and the login died. It means the same thing as slow_down —
+  // the code is still pending — so back off and keep polling; a definite non-429 HTTP error
+  // (a 500 here) is still fatal, as before.
+  it('backs off and keeps polling on a bare HTTP 429 from the rate limiter', async () => {
+    const { post, wait, waits } = fakeFlow(['http:429', 'authorization_pending', 'token:sess-r'])
+    await expect(deviceGrant(post, wait)).resolves.toBe('sess-r')
+    expect(waits).toEqual([5, 10, 10])
+  })
+
+  it('still fails fast on a non-429 HTTP error', async () => {
+    const { post, wait } = fakeFlow(['http:500'])
+    await expect(deviceGrant(post, wait)).rejects.toThrow('HTTP 500')
   })
 
   it('surfaces a console denial as a clear error', async () => {

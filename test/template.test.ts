@@ -476,10 +476,11 @@ function fakeApi(
 ) {
   const posts: any[] = []
   const polls: string[] = []
+  const pollScopes: unknown[] = []
   const api = {
-    request: async (_m: string, path: string) => {
+    request: async (_m: string, path: string, _body?: unknown, opts?: unknown) => {
       if (path.startsWith('/templates/')) return { template: { code: 'plausible', variables: templateVars } }
-      if (path.startsWith('/template-deployments/')) { polls.push(path); return deployment }
+      if (path.startsWith('/template-deployments/')) { polls.push(path); pollScopes.push(opts); return deployment }
       throw new Error(`unexpected GET ${path}`)
     },
     rawRequest: async (_m: string, _path: string, body?: unknown) => {
@@ -487,7 +488,7 @@ function fakeApi(
       return postResult
     },
   }
-  return { api, posts, polls }
+  return { api, posts, polls, pollScopes }
 }
 
 const PROJECT = { projectId: 'proj_1', orgId: 'org_1', branch: 'main' }
@@ -504,12 +505,16 @@ describe('templateDeploy', () => {
   it('sends a bare target as a registry code, not the same-named local manifest', async () => {
     const root = manifestDir('plausible')
     const cwd = process.cwd()
-    const { api, posts } = fakeApi()
+    const { api, posts, polls, pollScopes } = fakeApi()
     try {
       process.chdir(root)
       await templateDeploy('plausible', {}, { api, project: PROJECT, wait: NO_WAIT })
     } finally { process.chdir(cwd) }
     expect(posts).toEqual([{ templateCode: 'plausible', branch: 'main', variables: {} }])
+    // The poll route carries no /projects/:id, so the command must name the project it deployed
+    // into — in agent mode that is what selects the project-bound session over a bootstrap one.
+    expect(polls).toEqual(['/template-deployments/dep_1'])
+    expect(pollScopes).toEqual([{ projectId: 'proj_1' }])
     expect(stdout.join('')).not.toMatch(/local template/)
   })
 

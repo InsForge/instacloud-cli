@@ -4,7 +4,7 @@ import { billingLines } from '../src/commands/billing.js'
 const base = {
   window: { from: 1_686_787_200, to: 1_689_379_200 }, // 2023-06-15 → 2023-07-15 (UTC)
   tier: 'pro', billingStatus: 'active', subscriptionStatus: 'active' as string | null,
-  totals: { usedUsd: 45.32, includedUsd: 25, overageUsd: 20.32, creditsUsd: 0, forecastUsd: 97.11 },
+  totals: { usedUsd: 45.32, includedUsd: 25, overageUsd: 20.32, creditBalanceUsd: 0, forecastUsd: 97.11 },
   byDimension: [
     { dimension: 'ram', quantity: 660, unit: 'GB·min', costUsd: 6.6 },
     { dimension: 'cpu', quantity: 120, unit: 'vCPU·min', costUsd: 3.2 },
@@ -16,17 +16,17 @@ const base = {
 }
 
 describe('billingLines', () => {
-  it('renders totals incl. credits + forecast, and both breakdowns', () => {
+  it('renders included usage and wallet credits as separate figures, plus forecast and both breakdowns', () => {
     const out = billingLines(base).join('\n')
-    expect(out).toContain('tier:      pro')
-    expect(out).toContain('status:    active')
+    expect(out).toContain('tier:            pro')
+    expect(out).toContain('status:          active')
     expect(out).toContain('billing cycle 2023-06-15 → 2023-07-14') // to − 1 day (inclusive last day)
-    expect(out).toContain('included:  $25.00')
-    expect(out).toContain('used:      $45.3200')
-    expect(out).toContain('overage:   $20.3200')
-    expect(out).toContain('credits:   $0.00')
-    expect(out).toContain('forecast:  $97.1100  (predicted full cycle)')
-    expect(out).toContain('subscription: active')
+    expect(out).toContain('included usage:  $25.00')
+    expect(out).toContain('used:            $45.3200')
+    expect(out).toContain('overage:         $20.3200')
+    expect(out).toContain('credits:         $0.00')
+    expect(out).toContain('forecast:        $97.1100  (predicted full cycle)')
+    expect(out).toContain('subscription:    active')
     expect(out).toContain('by dimension:')
     expect(out).toContain('memory: 660 GB·min  ($6.6000)') // ram → memory label
     expect(out).toContain('cpu: 120 vCPU·min  ($3.2000)')
@@ -35,11 +35,14 @@ describe('billingLines', () => {
     expect(out).toContain('  Project 2: $14.5000')
   })
 
-  it('free tier: credits = wallet balance; no subscription line', () => {
+  // The whole point of the split: an org whose usage sits under its allowance still shows the full
+  // wallet. Adding the two (the legacy `creditsUsd` figure) would print $8 here and mean nothing.
+  it('free tier: credits is the wallet alone, never the allowance remainder; no subscription line', () => {
     const out = billingLines({ ...base, tier: 'free', subscriptionStatus: null,
-      totals: { usedUsd: 2, includedUsd: 5, overageUsd: 0, creditsUsd: 3, forecastUsd: 4 } }).join('\n')
-    expect(out).toContain('included:  $5.00')
-    expect(out).toContain('credits:   $3.00')
+      totals: { usedUsd: 2, includedUsd: 5, overageUsd: 0, creditBalanceUsd: 3, forecastUsd: 4 } }).join('\n')
+    expect(out).toContain('included usage:  $5.00')
+    expect(out).toContain('credits:         $3.00')
+    expect(out).not.toContain('$8.00') // allowance remainder + wallet must never be summed
     expect(out).not.toContain('subscription:')
   })
 

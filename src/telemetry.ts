@@ -53,7 +53,7 @@ const SAFE_OPTIONS: Record<string, Check> = {
   agent: oneOf(['claude-code', 'cursor', 'codex', 'opencode', 'copilot', 'factory-droid']),
   type: oneOf(TYPES), component: oneOf(COMPONENTS), severity: oneOf(SEVERITIES),
   status: oneOf(['pending', 'granted', 'denied', 'consumed']),
-  limit: NUMBER, step: NUMBER, since: NUMBER, port: NUMBER, memory: NUMBER, cpu: NUMBER, size: NUMBER, volume: NUMBER,
+  limit: NUMBER, step: NUMBER, since: NUMBER, port: NUMBER, memory: NUMBER, cpu: NUMBER, size: NUMBER, volume: NUMBER, years: NUMBER,
 }
 
 export function telemetryDisabled(env: NodeJS.ProcessEnv = process.env): boolean {

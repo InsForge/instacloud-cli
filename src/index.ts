@@ -22,6 +22,7 @@ import * as secretsCmd from './commands/secrets.js'
 import { deploy } from './commands/deploy.js'
 import { build } from './commands/build.js'
 import * as computeCmd from './commands/compute.js'
+import * as githubCmd from './commands/github.js'
 import * as dbCmd from './commands/db.js'
 import * as dbQueryCmd from './commands/db-query.js'
 import * as storageCmd from './commands/storage.js'
@@ -31,6 +32,7 @@ import * as govern from './commands/govern.js'
 import * as observe from './commands/observe.js'
 import * as obs from './commands/metrics.js'
 import { billing, billingUpgrade, billingPortal } from './commands/billing.js'
+import * as domainCmd from './commands/domain.js'
 import * as selfUpdate from './commands/upgrade.js'
 import * as feedbackCmd from './commands/feedback.js'
 
@@ -93,6 +95,8 @@ envCmd.command('use <name>').description(`Switch environment (${ENV_NAMES.join('
 // ---- run (per-request secret injection — nothing written to disk) ----
 program.command('run <cmd> [args...]').description('Run a command with the branch credential bundle injected into its environment (no .env written)')
   .option('--branch <b>', 'branch bundle to inject (default: linked branch)')
+  .option('--service <type/name>', "inject one compute service's own slice of the branch bundle, e.g. compute/api — the unambiguous read when several services define the same name (NOT the container's env: it also carries the branch's provider credentials, which a container gets only where bound)")
+  .option('--ignore-collisions', 'run even when several services define the same name; every such name is REMOVED from the child environment (never inherited from your shell)')
   .passThroughOptions().allowUnknownOption()
   .action(guard((cmd, args, o) => runCmd.run([cmd, ...(args ?? [])], o)))
 
@@ -101,7 +105,7 @@ const setupCmd = program.command('setup').description('Set up this machine for I
 setupCmd.command('agent').description('Install the insta CLI (if missing), the insta skill for all coding agents, and the MCP server — targets production; pass --env staging for the staging deployment')
   .option('-y, --yes', 'non-interactive')
   .option('--env <prod|staging>', 'deployment to set this machine up for (default: prod — switches and persists, like `insta env use`)')
-  .option('--mcp-token', 'register the MCP server with a minted insta_ API token instead of OAuth (headless machines / CI)')
+  .option('--mcp-token', 'register Claude Code with a minted insta_ API token instead of OAuth (requires login and token-creation permission)')
   .option('--project <id>', 'also link this directory to an existing project after setup (flows through login first if needed)')
   .option('--create [name]', 'also create a new project and link this directory after setup (default name: this directory; mutually exclusive with --project)')
   .action(guard((o) => setup.setupAgent(o)))
@@ -110,7 +114,7 @@ setupCmd.command('agent').description('Install the insta CLI (if missing), the i
 const mcpCmd = program.command('mcp').description('insta-cloud remote MCP server integration')
 mcpCmd.command('install').description('Register the remote MCP server with coding agents (default: Claude Code + all detected)')
   .option('--agent <slug>', 'one agent: claude-code, cursor, codex, opencode, copilot, factory-droid')
-  .option('--mcp-token', 'claude-code only: minted insta_ API token instead of OAuth (headless machines / CI)')
+  .option('--mcp-token', 'claude-code only: minted insta_ API token instead of OAuth (requires login and token-creation permission)')
   .action(guard((o) => mcp.mcpInstall(o)))
 
 // ---- org ----
@@ -147,7 +151,7 @@ svc.command('add [type] [name]').description('Provision a service on demand (ass
   .option('--port <n>', 'compute only: port the image listens on (default 8080)')
   .option('--always-on', 'compute only: create as always-on — never scales to zero (the default for new compute services; all plans; billing is actual usage either way)')
   .option('--no-always-on', 'compute only: create as scale-to-zero — idle machines suspend and wake on the next request')
-  .option('--volume <gi>', 'compute only: attach a persistent /data volume of this many whole Gi (also attachable later: `insta compute volume <name> --size <gi>`; any plan may attach at the default 10 (the free cap, on every plan); larger sizes are paid and plan-capped). Volume services keep 1 machine and stop (cold wake) instead of suspend when idle')
+  .option('--volume <gi>', 'compute only: attach a persistent /data volume of this many whole Gi (also attachable later: `insta compute volume <name> --size <gi>`). Any plan may attach up to its own plan cap (10Gi free, 50Gi paid by default; the bare `insta compute volume <name>` read prints it as plan max); a size above the free cap is paid. Volume services keep 1 machine and stop (cold wake) instead of suspend when idle')
   .option('--json')
   .action(guard(async (type, name, o) => {
     const a = await resolveServiceArgs(type, name, serviceArgsDeps(o.json), o)
@@ -172,14 +176,18 @@ svc.command('secrets <type> <name>').description("List a service's secret names"
 
 // ---- secrets (seam) ----
 const sec = program.command('secrets').description('Fetch the credential bundle (secret seam) into .env')
-  .option('--branch <branch>').option('-o, --output <file>', 'output file (default .env)').option('--print', 'print instead of writing').option('--json')
+  .option('--branch <branch>')
+  .option('--service <type/name>', "read one compute service's own slice of the bundle instead of the branch-wide merge, e.g. compute/api")
+  .option('-o, --output <file>', 'output file (default .env)').option('--print', 'print instead of writing').option('--json')
   .action(guard((o) => secretsCmd.secrets(o)))
 sec.command('list').description('List secret names, grouped by service').option('--branch <branch>').option('--json').action(guard((o) => secretsCmd.secretsList(o)))
 sec.command('set <name> [value]').description('Set a user secret (project-wide; value from stdin if omitted)')
   .option('--branch <branch>', 'scope to one branch').option('--service <type/name>', 'bind to a branch service (implies current branch)')
   .option('--json').action(guard((n, v, o) => secretsCmd.secretsSet(n, v, o)))
 sec.command('unset <name>').description('Remove a user secret')
-  .option('--branch <branch>', 'scope to one branch').option('--json').action(guard((n, o) => secretsCmd.secretsUnset(n, o)))
+  .option('--branch <branch>', 'scope to one branch')
+  .option('--service <type/name>', "remove only that service's copy, e.g. compute/api")
+  .option('--json').action(guard((n, o) => secretsCmd.secretsUnset(n, o)))
 sec.command('bind <env-name> <source>').description('Bind a service credential into a compute env var')
   .option('--branch <branch>', 'branch (default: current)')
   .option('--to <compute-service>', 'target compute service, e.g. compute/api')
@@ -204,16 +212,17 @@ sec.command('tree').description('Show secrets as project → branch → service 
   .action(guard((o) => secretsCmd.secretsTree(o)))
 
 // ---- build (pre-push verification — local, offline, deploys nothing) ----
-program.command('build [dir]').description('Verify a source directory would build before deploying: detection plan + the Dockerfile (yours, or the one nixpacks would generate for the GitHub lane — `insta deploy <dir>` needs your own) + static checks. Local and offline — no login needed, nothing pushed. Exit 1 when the verdict is failed')
+program.command('build [dir]').description('Verify a source directory would build before deploying: detection plan + the Dockerfile (yours, or the one nixpacks would generate server-side) + static checks. Local and offline — no login needed, nothing pushed. Exit 1 when the verdict is failed')
   .option('--explain', 'include the Dockerfile content in the output')
   .option('--port <p>', 'port the app listens on (else the Dockerfile EXPOSE)')
   .option('--json')
   .action(guard((dir, o) => build(dir, o)))
 
 // ---- deploy ----
-program.command('deploy [dir]').description('Deploy a source directory (built remotely on Fly) or a prebuilt --image to a branch compute group')
+program.command('deploy [dir]').description('Deploy a source directory (built remotely; on insta-compute a Dockerfile is optional and nixpacks detects the runtime) or a prebuilt --image to a branch compute group')
   .option('--image <url>', 'prebuilt container image to deploy (instead of a source dir)').option('--branch <b>').option('--group <g>').option('--port <p>')
   .option('--websocket', 'run a WebSocket app (larger guest + connection-based concurrency)')
+  .option('--replace-source', 'the service deploys from a connected GitHub repo: switch it to this image and remove the repo connection (admin); without it such a deploy is refused')
   .option('--json', 'print the deploy result as JSON (build progress goes to stderr)')
   .action(guard((dir, o) => deploy(dir, o)))
 
@@ -262,7 +271,24 @@ const execCmd = compute.command('exec [service]').description("Run a one-shot co
 // Declared from the same list splitExecArgs uses to find where the CLI's own arguments stop, so a
 // new option cannot reach the CLI surface while the split still reads it as part of the command.
 for (const [flags, description] of computeCmd.EXEC_OPTIONS) execCmd.option(flags, description)
-compute.command('volume [service]').description("Show, attach, grow, or delete a compute service's persistent /data volume. No flag: print size, mount path, and the plan cap (any plan). --size on a volumeless service ATTACHES one (any plan at the default 10Gi, the free cap; larger is paid and plan-capped; the disk mounts at /data on the next deploy); on a volume-bearing one it grows (paid plans; grow-only — a provisioned disk cannot shrink). --delete DESTROYS the disk and ALL its data immediately (no detach, no undo; billing stops now, and suspend fast-wake + scale-out return). Billing is actual data stored — the size is a cap, not a price")
+compute.command('repo [service]').description('Show what a compute service deploys from: the image it runs, or the GitHub repository — owner/repo, the branch it builds, root directory, which paths a push must change to redeploy it, and whether pushes redeploy it at all')
+  .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => githubCmd.computeRepo(service, o)))
+compute.command('connect-repo <owner/repo> [service]').description("Connect a GitHub repository to an EXISTING compute service: the repo is built (its Dockerfile, or nixpacks when there is none) and deployed into that service, and every later push to the tracked repository branch redeploys it. The repo must be one your own GitHub account can reach through the InstaCloud App, or be public; the first connect from a terminal prints a GitHub URL and a code to authorize it once. Build and start commands come from detection and cannot be set. Connecting again replaces the service's current source")
+  .option('--public', 'the repo is public and no GitHub App installation is needed (deploys are manual; pushes cannot redeploy)')
+  .option('--root-dir <dir>', 'the directory of the repo to build (a monorepo with several deployable directories lists them and exits 1 without it)')
+  .option('--repo-branch <name>', "the repository branch to build (default: the repo's default branch)")
+  .option('--no-auto-deploy', 'do not rebuild on pushes; redeploy by connecting again or from the console')
+  .option('--watch-paths <patterns>', "only redeploy when a push changes a matching path — a comma-separated list of gitignore patterns relative to the REPOSITORY ROOT, not to --root-dir, e.g. 'apps/web/**,packages/ui/**' (quote them, or the shell expands the *)")
+  .option('--port <n>', 'port the app listens on (default: detected)')
+  .option('--branch <branch>', 'branch (default: current) — the environment the service is on')
+  .option('--json').action(guard((ref, service, o) => githubCmd.computeConnectRepo(ref, service, o)))
+compute.command('watch-paths [service]').description("Show or change which paths make a push redeploy a compute service. No flag prints them. --set narrows to a comma-separated list of gitignore patterns matched against paths relative to the REPOSITORY ROOT (not to the service's root directory), so a monorepo push that touched nothing on the list leaves this service alone — unless GitHub cannot report what a push changed (a force-push, or a comparison of 300 or more files, where its list stops being complete), in which case it deploys rather than risk skipping a real change. --clear removes the filter: every push that deploys this service deploys it again. Neither rebuilds the service — this changes which pushes deploy, not what a deploy builds")
+  .option('--set <patterns>', "the patterns, comma-separated, e.g. 'apps/web/**,packages/ui/**' — quote them, or the shell expands the *; a leading ! excludes, under git's rule that a path cannot be re-included once an earlier pattern took its directory")
+  .option('--clear', 'remove the filter: every push that deploys this service deploys it again')
+  .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => githubCmd.computeWatchPaths(service, o)))
+compute.command('disconnect-repo [service]').description('Disconnect the GitHub repository from a compute service. The service keeps running its current image; pushes no longer deploy it, and its build history stays')
+  .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => githubCmd.computeDisconnectRepo(service, o)))
+compute.command('volume [service]').description("Show, attach, grow, or delete a compute service's persistent /data volume. No flag: print size, mount path, and the plan cap (any plan). --size on a volumeless service ATTACHES one (any plan up to its own plan cap — 10Gi free, 50Gi paid by default — which is also what a disk with no size named is born at; a size above the free cap is paid; the disk mounts at /data on the next deploy); on a volume-bearing one it grows (paid plans; grow-only — a provisioned disk cannot shrink). --delete DESTROYS the disk and ALL its data immediately (no detach, no undo; billing stops now, and suspend fast-wake + scale-out return). Billing is actual data stored — the size is a cap, not a price")
   .option('--size <gi>', 'new size in whole Gi, e.g. 10 (must be ≥ the current size)')
   .option('--delete', 'destroy the volume and ALL its data (irreversible; download anything you need first)')
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => computeCmd.computeVolume(service, o)))
@@ -346,6 +372,33 @@ program.command('logs <target> [group]').description('Service logs (runtime by d
 program.command('usage').description('Usage for the current billing cycle by billing dimension (org by default; --proj for one project)')
   .option('--from <unix>').option('--to <unix>').option('--proj [id]', 'show one project (the linked one, or a given id) instead of the whole org').option('--json')
   .action(guard((o) => obs.usage(o)))
+// ---- domains bought through InstaCloud (BYO domains: `insta compute set-domain`) ----
+const dom = program.command('domain').description('Buy a domain through InstaCloud and attach it to a compute service (your own domain: `insta compute set-domain`)')
+dom.command('search <keyword>').description('Search purchasable names with prices (a label like "myapp" or a full name like "myapp.com")')
+  .option('--tlds <list>', 'comma-separated TLDs to include').option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((keyword, o) => domainCmd.domainSearch(keyword, o)))
+dom.command('buy <name>').description('Buy a domain and attach it to a branch compute service — pay at the printed Stripe Checkout link (gated: domain.purchase)')
+  .option('--years <n>', 'registration term in years (default 1)').option('--branch <b>').option('--group <g>', "compute service (default: the branch's sole compute service)")
+  .option('--contact-file <path>', 'registrant contact as JSON (default: the org contact from `insta domain contact set`)')
+  .option('--no-open', 'print the checkout URL instead of opening a browser').option('--json')
+  .action(guard((name, o) => domainCmd.domainBuy(name, o)))
+dom.command('attach <name>').description('Attach a bought domain whose service was deleted (or whose attach failed) to a compute service (gated: deploy)')
+  .option('--branch <b>').option('--group <g>', "compute service (default: the branch's sole compute service)").option('--json')
+  .action(guard((name, o) => domainCmd.domainAttach(name, o)))
+dom.command('list').description('Domains bought through InstaCloud in this project, with attach state per hostname').option('--json')
+  .action(guard((o) => domainCmd.domainList(o)))
+dom.command('status <name>').description("A bought domain's order and attach state").option('--json')
+  .action(guard((name, o) => domainCmd.domainStatus(name, o)))
+const domContact = dom.command('contact').description("Show the org's default registrant contact (the legal registrant of every domain bought with it)")
+  .option('--org <id>').option('--json').action(guard((o) => domainCmd.domainContactShow(o)))
+domContact.command('set').description('Set the org default registrant contact (admin) from flags or --contact-file <path>; --company-name makes that organization the legal registrant')
+  .option('--first-name <s>').option('--last-name <s>').option('--company-name <s>').option('--address1 <s>').option('--address2 <s>').option('--city <s>').option('--state <s>').option('--zip <s>')
+  .option('--country <cc>', 'ISO 3166-1 alpha-2, e.g. US').option('--email <s>').option('--phone <e164>', 'E.164, e.g. +14155550100')
+  .option('--contact-file <path>', 'JSON file with the contact fields').option('--org <id>').option('--json')
+  // `contact --org X set` parks --org on the GROUP (enablePositionalOptions); without this merge the
+  // wrong org's registrant contact is written, and that field is legal ownership.
+  .action(guard((o) => domainCmd.domainContactSet({ ...domContact.opts(), ...o })))
+
 const bill = program.command('billing').description('Current billing cycle overview (tier / used / included / overage / credits / forecast + per-dimension & per-project breakdown)')
   .option('--org <id>', 'target org (default: linked project\'s org)').option('--json')
   .action(guard((o) => billing(o)))

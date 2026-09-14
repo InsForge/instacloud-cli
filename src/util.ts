@@ -150,6 +150,16 @@ export function die(msg: string): never {
   throw new CliExit()
 }
 
+// The CLI declined to act and the caller must choose how to proceed — the same shape as the 202
+// approval gate below, so it takes the same exit code 2: not success (a redirected stdout must
+// never read the refusal as output), and not a plain failure either (die owns 1). Nothing ran,
+// and re-running with the flag the message names will work.
+export function refuse(lines: string[]): never {
+  for (const line of lines) process.stderr.write(line + '\n')
+  process.exitCode = 2
+  throw new CliExit()
+}
+
 export function printJson(v: unknown): void {
   process.stdout.write(JSON.stringify(v, null, 2) + '\n')
 }

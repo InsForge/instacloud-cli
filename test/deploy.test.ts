@@ -2,19 +2,21 @@
 // a plain deploy is byte-for-byte unchanged.
 import { describe, it, expect } from 'vitest'
 import { join } from 'node:path'
-import { deployRequestBody, noDockerfileMessage } from '../src/commands/deploy.js'
+import { deployRequestBody, noDockerfileMessage, repoConnectedHint } from '../src/commands/deploy.js'
 
 describe('deployRequestBody', () => {
   it('omits websocket for a normal deploy', () => {
-    const b = deployRequestBody('img', 'main', { port: '3000' })
+    const b = deployRequestBody({ image: 'img' }, 'main', { port: '3000' })
     expect(b.websocket).toBeUndefined()
     expect(b).toMatchObject({ image: 'img', branch: 'main', port: 3000 })
   })
   it('sends websocket:true when --websocket is set', () => {
-    expect(deployRequestBody('img', 'main', { websocket: true }).websocket).toBe(true)
+    expect(deployRequestBody({ image: 'img' }, 'main', { websocket: true }).websocket).toBe(true)
+    expect(deployRequestBody({ image: 'img' }, 'main', { replaceSource: true }).replaceSource).toBe(true)
+    expect(deployRequestBody({ image: 'img' }, 'main', {})).not.toHaveProperty('replaceSource', true)
   })
   it('leaves port undefined when not provided', () => {
-    expect(deployRequestBody('img', 'main', {}).port).toBeUndefined()
+    expect(deployRequestBody({ image: 'img' }, 'main', {}).port).toBeUndefined()
   })
 })
 
@@ -47,5 +49,19 @@ describe('noDockerfileMessage', () => {
     // It COPYs .nixpacks/nixpkgs-<hash>.nix support files the source dir has no copy of.
     expect(msg).not.toMatch(/--explain/)
     expect(msg).not.toMatch(/save (it|the generated)/i)
+  })
+})
+
+describe('repoConnectedHint', () => {
+  // The platform's 409 names the body field it wants; a CLI user can only pass the flag.
+  it('names the flag, and leaves the rest of the platform message alone', () => {
+    const real = "this service deploys from acme/app — pass replaceSource: true to switch it to this image (the repo connection is removed), or disconnect the repo first"
+    const out = repoConnectedHint(real)
+    expect(out).toContain('pass --replace-source to switch it to this image')
+    expect(out).toContain('deploys from acme/app')
+    expect(out).not.toContain('replaceSource: true')
+  })
+  it('passes through a message that says nothing about it', () => {
+    expect(repoConnectedHint('some other conflict')).toBe('some other conflict')
   })
 })

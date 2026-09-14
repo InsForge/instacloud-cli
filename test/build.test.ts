@@ -173,9 +173,13 @@ describe('buildReport', () => {
     // exit 1 — it must only stop short of "deployable".
     expect(df.severity).toBe('warning')
     expect(df.detail).toContain('insta deploy <dir>')
-    expect(df.detail).toContain('GitHub-connected repos only')
+    // The split is now BY TARGET, not by GitHub connection: insta-compute builds this directory
+    // as-is on the gateway, Fly still needs the user's own Dockerfile. Naming only one of the two
+    // is what previously blessed a directory deploy refuses.
+    expect(df.detail).toContain('insta-compute')
+    expect(df.detail).toContain('Fly')
     expect(df.nextAction).toContain(join(dir, 'Dockerfile'))
-    expect(df.nextAction).toContain('GitHub')
+    expect(df.nextAction).toContain('insta-compute')
     // Must NOT tell the user to save the generated Dockerfile: it COPYs .nixpacks/ support files
     // this directory has no copy of, so that advice would be a second false promise.
     expect(df.nextAction).not.toMatch(/save the generated/i)
@@ -270,13 +274,20 @@ describe('renderReport', () => {
     expect(renderReport(r, true).join('\n')).toContain('FROM node:18')
   })
 
-  it('the builder line itself carries the lane caveat — "builder: nixpacks" alone reads as a promise', async () => {
+  // Not just "a caveat exists": it must say the SAME thing the dockerfile check's detail says a few
+  // lines below, or an agent scraping the report reads two contradicting claims about one directory.
+  it('the builder line carries the same per-target caveat the report body does', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'insta-build-'))
     writeFileSync(join(dir, 'package.json'), '{}')
     const r = await buildReport(dir, { port: '3000' }, { runner: nixpacksFake(PLAN), nixpacksAvailable: true })
     const builderLine = renderReport(r, false).find((l) => l.trim().startsWith('builder:'))!
     expect(builderLine).toContain('nixpacks')
-    expect(builderLine).toContain('needs a Dockerfile')
+    expect(builderLine).toContain('insta-compute')
+    expect(builderLine).toContain('Dockerfile')
+    // The old wording promised the lane was GitHub-only, which the archive lane made false.
+    expect(builderLine).not.toContain('GitHub lane only')
+    const detail = renderReport(r, false).join('\n')
+    expect(detail).not.toContain('nixpacks lane runs server-side for GitHub-connected repos only')
   })
 
   it('a dockerfile-builder report keeps a clean builder line (no caveat where none applies)', async () => {

@@ -50,8 +50,8 @@ describe('env table', () => {
   // forms: `#docs/staging-env` yielded that branch's cli-reference.md, `@docs/staging-env` yielded
   // main's. These assertions exist to stop that footgun coming back.
   it('pins staging skills with the #ref form, never @', () => {
-    expect(ENVS.prod.skills).toBe('InsForge/insta-skills')
-    expect(ENVS.staging.skills).toBe('InsForge/insta-skills#devel')
+    expect(ENVS.prod.skills).toBe('InsForge/instacloud-skills')
+    expect(ENVS.staging.skills).toBe('InsForge/instacloud-skills#devel')
   })
 
   it('never uses @ in a skill source (it is a skill filter, not a ref)', () => {

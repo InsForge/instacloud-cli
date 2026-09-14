@@ -334,7 +334,7 @@ export type TemplateDeployOpts = { branch?: string; set?: string[]; yes?: boolea
 
 // What the deploy path needs of the API client — ApiClient satisfies it.
 export type TemplateApi = {
-  request: (method: string, path: string, body?: unknown) => Promise<any>
+  request: (method: string, path: string, body?: unknown, opts?: { projectId?: string }) => Promise<any>
   rawRequest: (method: string, path: string, body?: unknown) => Promise<{ status: number; body: any }>
 }
 
@@ -413,7 +413,9 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
   const deploymentId = res.body.deploymentId ?? (res.body.deployment ?? res.body).id
   const codeLabel = manifest?.code ?? target
   if (!quiet) info(`deploying template ${codeLabel} to branch ${branchName} (${deploymentId})`)
-  const dep = await watchDeployment((id) => api.request('GET', `/template-deployments/${id}`), deploymentId, quiet ? () => {} : info, deps.wait)
+  // The poll route is keyed by deployment id, not project: name the project so agent mode signs
+  // with the project-bound session (a bootstrap session is rejected as "for a different project").
+  const dep = await watchDeployment((id) => api.request('GET', `/template-deployments/${id}`, undefined, { projectId: p.projectId }), deploymentId, quiet ? () => {} : info, deps.wait)
   if (opts.json) return printJson(source ? { source, ...dep } : dep)
   info(`template ${codeLabel} deployed to branch ${branchName}`)
   for (const u of deploymentUrls(dep)) info(`  ${u}`)

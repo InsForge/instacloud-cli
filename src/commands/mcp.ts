@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { info } from '../util.js'
-import { MCP_SERVER_NAME, registerMcp, resolveMcpTarget } from './setup.js'
+import { MCP_SERVER_NAME, registerMcp, requireMcpRegistration, resolveMcpTarget } from './setup.js'
 
 export const MCP_AGENT_TARGETS = ['cursor', 'codex', 'opencode', 'copilot', 'factory-droid'] as const
 export type McpAgent = (typeof MCP_AGENT_TARGETS)[number]
@@ -112,12 +112,22 @@ export async function installAgentConfigs(agent?: string, home: string = os.home
 
 // `insta mcp install [--agent <slug>] [--mcp-token]` — claude-code goes through its registry CLI
 // (registerMcp); everything else is a config-file write. No --agent = claude-code + all detected.
-export async function mcpInstall(opts: { agent?: string; mcpToken?: boolean }): Promise<void> {
+export async function mcpInstall(
+  opts: { agent?: string; mcpToken?: boolean },
+  register: typeof registerMcp = registerMcp,
+  installConfigs: typeof installAgentConfigs = installAgentConfigs,
+): Promise<void> {
+  if (opts.mcpToken && opts.agent && opts.agent !== 'claude-code') {
+    throw new Error('--mcp-token supports Claude Code only; other clients use OAuth')
+  }
   if (!opts.agent || opts.agent === 'claude-code') {
-    await registerMcp(undefined, undefined, !!opts.mcpToken)
+    const status = await register(undefined, undefined, !!opts.mcpToken)
+    // Missing Claude is an optional discovery miss only for the default OAuth install. A
+    // targeted install, token request, or attempted-but-failed add must not report success.
+    if ((opts.agent || opts.mcpToken || status === 'failed') && !requireMcpRegistration(status)) return
     if (opts.agent) return
   }
-  const done = await installAgentConfigs(opts.agent)
+  const done = await installConfigs(opts.agent)
   if (done.length) info(`✓ MCP — configured for ${done.join(', ')} (restart those tools to pick it up)`)
   else if (opts.agent) { /* messages already printed */ }
   else info('  no other MCP-capable agents detected (supported: cursor, codex, opencode, copilot, factory-droid)')
