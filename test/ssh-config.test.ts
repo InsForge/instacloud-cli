@@ -226,8 +226,8 @@ describe('known_hosts trust anchor', () => {
   const CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICAcaFakeCAKeyForTestsOnlyAAAAAAAAAAAAAAAAAAAA'
 
   it('adds the @cert-authority line, tagged as ours', () => {
-    const out = upsertCertAuthority('', '*.compute.example', CA)
-    expect(out).toBe(`@cert-authority *.compute.example ${CA} ${CA_MARKER}\n`)
+    const out = upsertCertAuthority('', 'ssh.*.compute.example', CA)
+    expect(out).toBe(`@cert-authority ssh.*.compute.example ${CA} ${CA_MARKER}\n`)
   })
 
   it('is idempotent on the KEY, so a changed host pattern updates rather than duplicates', () => {
@@ -633,21 +633,21 @@ describe('a trust anchor is matched field by field, never by substring', () => {
     // A base64 blob is an unanchored substring of any longer blob sharing its
     // prefix. Deleting that line is not a visible failure -- it is a host-key
     // prompt on every connection to a region that used to be trusted.
-    const other = `@cert-authority *.other.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyKeyKeyFakeCAKeyForTestsAAAAAAAAAAAAAAAAAAALONGER ${CA_MARKER}\n`
-    const out = upsertCertAuthority(other, '*.compute.example', CA)
-    expect(out, 'an unrelated anchor was deleted by a substring match').toContain('*.other.example')
-    expect(out).toContain('*.compute.example')
+    const other = `@cert-authority ssh.*.other.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyKeyKeyFakeCAKeyForTestsAAAAAAAAAAAAAAAAAAALONGER ${CA_MARKER}\n`
+    const out = upsertCertAuthority(other, 'ssh.*.compute.example', CA)
+    expect(out, 'an unrelated anchor was deleted by a substring match').toContain('ssh.*.other.example')
+    expect(out).toContain('ssh.*.compute.example')
   })
 
   it('keeps an anchor whose HOST PATTERN merely extends ours', () => {
-    const other = `@cert-authority *.compute.example.net ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherOtherFakeCAKeyForTestsAAAAAAAAAAAAAAAAAA ${CA_MARKER}\n`
-    const out = upsertCertAuthority(other, '*.compute.example', CA)
-    expect(out).toContain('*.compute.example.net')
+    const other = `@cert-authority ssh.*.compute.example.net ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherOtherFakeCAKeyForTestsAAAAAAAAAAAAAAAAAA ${CA_MARKER}\n`
+    const out = upsertCertAuthority(other, 'ssh.*.compute.example', CA)
+    expect(out).toContain('ssh.*.compute.example.net')
   })
 
   it('still replaces the anchor for the SAME host pattern (rotation)', () => {
-    const first = upsertCertAuthority('', '*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOldOldOldFakeRetiredCAKeyForTestsAAAAAAAAAAAA')
-    const rotated = upsertCertAuthority(first, '*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINewNewNewFakeRotatedCAKeyForTestsAAAAAAAAAAAA')
+    const first = upsertCertAuthority('', 'ssh.*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOldOldOldFakeRetiredCAKeyForTestsAAAAAAAAAAAA')
+    const rotated = upsertCertAuthority(first, 'ssh.*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINewNewNewFakeRotatedCAKeyForTestsAAAAAAAAAAAA')
     expect(rotated, 'the retired CA stayed trusted').not.toContain('AAAAC3NzaC1lZDI1NTE5AAAAIOldOldOldFakeRetiredCAKeyForTestsAAAAAAAAAAAA')
     expect(rotated).toContain('AAAAC3NzaC1lZDI1NTE5AAAAINewNewNewFakeRotatedCAKeyForTestsAAAAAAAAAAAA')
     expect(rotated.split('@cert-authority').length - 1).toBe(1)
@@ -661,8 +661,8 @@ describe('a trust anchor is matched field by field, never by substring', () => {
   })
 
   it('never touches an anchor the user added themselves', () => {
-    const mine = '@cert-authority *.compute.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyKeyKeyFakeCAKeyForTestsAAAAAAAAAAAAAAAAAAA\n'
-    const out = upsertCertAuthority(mine, '*.compute.example', CA)
+    const mine = '@cert-authority ssh.*.compute.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyKeyKeyFakeCAKeyForTestsAAAAAAAAAAAAAAAAAAA\n'
+    const out = upsertCertAuthority(mine, 'ssh.*.compute.example', CA)
     expect(out, 'an unmarked anchor the user owns was deleted').toContain(mine.trim())
   })
 })
@@ -691,5 +691,49 @@ describe('a Windows path is normalised, not escaped away', () => {
 
   it('leaves a POSIX path exactly as it was', () => {
     expect(quoteConfigPath('/home/dev/.insta/ssh/id')).toBe('"/home/dev/.insta/ssh/id"')
+  })
+})
+
+describe('the generated config works on Windows, where multiplexing does not', () => {
+  const win = (entries = [entry()]) => renderConfigBlock({
+    entries, identityFile: '/home/dev/.insta/ssh/id_ed25519', platform: 'win32',
+  })
+
+  it('omits ControlMaster, ControlPath and ControlPersist on win32', () => {
+    // Win32-OpenSSH does not implement ControlMaster (PowerShell/Win32-OpenSSH
+    // #1328, #405) and FAILS the connection rather than ignoring the directive,
+    // so every alias would be unusable -- not merely unmultiplexed. The
+    // ControlPath also contains a `:` before %p, which is not a legal character
+    // in a Windows filename.
+    const out = win()
+    expect(out, 'ControlMaster would fail every connection on Windows').not.toContain('ControlMaster')
+    expect(out).not.toContain('ControlPath')
+    expect(out).not.toContain('ControlPersist')
+    expect(out, 'a colon reached a Windows path').not.toContain('%r@%h:%p')
+  })
+
+  it('still routes, authenticates and renews on Windows', () => {
+    // The POSITIVE control: dropping the multiplexing lines must not drop the
+    // lines that make the alias work at all.
+    const out = renderConfigBlock({
+      entries: [entry()], identityFile: '/home/dev/.insta/ssh/id_ed25519',
+      ensureCertCommand: 'insta __ssh-ensure-cert', platform: 'win32',
+    })
+    expect(out).toContain('Host api.insta')
+    expect(out).toContain('HostName ssh.us-west-1.compute.example')
+    expect(out).toContain('User svc-abc')
+    expect(out).toContain('IdentitiesOnly yes')
+    expect(out).toContain('IdentityFile "/home/dev/.insta/ssh/id_ed25519"')
+    expect(out).toContain('CertificateFile "/home/dev/.insta/ssh/api.insta-cert.pub"')
+    expect(out).toContain('insta __ssh-ensure-cert api.insta')
+    expect(out.trimEnd().endsWith(BLOCK_END)).toBe(true)
+  })
+
+  it('keeps multiplexing everywhere else', () => {
+    for (const platform of ['darwin', 'linux'] as const) {
+      const out = renderConfigBlock({ entries: [entry()], identityFile: '/home/dev/.insta/ssh/id_ed25519', platform })
+      expect(out, `${platform} lost connection multiplexing`).toContain('ControlMaster auto')
+      expect(out).toContain('ControlPersist 10m')
+    }
   })
 })

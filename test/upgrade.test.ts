@@ -2,7 +2,8 @@ import { test, expect, beforeEach } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cmpSemver, decideAction, detectChannel, readCache, writeCache, type CheckCache } from '../src/commands/upgrade.js'
+import { cmpSemver, decideAction, detectChannel, readCache, writeCache, type CheckCache, skipsUpdateCheck } from '../src/commands/upgrade.js'
+import { ENSURE_CERT_COMMAND } from '../src/commands/compute.js'
 
 beforeEach(() => {
   process.env.INSTA_UPDATE_CACHE = join(mkdtempSync(join(tmpdir(), 'insta-up-')), 'update-check.json')
@@ -48,4 +49,30 @@ test('decideAction: auto is throttled after a recent attempt', () => {
   const stale: CheckCache = { checkedAt: 1, latest: '0.0.9', lastAutoAt: now - 2 * 60 * 60 * 1000 }
   expect(decideAction(recent, '0.0.4', true, 'binary', now)).toBe('nudge')
   expect(decideAction(stale, '0.0.4', true, 'binary', now)).toBe('auto')
+})
+
+// Internal commands must never nudge about an update or spawn a background one.
+test('the update machinery itself is exempt from the update check', () => {
+  expect(skipsUpdateCheck('upgrade')).toBe(true)
+  expect(skipsUpdateCheck('autoupdate')).toBe(true)
+  expect(skipsUpdateCheck('__update-check')).toBe(true)
+})
+
+test('the ssh renewal hook is exempt, by the name the config block invokes', () => {
+  // OpenSSH runs it while PARSING ssh_config on every ssh/scp/`ssh -G`/IDE
+  // connection, so a nudge lands in the ssh session's stderr and an
+  // auto-upgrade spawns a detached process mid-connection. Read from the
+  // constant, so renaming the command without keeping `__` fails here.
+  const leaf = ENSURE_CERT_COMMAND.split(/\s+/).find((t) => t.startsWith('__'))!
+  expect(skipsUpdateCheck(leaf), 'the ssh renewal hook runs the update check').toBe(true)
+  expect(skipsUpdateCheck('__anything-added-later'), 'the rule is not a prefix rule').toBe(true)
+})
+
+test('an ordinary command still checks for updates', () => {
+  // The positive control: a rule broad enough to exempt every internal command
+  // could also exempt every real one, and that failure is invisible from a
+  // table of exemptions.
+  for (const cmd of ['deploy', 'compute', 'login', 'secrets', undefined]) {
+    expect(skipsUpdateCheck(cmd), `${cmd} stopped checking for updates`).toBe(false)
+  }
 })

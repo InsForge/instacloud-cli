@@ -96,6 +96,10 @@ export type ConfigBlockOpts = {
   /** Renewal-hook command PREFIX. The alias is appended here, by this function,
    *  after validation — see renderEnsureCertMatch. Omit to skip the hook. */
   ensureCertCommand?: string
+  /** Defaults to the running platform. Injected so the Windows shape is
+   *  testable from any host — the effective-config tests need a real `ssh` and
+   *  skip on Windows, so nothing else would ever exercise that branch. */
+  platform?: NodeJS.Platform
 }
 
 /**
@@ -138,13 +142,26 @@ export function renderConfigBlock(o: ConfigBlockOpts): string {
       // Without this line a developer with a full ssh-agent gets intermittent,
       // unexplainable auth failures.
       '  IdentitiesOnly yes',
-      // Collapses scp, an IDE's several connections and a second terminal onto
-      // ONE connection. Without it a single developer can reach the per-service
-      // session cap in an afternoon without ever opening a second terminal.
-      '  ControlMaster auto',
-      '  ControlPath ~/.insta/ssh/cm-%r@%h:%p',
-      '  ControlPersist 10m',
     )
+    // Connection multiplexing collapses scp, an IDE's several connections and a
+    // second terminal onto ONE connection; without it a single developer can
+    // reach the per-service session cap in an afternoon.
+    //
+    // OMITTED ON WINDOWS, where it is not an optimisation but a broken config.
+    // Win32-OpenSSH does not implement ControlMaster (PowerShell/Win32-OpenSSH
+    // #1328, #405) and fails the connection rather than ignoring the directive,
+    // and the ControlPath itself contains a `:` before %p, which is not a legal
+    // character in a Windows filename. Every alias would be unusable on a
+    // platform this repo runs CI for. The effective-config tests need a real
+    // `ssh` and skip on Windows, so this branch is asserted on the rendered
+    // text instead.
+    if ((o.platform ?? process.platform) !== 'win32') {
+      lines.push(
+        '  ControlMaster auto',
+        '  ControlPath ~/.insta/ssh/cm-%r@%h:%p',
+        '  ControlPersist 10m',
+      )
+    }
     if (o.ensureCertCommand) {
       // Renewal happens while OpenSSH PARSES the config, before it connects, so
       // a certificate that expired since the last login is replaced silently
@@ -259,16 +276,32 @@ export function renderCertAuthority(hostPattern: string, caKey: string): string 
 
 /** A host pattern narrow enough to anchor a CA to.
  *
- *  One wildcard label at most, and never a bare `*` or a pattern with no dots:
- *  `@cert-authority *` makes the platform's CA authoritative for github.com and
- *  every other host the user connects to. The wildcard is only legitimate in
- *  the REGION position, which is what hostPatternFor produces. */
+ *  A `@cert-authority` line tells ssh "this CA may vouch for any host matching
+ *  this pattern", so the pattern is the blast radius. Three rules, and the
+ *  third is the one that matters:
+ *
+ *   1. No bare `*`, and at most one wildcard label -- `@cert-authority *` makes
+ *      the platform's CA authoritative for github.com and everything else.
+ *   2. The wildcard is never the FIRST label: `*.com` is the same hole.
+ *   3. At least TWO fixed labels must follow the wildcard. This is what keeps
+ *      the pattern inside a domain the gateway actually occupies. Counting
+ *      total labels is not enough: `ssh.*.com` has three labels and is a
+ *      catastrophe -- it makes the CA authoritative for ssh.vendor.com,
+ *      ssh.google.com and every other `ssh.<anything>.com`. Requiring two
+ *      labels after the wildcard means the wildcard can only ever range over a
+ *      sub-label of a specific registered domain.
+ *
+ *  A pattern with NO wildcard is an exact host and needs only to be a hostname. */
 export function isSafeCAHostPattern(v: unknown): v is string {
   if (typeof v !== 'string' || v.length === 0 || v.length > 253) return false
   const labels = v.split('.')
-  if (labels.length < 3) return false
+  if (labels.length < 2) return false
+  if (!labels.every((l) => l === '*' || /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/i.test(l))) return false
+  const star = labels.indexOf('*')
+  if (star === -1) return true
   if (labels.filter((l) => l === '*').length > 1) return false
-  return labels.every((l) => l === '*' || /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/i.test(l))
+  if (star === 0) return false
+  return labels.length - star - 1 >= 2
 }
 
 /**

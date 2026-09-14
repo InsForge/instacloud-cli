@@ -752,12 +752,12 @@ export async function computeLimits(serviceName: string | undefined, opts: Limit
 
 // ---- ssh (interactive sessions) --------------------------------------------
 
-import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import {
-  aliasFor, isSafeAlias, isSafeConfigValue, isSafeSSHHost, renderConfigBlock, upsertCertAuthority, upsertConfigBlock, type HostEntry,
+  aliasFor, isSafeAlias, isSafeConfigValue, isSafeSSHHost, parseCAPublicKey, renderConfigBlock, upsertCertAuthority, upsertConfigBlock, type HostEntry,
 } from './ssh-config.js'
 
 /** Where this CLI keeps its own SSH material. Deliberately NOT ~/.ssh: we never
@@ -926,8 +926,33 @@ async function mintCert(api: ApiClient, projectId: string, serviceId: string, pu
   if (res.status < 200 || res.status >= 300) {
     throw new ApiError(res.status, res.body?.error ?? 'could not issue an ssh certificate')
   }
-  writeFileAtomicSync(instaCertPath(alias), res.body.certificate.trim() + '\n', { mode: 0o644 })
-  return res.body as CertResponse
+  // Validated BEFORE the write, not after. The certificate file is the live
+  // credential for an alias that may already be working, so a response we go
+  // on to reject must not have replaced it on the way -- the caller would be
+  // left with an error message and a broken alias. Same ordering rule as the
+  // collision check: nothing is written until the whole response is known-good.
+  const out = validateCertResponse(res.body)
+  writeFileAtomicSync(instaCertPath(alias), out.certificate.trim() + '\n', { mode: 0o644 })
+  return out
+}
+
+/** Everything the plane returns that we will write into ~/.ssh or ~/.insta. */
+export function validateCertResponse(body: unknown): CertResponse {
+  const b = (body ?? {}) as Record<string, unknown>
+  if (typeof b.certificate !== 'string' || b.certificate.trim() === '') {
+    throw new Error('the platform returned no ssh certificate')
+  }
+  if (!isSafeConfigValue(b.host) || !isSafeSSHHost(b.host)) {
+    throw new Error(`the platform returned an unusable ssh host: ${JSON.stringify(String(b.host).slice(0, 64))}`)
+  }
+  if (!isSafeConfigValue(b.username)) {
+    throw new Error(`the platform returned an unusable ssh username: ${JSON.stringify(String(b.username).slice(0, 64))}`)
+  }
+  if (typeof b.expiresAt !== 'string' || b.expiresAt === '') throw new Error('the platform returned no certificate expiry')
+  // Parsed here rather than at install time so a malformed key fails before
+  // anything is written, instead of after the alias is already recorded.
+  if (b.caPublicKey !== undefined) parseCAPublicKey(b.caPublicKey)
+  return b as CertResponse
 }
 
 /** One line covers every node in every region, which is the whole reason for a
@@ -978,9 +1003,27 @@ function installConfigBlock(store: AliasStore): void {
  *    error spliced into the middle of an ssh session.
  */
 export async function ensureCertForAlias(alias: string): Promise<void> {
+  let release: (() => void) | undefined
   try {
     if (!isSafeAlias(alias)) return
     if (!certNeedsRenewal(instaCertPath(alias))) return
+
+    // An IDE opens several connections at once and `scp` adds more, so the
+    // near-expiry certificate is observed by every one of them simultaneously
+    // and each would mint its own replacement -- redundant requests against a
+    // rate-limited endpoint, racing each other's known_hosts writes.
+    //
+    // NON-BLOCKING on purpose: losing the race returns immediately rather than
+    // waiting. This runs inside OpenSSH's config parse, so a lock that waits is
+    // a lock that can hang `ssh` itself -- strictly worse than the duplicate
+    // request it would prevent. The loser simply lets the winner renew.
+    release = acquireRenewalLock(alias)
+    if (!release) return
+    // Re-checked after the lock. Without this the second process through the
+    // door renews again over the certificate the first just wrote -- the lock
+    // would serialise the stampede instead of collapsing it.
+    if (!certNeedsRenewal(instaCertPath(alias))) return
+
     // The alias is the ONLY input: it carries the project, branch and service
     // the certificate was issued for, so renewal cannot drift to another one.
     const rec = readAliasStore()[alias]
@@ -990,7 +1033,40 @@ export async function ensureCertForAlias(alias: string): Promise<void> {
     if (out.caPublicKey) installCertAuthority(hostPatternFor(out.host), out.caPublicKey)
   } catch {
     // Deliberately swallowed. See above.
+  } finally {
+    release?.()
   }
+}
+
+/** Renewal timeout. A lock older than this belonged to a process that died
+ *  holding it; without a staleness rule one crash would disable renewal for
+ *  that alias permanently, which is a worse failure than a duplicate mint. */
+const RENEWAL_LOCK_STALE_MS = 60_000
+
+/** Take the per-alias renewal lock, or return undefined if someone else holds
+ *  a fresh one. Never waits — see the call site. */
+export function acquireRenewalLock(alias: string, now = Date.now()): (() => void) | undefined {
+  const path = join(instaSSHDir(), `${alias}.renew.lock`)
+  const take = (): (() => void) | undefined => {
+    try {
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+      // wx is the atomic part: exclusive create fails if the file exists, so
+      // exactly one process can win regardless of how many arrive together.
+      writeFileSync(path, String(process.pid), { flag: 'wx', mode: 0o600 })
+      return () => { try { unlinkSync(path) } catch { /* already gone */ } }
+    } catch {
+      return undefined
+    }
+  }
+  const held = take()
+  if (held) return held
+  try {
+    if (now - statSync(path).mtimeMs < RENEWAL_LOCK_STALE_MS) return undefined
+    unlinkSync(path)
+  } catch {
+    return undefined
+  }
+  return take()
 }
 
 /** Side-effect seams, following the `TrackDeps` convention used by telemetry.
@@ -1029,13 +1105,18 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
   assertAliasFree(store, alias, { projectId: p.projectId, serviceId: svc.id, branch })
 
   const out = await mint(api, p.projectId, svc.id, ensureKeyPair(), alias)
-  // The plane authored these and they are about to be written into ~/.ssh
-  // files, so they are checked at the boundary rather than trusted because of
-  // where they came from.
-  if (!isSafeConfigValue(out.host) || !isSafeConfigValue(out.username)) {
-    throw new Error('the platform returned an ssh host or username this CLI will not write to ~/.ssh/config')
+  // --setup PROMISES a trust anchor, so a response without one cannot be
+  // reported as configured. Skipping installCA and carrying on left plain
+  // `ssh`/`scp` facing a host-key prompt on every new node behind the load
+  // balancer -- the exact failure the anchor exists to prevent -- while the
+  // command printed the short alias and claimed success. Checked before
+  // anything is installed, so the refusal is clean.
+  if (opts.setup && !out.caPublicKey) {
+    throw new Error(
+      'the platform did not return an ssh certificate authority key, so `--setup` cannot install the trust anchor it promises.\n' +
+      'Retry, and contact support if it persists; the certificate itself was issued and `insta compute ssh ' + svc.name + '` still prints a usable command.',
+    )
   }
-  if (!isSafeSSHHost(out.host)) throw new Error(`the platform returned an unusable ssh host: ${JSON.stringify(String(out.host).slice(0, 64))}`)
 
   store[alias] = { projectId: p.projectId, ...(branch ? { branch } : {}), serviceId: svc.id, host: out.host, username: out.username }
   writeAliasStore(store)
@@ -1078,7 +1159,7 @@ export function sshAdvice(r: {
         // this command just issued -- it fails, having printed success.
         // IdentitiesOnly stops a loaded agent from spending the server's
         // MaxAuthTries on unrelated keys before ours is ever tried.
-        `ssh -i ${shQuote(r.identityFile)} -o CertificateFile=${shQuote(r.certificateFile)} -o IdentitiesOnly=yes ${r.username}@${r.host}`,
+        `ssh -i ${shQuote(r.identityFile)} -o CertificateFile=${shQuote(r.certificateFile)} -o IdentitiesOnly=yes ${shQuote(`${r.username}@${r.host}`)}`,
         `  run \`insta compute ssh ${r.serviceName} --setup\` once for the shorter \`ssh ${r.alias}\`, automatic renewal, and scp/-L support`,
       ]
   return [...head, `  certificate valid until ${r.expiresAt}`]
@@ -1091,10 +1172,24 @@ function shQuote(v: string): string {
 }
 
 /** `ssh.us-west-1.compute.example` -> `ssh.*.compute.example`.
- *  Scoped to the SSH names rather than the whole domain: a trust anchor for
- *  `*.compute.example` would also cover every tenant's service hostname. */
+ *
+ *  Widening the REGION label is the whole point: one anchor then covers every
+ *  region without a line per gateway. But widening is only safe while the
+ *  wildcard stays deep inside a domain the gateway occupies, and blindly
+ *  replacing the second label does not guarantee that. `ssh.example.com` --
+ *  a hostname isSafeSSHHost accepts -- became `ssh.*.com`, which makes the
+ *  platform's CA authoritative for ssh.vendor.com and every other
+ *  `ssh.<anything>.com`.
+ *
+ *  So the wildcard is introduced ONLY when at least two fixed labels remain
+ *  after it. Anything else anchors the EXACT host: strictly narrower, always
+ *  correct, and it costs nothing but one extra known_hosts line per region for
+ *  a deployment whose names are shaped that way. Narrower-and-works beats
+ *  wider-and-guesses. */
 export function hostPatternFor(host: string): string {
   const parts = host.split('.')
-  if (parts.length < 3) return host
+  // parts[0] stays fixed, parts[1] becomes the wildcard, so parts.slice(2) is
+  // what follows it -- that is the count rule 3 of isSafeCAHostPattern applies.
+  if (parts.length < 4) return host
   return [parts[0], '*', ...parts.slice(2)].join('.')
 }

@@ -381,9 +381,23 @@ export async function autoupdate(mode?: string): Promise<void> {
 
 // Called once at CLI start-up. Never blocks: reads the cache synchronously, prints at most one
 // stderr line, and (when due) spawns detached children for the registry check / quiet upgrade.
+/** Commands that must never nudge about an update or spawn a background one.
+ *
+ *  `upgrade`/`autoupdate` are the update machinery itself. Every `__` command
+ *  is internal machinery rather than a user at a prompt, and the rule is
+ *  written as a PREFIX so the next such command inherits it instead of
+ *  rediscovering it -- which is exactly how this was missed:
+ *  `__ssh-ensure-cert` is run by OpenSSH while it PARSES ssh_config, on every
+ *  ssh, scp, `ssh -G` and IDE connection, so a nudge here is written straight
+ *  into the ssh session's stderr and an auto-upgrade spawns a detached process
+ *  mid-connection. Same prefix rule trackCommand already applies to telemetry.
+ */
+export function skipsUpdateCheck(cmd: string | undefined): boolean {
+  return cmd === 'upgrade' || cmd === 'autoupdate' || !!cmd?.startsWith('__')
+}
+
 export function maybeUpdate(current: string, argv: string[]): void {
-  const cmd = argv[2]
-  if (cmd === 'upgrade' || cmd === 'autoupdate' || cmd === '__update-check') return
+  if (skipsUpdateCheck(argv[2])) return
   const channel = detectChannel()
   const cache = readCache()
   const now = Date.now()
