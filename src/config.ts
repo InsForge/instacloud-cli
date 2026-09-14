@@ -133,17 +133,20 @@ export async function isHomeLinkTarget(cwd = process.cwd()): Promise<boolean> {
 }
 
 /** Git-style ancestor lookup: the nearest directory at-or-above `cwd` containing
- *  .insta/project.json — so "link once" works from any subdirectory of the project. The home
- *  directory is skipped (see isHomeDir). */
+ *  .insta/project.json — so "link once" works from any subdirectory of the project. The search
+ *  stops at the home directory (see isHomeDir): neither home nor anything above it is a project
+ *  root for a directory inside home. */
 export async function findProjectRoot(cwd = process.cwd()): Promise<string | null> {
   let dir = resolve(cwd)
   for (;;) {
-    if (!isHomeDir(dir)) {
-      try {
-        await readFile(join(dir, PROJECT_DIR, PROJECT_FILE), 'utf8')
-        return dir
-      } catch { /* keep climbing */ }
-    }
+    // Stop AT the home directory rather than skipping it: a link above home is not a project for
+    // home or anything below it, and climbing past home let `insta project link` run in ~ resolve
+    // to, and overwrite, an ancestor's link after the home-directory check had passed.
+    if (isHomeDir(dir)) return null
+    try {
+      await readFile(join(dir, PROJECT_DIR, PROJECT_FILE), 'utf8')
+      return dir
+    } catch { /* keep climbing */ }
     const parent = dirname(dir)
     if (parent === dir) return null // filesystem root
     dir = parent

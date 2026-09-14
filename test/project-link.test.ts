@@ -150,6 +150,35 @@ test('linking below the home directory never overwrites a stray ~/.insta/project
   expect(readJson(linkFile(sub)).projectId).toBe('p-2')
 })
 
+// A link ABOVE the home directory (say /Users/.insta/project.json) must not become home's link either:
+// skipping home and climbing on made `insta project link` in ~ resolve to, and overwrite, that link.
+function homeUnderLinkedAncestor(): { ancestor: string; home: string; sub: string } {
+  const ancestor = mkdtempSync(join(tmpdir(), 'insta-above-home-'))
+  mkdirSync(join(ancestor, '.insta'), { recursive: true })
+  writeFileSync(linkFile(ancestor), JSON.stringify({ ...proj, projectId: 'p-above' }))
+  const home = join(ancestor, 'home')
+  const sub = join(home, 'code', 'app')
+  mkdirSync(sub, { recursive: true })
+  process.env.HOME = home
+  process.env.USERPROFILE = home
+  return { ancestor, home, sub }
+}
+
+test('a link above the home directory is not a link for home or the directories below it', async () => {
+  const { home, sub } = homeUnderLinkedAncestor()
+  expect(await readProject(home)).toBeNull()
+  expect(await readProject(sub)).toBeNull()
+})
+
+test('linking the home directory is refused even when an ancestor of home is linked, and that link is untouched', async () => {
+  const { ancestor, home } = homeUnderLinkedAncestor()
+  const before = readFileSync(linkFile(ancestor), 'utf8')
+  await expect(writeProject({ ...proj, projectId: 'p-2' }, home)).rejects.toBeInstanceOf(CliExit)
+  await expect(persistAutoLink({ ...proj, projectId: 'p-2' }, home)).resolves.toBe(false)
+  expect(readFileSync(linkFile(ancestor), 'utf8')).toBe(before)
+  expect(existsSync(linkFile(home))).toBe(false)
+})
+
 test('linking the home directory itself is refused', async () => {
   const { home } = fakeHome()
   await expect(writeProject(proj, home)).rejects.toBeInstanceOf(CliExit)
