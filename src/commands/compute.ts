@@ -756,8 +756,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, w
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import {
-  aliasFor, isSafeAlias, isSafeConfigValue, isSafeSSHHost, parseCAPublicKey, renderConfigBlock, upsertCertAuthority, upsertConfigBlock, type HostEntry,
+  aliasFor, isSafeAlias, isSafeConfigValue, isSafeSSHHost, isSafeSSHUsername, isSafeTimestamp, isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, renderConfigBlock, upsertCertAuthority, upsertConfigBlock, type HostEntry,
 } from './ssh-config.js'
 
 /** Where this CLI keeps its own SSH material. Deliberately NOT ~/.ssh: we never
@@ -921,8 +922,8 @@ function ensureKeyPair(): string {
 
 type CertResponse = { certificate: string; host: string; username: string; expiresAt: string; caPublicKey?: string }
 
-async function mintCert(api: ApiClient, projectId: string, serviceId: string, publicKey: string, alias: string): Promise<CertResponse> {
-  const res = await api.rawRequest('POST', `/projects/${projectId}/services/${serviceId}/ssh-cert`, { publicKey })
+async function mintCert(api: ApiClient, projectId: string, serviceId: string, publicKey: string, alias: string, signal?: AbortSignal): Promise<CertResponse> {
+  const res = await api.rawRequest('POST', `/projects/${projectId}/services/${serviceId}/ssh-cert`, { publicKey }, { signal })
   if (res.status < 200 || res.status >= 300) {
     throw new ApiError(res.status, res.body?.error ?? 'could not issue an ssh certificate')
   }
@@ -939,16 +940,25 @@ async function mintCert(api: ApiClient, projectId: string, serviceId: string, pu
 /** Everything the plane returns that we will write into ~/.ssh or ~/.insta. */
 export function validateCertResponse(body: unknown): CertResponse {
   const b = (body ?? {}) as Record<string, unknown>
-  if (typeof b.certificate !== 'string' || b.certificate.trim() === '') {
-    throw new Error('the platform returned no ssh certificate')
+  // The CONTENT, not merely the presence. A non-empty string was enough to
+  // replace a working alias's live credential with something OpenSSH cannot
+  // parse -- failing later, inside ssh, with a message pointing at the file
+  // rather than at the plane that sent it.
+  if (!isSSHCertificateRecord(b.certificate)) {
+    throw new Error('the platform did not return a usable ssh certificate')
   }
   if (!isSafeConfigValue(b.host) || !isSafeSSHHost(b.host)) {
     throw new Error(`the platform returned an unusable ssh host: ${JSON.stringify(String(b.host).slice(0, 64))}`)
   }
-  if (!isSafeConfigValue(b.username)) {
+  // Principal syntax, which above all excludes a leading `-`: the printed
+  // command is argv for `ssh`, and `ssh` parses its own options no matter how
+  // the shell quoted them.
+  if (!isSafeSSHUsername(b.username)) {
     throw new Error(`the platform returned an unusable ssh username: ${JSON.stringify(String(b.username).slice(0, 64))}`)
   }
-  if (typeof b.expiresAt !== 'string' || b.expiresAt === '') throw new Error('the platform returned no certificate expiry')
+  // Printed straight to a terminal, so control characters and escape sequences
+  // are refused rather than rendered.
+  if (!isSafeTimestamp(b.expiresAt)) throw new Error('the platform returned an unusable certificate expiry')
   // Parsed here rather than at install time so a malformed key fails before
   // anything is written, instead of after the alias is already recorded.
   if (b.caPublicKey !== undefined) parseCAPublicKey(b.caPublicKey)
@@ -1002,7 +1012,7 @@ function installConfigBlock(store: AliasStore): void {
  *    stays in place and the login then fails with SSH's own message, not a CLI
  *    error spliced into the middle of an ssh session.
  */
-export async function ensureCertForAlias(alias: string): Promise<void> {
+export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQUEST_TIMEOUT_MS): Promise<void> {
   let release: (() => void) | undefined
   try {
     if (!isSafeAlias(alias)) return
@@ -1029,7 +1039,13 @@ export async function ensureCertForAlias(alias: string): Promise<void> {
     const rec = readAliasStore()[alias]
     if (!rec) return
     const api = await ApiClient.load()
-    const out = await mintCert(api, rec.projectId, rec.serviceId, ensureKeyPair(), alias)
+    // A DEADLINE, because this runs inside OpenSSH's config parse. A server
+    // that accepts the connection and then says nothing would otherwise block
+    // ssh, scp, `ssh -G` and every IDE connection for as long as it liked --
+    // the catch below only helps once the request has actually rejected.
+    // AbortSignal rather than a Promise.race: a race returns while leaving the
+    // socket open, so the process lingers anyway.
+    const out = await mintCert(api, rec.projectId, rec.serviceId, ensureKeyPair(), alias, AbortSignal.timeout(timeoutMs))
     if (out.caPublicKey) installCertAuthority(hostPatternFor(out.host), out.caPublicKey)
   } catch {
     // Deliberately swallowed. See above.
@@ -1043,17 +1059,33 @@ export async function ensureCertForAlias(alias: string): Promise<void> {
  *  that alias permanently, which is a worse failure than a duplicate mint. */
 const RENEWAL_LOCK_STALE_MS = 60_000
 
+/** How long the renewal request may take before it is abandoned. Sized for the
+ *  path it sits on: OpenSSH is parsing its config and the user is waiting, so a
+ *  renewal that cannot finish quickly is better skipped -- the existing
+ *  certificate is still in place and the login proceeds on it. */
+const RENEWAL_REQUEST_TIMEOUT_MS = 5_000
+
 /** Take the per-alias renewal lock, or return undefined if someone else holds
  *  a fresh one. Never waits — see the call site. */
 export function acquireRenewalLock(alias: string, now = Date.now()): (() => void) | undefined {
   const path = join(instaSSHDir(), `${alias}.renew.lock`)
   const take = (): (() => void) | undefined => {
+    // A token, not just the pid. A renewal slower than the staleness window
+    // has its lock broken by the next caller; without an ownership check the
+    // original holder's release would then delete the NEW holder's lock,
+    // leaving the file unlocked while two renewals ran -- the lock defeating
+    // itself precisely when it is under load.
+    const token = `${process.pid}:${randomUUID()}`
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
       // wx is the atomic part: exclusive create fails if the file exists, so
       // exactly one process can win regardless of how many arrive together.
-      writeFileSync(path, String(process.pid), { flag: 'wx', mode: 0o600 })
-      return () => { try { unlinkSync(path) } catch { /* already gone */ } }
+      writeFileSync(path, token, { flag: 'wx', mode: 0o600 })
+      return () => {
+        try {
+          if (readFileSync(path, 'utf8') === token) unlinkSync(path)
+        } catch { /* already gone, or taken over by someone else */ }
+      }
     } catch {
       return undefined
     }
@@ -1186,10 +1218,12 @@ function shQuote(v: string): string {
  *  correct, and it costs nothing but one extra known_hosts line per region for
  *  a deployment whose names are shaped that way. Narrower-and-works beats
  *  wider-and-guesses. */
-export function hostPatternFor(host: string): string {
+export function hostPatternFor(host: string, suffixes?: readonly string[]): string {
+  // Counting labels is not enough to know where the registrable domain ends:
+  // `ssh.*.co.uk` keeps two labels after the wildcard and still ranges over
+  // every co.uk registrant. Only a suffix we KNOW we own may be widened;
+  // everything else is anchored exactly.
+  if (!mayWidenCAHost(host, suffixes)) return host
   const parts = host.split('.')
-  // parts[0] stays fixed, parts[1] becomes the wildcard, so parts.slice(2) is
-  // what follows it -- that is the count rule 3 of isSafeCAHostPattern applies.
-  if (parts.length < 4) return host
   return [parts[0], '*', ...parts.slice(2)].join('.')
 }

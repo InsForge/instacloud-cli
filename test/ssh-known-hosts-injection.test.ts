@@ -6,7 +6,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   renderCertAuthority, upsertCertAuthority, parseCAPublicKey, isSafeCAHostPattern, isSafeSSHHost,
-  CA_MARKER,
+  CA_MARKER, CA_WIDENABLE_SUFFIXES,
 } from '../src/commands/ssh-config.js'
 import { hostPatternFor } from '../src/commands/compute.js'
 
@@ -121,33 +121,67 @@ describe('the ssh host the plane returns is checked before it is stored', () => 
 
 
 describe('widening the region label never escapes the gateway domain', () => {
-  it('widens the region when two fixed labels remain after it', () => {
-    expect(hostPatternFor('ssh.us-west-1.compute.example')).toBe('ssh.*.compute.example')
-    expect(hostPatternFor('ssh.eu-central-1.compute.instacloud.tech')).toBe('ssh.*.compute.instacloud.tech')
+  // The RULE, tested against a stand-in list so it does not move when the real
+  // deployment list does.
+  const SUFFIXES = ['compute.example', 'compute.example.co.uk'] as const
+
+  it('widens the region under a suffix we own', () => {
+    expect(hostPatternFor('ssh.us-west-1.compute.example', SUFFIXES)).toBe('ssh.*.compute.example')
+    expect(hostPatternFor('ssh.eu-central-1.compute.example', SUFFIXES)).toBe('ssh.*.compute.example')
   })
 
-  // The finding. `ssh.example.com` is a hostname isSafeSSHHost accepts, and
-  // blindly replacing its second label produced `ssh.*.com` -- making the
-  // platform's CA authoritative for ssh.vendor.com, ssh.google.com and every
-  // other `ssh.<anything>.com`. Narrower-and-works beats wider-and-guesses, so
-  // a name that cannot be widened safely is anchored exactly.
-  const exact = ['ssh.example.com', 'example.com', 'gateway.internal', 'a.b.c']
+  // Finding one: blindly replacing the second label made `ssh.example.com`
+  // into `ssh.*.com`, handing the CA authority over ssh.vendor.com.
+  // Finding two: requiring two labels after the wildcard was not enough either,
+  // because `ssh.*.co.uk` keeps two and still ranges over every co.uk
+  // registrant -- `co.uk` is a public suffix, not somebody's domain. Counting
+  // labels cannot tell those apart without the public-suffix list, so the only
+  // hosts widened are the ones under a suffix we KNOW we own.
+  const exact = [
+    'ssh.example.com',
+    'ssh.us-west-1.co.uk',
+    'ssh.us-west-1.compute.evil.example',
+    'example.com',
+    'a.b.c',
+    // Ends with a widenable suffix as a STRING but is not under it.
+    'ssh.us-west-1.notcompute.example',
+  ]
   for (const host of exact) {
     it(`anchors ${host} exactly rather than widening it`, () => {
-      const pattern = hostPatternFor(host)
-      expect(pattern, 'the CA was widened across an unrelated domain').toBe(host)
+      const pattern = hostPatternFor(host, SUFFIXES)
+      expect(pattern, 'the CA was widened across a domain we do not own').toBe(host)
       expect(pattern).not.toContain('*')
       expect(isSafeCAHostPattern(pattern), 'the fallback produced a pattern setup would then reject').toBe(true)
     })
   }
 
+  it('does not widen a host that IS the suffix, with no region label', () => {
+    // `compute.example` under suffix `compute.example` has no region to widen;
+    // widening would produce `compute.*`, which is the bare-wildcard hole.
+    expect(hostPatternFor('compute.example', SUFFIXES)).toBe('compute.example')
+    expect(hostPatternFor('ssh.compute.example', SUFFIXES)).toBe('ssh.compute.example')
+  })
+
   it('produces a pattern the validator accepts, for every host the validator accepts', () => {
-    // The two used to disagree: isSafeSSHHost accepted a two-label host,
-    // hostPatternFor passed it through, and isSafeCAHostPattern then refused it
-    // -- so setup failed AFTER the certificate had been minted and stored.
-    for (const host of ['ssh.us-west-1.compute.example', 'ssh.example.com', 'example.com', 'a.b.c.d.e']) {
+    // These three used to disagree, and setup then failed AFTER the certificate
+    // had been minted and stored.
+    const hosts = [
+      'ssh.us-west-1.compute.example', 'ssh.example.com', 'example.com', 'a.b.c.d.e',
+      'ssh.us-west-1.co.uk', 'ssh.eu-central-1.compute.example',
+    ]
+    for (const host of hosts) {
       expect(isSafeSSHHost(host), host).toBe(true)
-      expect(isSafeCAHostPattern(hostPatternFor(host)), `setup would fail after minting for ${host}`).toBe(true)
+      expect(isSafeCAHostPattern(hostPatternFor(host, SUFFIXES)), `setup would fail after minting for ${host}`).toBe(true)
+    }
+  })
+
+  it('the SHIPPED list only contains suffixes deep enough to widen safely', () => {
+    // The rule above is only as good as the list it is given, and a one-label
+    // entry would reintroduce `ssh.*.com` through the front door.
+    for (const suffix of CA_WIDENABLE_SUFFIXES) {
+      expect(suffix.split('.').length, `${suffix} is too shallow to widen under`).toBeGreaterThanOrEqual(2)
+      expect(isSafeCAHostPattern(hostPatternFor(`ssh.us-west-1.${suffix}`)), suffix).toBe(true)
+      expect(hostPatternFor(`ssh.us-west-1.${suffix}`), suffix).toBe(`ssh.*.${suffix}`)
     }
   })
 })

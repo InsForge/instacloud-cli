@@ -262,6 +262,49 @@ export function parseCAPublicKey(value: unknown): { type: string; blob: string }
   return { type, blob }
 }
 
+/** Exactly ONE OpenSSH CERTIFICATE record.
+ *
+ *  A certificate is not a key: it is `<keytype>-cert-v01@openssh.com <base64>`.
+ *  Accepting any non-empty string meant a response of `"new-cert"` replaced a
+ *  working alias's live credential and only failed later, inside OpenSSH, with
+ *  a message pointing at the file rather than at the plane that sent it.
+ *
+ *  Checked structurally rather than by shelling out to `ssh-keygen -L`: this
+ *  runs on the renewal path OpenSSH invokes while parsing its config, and
+ *  adding a subprocess there trades one hazard for a slower one. The structure
+ *  is what decides whether the file can be parsed at all, which is the property
+ *  worth having before overwriting a working credential. */
+const CERT_TYPE_RE = /^[a-z0-9@.-]+-cert-v01@openssh\.com$/i
+
+export function isSSHCertificateRecord(v: unknown): v is string {
+  if (typeof v !== 'string') return false
+  const line = v.trim()
+  if (line === '' || /[\n\r]/.test(line)) return false
+  const parts = line.split(/[ \t]+/)
+  if (parts.length < 2) return false
+  const type = parts[0]!, blob = parts[1]!
+  if (!CERT_TYPE_RE.test(type)) return false
+  return /^[A-Za-z0-9+/]+={0,3}$/.test(blob) && blob.length >= 64
+}
+
+/** An SSH principal safe to place in a command line.
+ *
+ *  Chiefly: NEVER a leading `-`. Shell quoting does not help here, because the
+ *  hazard is not the shell -- `ssh` parses its own argv, so a destination of
+ *  `-oProxyCommand=id` is read as an OPTION however carefully it was quoted,
+ *  and the user pasting the advertised command runs it. */
+export function isSafeSSHUsername(v: unknown): v is string {
+  return isSafeConfigValue(v) && /^[A-Za-z0-9_][A-Za-z0-9_.@-]*$/.test(v) && v.length <= 64
+}
+
+/** A timestamp we are willing to print to a terminal. Rejects the control
+ *  characters and escape sequences that would let a response repaint the
+ *  screen or hide what it actually said. */
+export function isSafeTimestamp(v: unknown): v is string {
+  return typeof v === 'string' && v.length > 0 && v.length <= 64
+    && !/[\u0000-\u001f\u007f]/.test(v) && !Number.isNaN(Date.parse(v))
+}
+
 /** The trust anchor line for known_hosts, tagged as ours. */
 export function renderCertAuthority(hostPattern: string, caKey: string): string {
   // Rebuilt from the PARSED fields rather than interpolating what we were
@@ -292,6 +335,38 @@ export function renderCertAuthority(hostPattern: string, caKey: string): string 
  *      sub-label of a specific registered domain.
  *
  *  A pattern with NO wildcard is an exact host and needs only to be a hostname. */
+/** Gateway domains whose region label may be collapsed to a wildcard.
+ *
+ *  An allowlist, because the alternative is guessing where the registrable
+ *  domain ends, and that guess has no safe default. Requiring two labels after
+ *  the wildcard is NOT enough: `ssh.*.co.uk` has two and still ranges across
+ *  every co.uk registrant, because `co.uk` is a public suffix rather than
+ *  somebody's domain. Distinguishing those needs the public-suffix list, which
+ *  is a dependency and a moving target.
+ *
+ *  So we widen only under suffixes we know we own, and every other deployment
+ *  -- self-hosted, staging, a name we have not seen -- gets an EXACT anchor per
+ *  region. That costs one known_hosts line per region and is never wrong, which
+ *  is the right side to err on for a trust anchor. */
+export const CA_WIDENABLE_SUFFIXES = [
+  'compute.instacloud.tech',
+  'compute.insforge.dev',
+] as const
+
+/** Whether `host`'s region label may be replaced by a wildcard.
+ *
+ *  `suffixes` is a parameter so the RULE can be tested apart from the LIST:
+ *  the list is deployment configuration that will change, the rule is the
+ *  security property and must not. */
+export function mayWidenCAHost(host: string, suffixes: readonly string[] = CA_WIDENABLE_SUFFIXES): boolean {
+  const under = suffixes.find((suffix) => host.endsWith(`.${suffix}`))
+  if (!under) return false
+  // Still require the shape the wildcard assumes -- <name>.<region>.<suffix> --
+  // so the label being widened is genuinely the region and not part of the
+  // suffix itself.
+  return host.slice(0, host.length - under.length - 1).split('.').length >= 2
+}
+
 export function isSafeCAHostPattern(v: unknown): v is string {
   if (typeof v !== 'string' || v.length === 0 || v.length > 253) return false
   const labels = v.split('.')

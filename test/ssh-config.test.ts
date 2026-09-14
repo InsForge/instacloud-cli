@@ -346,9 +346,12 @@ describe('trust anchor scope', () => {
   // The anchor must cover the SSH names and not the whole domain: a pattern of
   // *.compute.example would also make this CA authoritative for every tenant's
   // service hostname.
-  it('widens only the region label', () => {
-    expect(hostPatternFor('ssh.us-west-1.compute.example')).toBe('ssh.*.compute.example')
+  it('widens only the region label, and only under a suffix we own', () => {
+    // `.example` is not a real gateway suffix, so it is anchored exactly --
+    // see ssh-known-hosts-injection.test.ts for why counting labels is not
+    // enough to decide this (ssh.*.co.uk).
     expect(hostPatternFor('ssh.ap-southeast-1.compute.instacloud.tech')).toBe('ssh.*.compute.instacloud.tech')
+    expect(hostPatternFor('ssh.us-west-1.compute.example')).toBe('ssh.us-west-1.compute.example')
   })
 
   it('leaves a host too short to have a region label alone', () => {

@@ -6,25 +6,47 @@
 // credential that had just been issued. Neither is visible from a test of any
 // single piece -- only from running the steps together and watching what
 // happens, and in what order.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { computeSSH, instaCertPath, instaAliasStorePath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock } from '../src/commands/compute.js'
+import { computeSSH, instaCertPath, instaAliasStorePath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias } from '../src/commands/compute.js'
 
-// Same convention as the rest of the suite: os.homedir() honours $HOME, so the
-// whole ~/.insta and ~/.ssh tree redirects into a temp dir without mocking fs.
+// Redirect the whole ~/.insta and ~/.ssh tree into a temp dir.
+//
+// BOTH variables, and that is not belt-and-braces: os.homedir() reads $HOME on
+// POSIX but $USERPROFILE on Windows. Setting only HOME silently redirected
+// nothing on the Windows runner, so all 36 tests in this file shared one real
+// alias store and leaked into each other -- two failed on CI while passing
+// everywhere else, and the rest were writing into the runner's actual home.
 let home: string
 let prevHome: string | undefined
+let prevProfile: string | undefined
 
 beforeEach(() => {
   prevHome = process.env.HOME
+  prevProfile = process.env.USERPROFILE
   home = mkdtempSync(join(tmpdir(), 'insta-ssh-orch-'))
   process.env.HOME = home
+  process.env.USERPROFILE = home
+  // A redirection that silently does nothing produces tests that pass against
+  // the REAL home, which is exactly how the Windows failure hid. Compared for
+  // equality against the path we expect, not by prefix: `home + "-wrong"` has
+  // `home` as a string prefix, so a startsWith check passes while pointing
+  // somewhere else entirely.
+  const want = join(home, '.insta', 'ssh', 'aliases.json')
+  if (instaAliasStorePath() !== want) {
+    throw new Error(`the home redirection did not take: got ${instaAliasStorePath()}, want ${want}`)
+  }
 })
-afterEach(() => { process.env.HOME = prevHome; rmSync(home, { recursive: true, force: true }) })
+afterEach(() => {
+  process.env.HOME = prevHome
+  process.env.USERPROFILE = prevProfile
+  rmSync(home, { recursive: true, force: true })
+})
 
+const CERT = 'ssh-ed25519-cert-v01@openssh.com RkFLRS1DRVJULUJPRFktRk9SLVRFU1RTLUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB'
 const CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICAcaFakeCAKeyForTestsOnlyAAAAAAAAAAAAAAAAAAAA'
 
 // A project whose service list holds one compute service named `api`.
@@ -45,8 +67,8 @@ const deps = (over: Record<string, unknown> = {}) => {
       // Reproduced here because that write is precisely what made the ordering
       // defect destructive rather than merely untidy.
       mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
-      writeFileSync(instaCertPath(alias), `cert-for-${serviceId}\n`)
-      return { certificate: `cert-for-${serviceId}`, host: 'ssh.us-west-1.compute.example', username: `u-${serviceId}`, expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
+      writeFileSync(instaCertPath(alias), CERT + '\n')
+      return { certificate: CERT, host: 'ssh.us-west-1.compute.example', username: `u-${serviceId}`, expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
     },
     installCA: () => {},
     installConfig: () => {},
@@ -134,7 +156,7 @@ describe('what the plane returns is checked before anything is written', () => {
   // the way. Asserted on validateCertResponse (where the rule is) plus a file
   // assertion (that the rule runs before the write).
   const good = {
-    certificate: 'ssh-ed25519-cert-v01@openssh.com AAAA',
+    certificate: CERT,
     host: 'ssh.us-west-1.compute.example',
     username: 'u-svc-1',
     expiresAt: '2026-09-14T22:00:00Z',
@@ -151,6 +173,14 @@ describe('what the plane returns is checked before anything is written', () => {
     ['a missing certificate', { certificate: undefined }],
     ['an empty certificate', { certificate: '   ' }],
     ['a missing expiry', { expiresAt: undefined }],
+    // expiresAt is printed straight to a terminal, so a response can otherwise
+    // repaint the screen or hide what it actually said.
+    ['an expiry carrying an ANSI escape', { expiresAt: '2026-09-14T22:00:00Z\u001b[2K\rall good' }],
+    ['an expiry carrying a newline', { expiresAt: '2026-09-14T22:00:00Z\nsomething else' }],
+    ['an expiry that is not a date', { expiresAt: 'whenever' }],
+    ['a certificate that is not a certificate record', { certificate: 'new-cert' }],
+    ['a certificate that is a KEY, not a certificate', { certificate: CA }],
+    ['a certificate spanning two lines', { certificate: `${CERT}\n${CERT}` }],
     ['a CA key spanning two lines', { caPublicKey: `${CA}\n@cert-authority * ${CA}` }],
     ['a CA key of an unsupported type', { caPublicKey: 'ssh-dss AAAAC3NzaC1lZDI1NTE5AAAAIWeakAlgorithmAAAAAAAAAAAAAAAAAAAAAAAAAA' }],
   ]
@@ -209,24 +239,33 @@ describe('--setup does not report success without the trust anchor it promises',
   })
 
   const noCA = {
-    certificate: 'cert', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1',
+    certificate: CERT, host: 'ssh.us-west-1.compute.example', username: 'u-svc-1',
     expiresAt: '2026-09-14T22:00:00Z',
   }
 })
 
 describe('the printed command is safe to paste', () => {
-  it('quotes a destination carrying shell syntax', async () => {
-    // isSafeConfigValue permits `;`, `$`, backticks and friends -- correctly,
-    // since they are legal in ssh_config. But this line is printed FOR A HUMAN
-    // TO PASTE into a shell, so the destination is quoted there.
-    const { deps: d, lines } = deps({
-      mint: async () => ({
-        certificate: 'c', host: 'ssh.us-west-1.compute.example', username: 'u;id',
-        expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA,
-      }),
-    })
-    await computeSSH('api', {}, d)
-    expect(lines[0], 'a username carrying shell syntax was printed unquoted').toContain(`'u;id@ssh.us-west-1.compute.example'`)
+  it('never reaches the printed line with shell syntax or a leading dash', () => {
+    // Two layers, and the FIRST is the one that matters. Shell quoting does not
+    // stop `ssh` parsing its own argv: a destination of `-oProxyCommand=id`
+    // is read as an OPTION however it was quoted, and the user pasting the
+    // advertised command runs it. So such a username is refused outright rather
+    // than escaped into the line.
+    const good = { certificate: CERT, host: 'ssh.us-west-1.compute.example', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
+    for (const username of ['-oProxyCommand=id;#', '-l', '--', 'u;id', 'u$(id)', 'u`id`', 'u|id', 'u&&id', 'u>f']) {
+      expect(() => validateCertResponse({ ...good, username }),
+        `the username ${JSON.stringify(username)} was accepted`).toThrow()
+    }
+  })
+
+  it('accepts the principals the gateway actually issues', () => {
+    // The positive control: a rule tight enough to refuse every hazard above
+    // can also refuse every real principal, and that failure is invisible from
+    // a table of rejections.
+    const good = { certificate: CERT, host: 'ssh.us-west-1.compute.example', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
+    for (const username of ['api-h1abcdefghz', 'svc-abc123', 'u_1', 'a.b', 'user@tenant']) {
+      expect(() => validateCertResponse({ ...good, username }), username).not.toThrow()
+    }
   })
 
   it('leaves an ordinary destination unquoted', async () => {
@@ -294,9 +333,20 @@ describe('concurrent renewal hooks do not stampede the mint endpoint', () => {
 // validator alone passes with the check moved back after the write -- but
 // "is it validated BEFORE the certificate file is replaced". The file is the
 // live credential for an alias that may already be working.
-const keygen = (() => { try { execFileSync('ssh-keygen', ['-A', '-h'], { stdio: 'ignore' }) } catch (e: unknown) {
-  if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false
-} return true })()
+// Presence only, with NO side effect. The first version of this probe ran
+// `ssh-keygen -A`, which GENERATES HOST KEYS in /etc/ssh -- at module import
+// time, on every run of this file, even when the describe below is skipped.
+// ENOENT is the only signal wanted, so ask the OS where the binary is instead
+// of running it.
+const keygen = (() => {
+  const probe = process.platform === 'win32' ? ['where', 'ssh-keygen'] : ['command', '-v', 'ssh-keygen']
+  try {
+    execFileSync(probe[0]!, probe.slice(1), { stdio: 'ignore', shell: process.platform !== 'win32' })
+    return true
+  } catch {
+    return false
+  }
+})()
 
 describe.skipIf(!keygen)('a rejected response never replaces the working certificate', () => {
   const apiReturning = (certBody: Record<string, unknown>) => async () => ({
@@ -318,7 +368,7 @@ describe.skipIf(!keygen)('a rejected response never replaces the working certifi
 
   for (const [what, over] of hostile) {
     it(`leaves the certificate untouched for ${what}`, async () => {
-      const good = { certificate: 'new-cert', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
+      const good = { certificate: CERT, host: 'ssh.us-west-1.compute.example', username: 'u-svc-1', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
       const { deps: d } = deps({ mint: undefined, loadApi: apiReturning({ ...good, ...over }) })
       // Same alias, so the collision check passes and the mint is actually reached.
       writeAliasStore({ 'api.insta': { projectId: 'proj-1', serviceId: 'svc-1', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1' } })
@@ -331,10 +381,80 @@ describe.skipIf(!keygen)('a rejected response never replaces the working certifi
   it('DOES replace it when the response is good', async () => {
     // The positive control: a check that refuses everything would satisfy every
     // assertion above while breaking renewal entirely.
-    const good = { certificate: 'new-cert', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
+    const good = { certificate: CERT, host: 'ssh.us-west-1.compute.example', username: 'u-svc-1', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
     const { deps: d } = deps({ mint: undefined, loadApi: apiReturning(good) })
     writeAliasStore({ 'api.insta': { projectId: 'proj-1', serviceId: 'svc-1', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1' } })
     await computeSSH('api', {}, d)
-    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe('new-cert\n')
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe(CERT + '\n')
+  })
+})
+
+describe('renewal never blocks the ssh it runs inside', () => {
+  it('gives up on a server that accepts and then says nothing', async () => {
+    // OpenSSH runs this hook while PARSING its config, so an unbounded request
+    // blocks ssh, scp, `ssh -G` and every IDE connection for as long as the
+    // server likes. The catch only helps once the request has REJECTED, which
+    // a never-settling response never does.
+    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    writeAliasStore({ 'api.insta': { projectId: 'proj-1', serviceId: 'svc-1', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1' } })
+    // An expired certificate, so renewal is actually attempted.
+    writeFileSync(instaCertPath('api.insta'), CERT + '\n')
+
+    let sawSignal: AbortSignal | undefined
+    const hang = (_url: string, init: { signal?: AbortSignal }) => new Promise<never>((_resolve, reject) => {
+      sawSignal = init.signal
+      init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+    })
+
+    const started = Date.now()
+    await expect(raceRenewal(hang)).resolves.toBeUndefined()
+    expect(sawSignal, 'the renewal request carried no abort signal, so nothing could stop it').toBeDefined()
+    expect(sawSignal!.aborted, 'the deadline passed without aborting the request').toBe(true)
+    // Bounded by the deadline the caller gave, not by the wall clock: asserting
+    // elapsed milliseconds is the flaky-test trap. The signal firing IS the
+    // property; this only pins that it did not wait out the 5s default.
+    expect(Date.now() - started, 'renewal ignored the deadline it was given').toBeLessThan(4_000)
+  })
+
+  it('leaves the existing certificate in place when it gives up', async () => {
+    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    writeFileSync(instaCertPath('api.insta'), CERT + '\n')
+    writeAliasStore({ 'api.insta': { projectId: 'proj-1', serviceId: 'svc-1', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1' } })
+    await raceRenewal(() => Promise.reject(new Error('network down')))
+    // Silent and fail-safe: the login then proceeds on the certificate it has.
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe(CERT + '\n')
+  })
+})
+
+// ensureCertForAlias builds its own client, so the transport is swapped by
+// pointing the CLI at a fetch that behaves the way the test needs.
+async function raceRenewal(fetchImpl: (url: string, init: any) => Promise<any>): Promise<void> {
+  const mod = await import('../src/api.js')
+  const spy = vi.spyOn(mod.ApiClient, 'load').mockResolvedValue(new mod.ApiClient({ apiUrl: 'https://example.invalid', accessToken: 't' } as never, fetchImpl as never))
+  try {
+    await ensureCertForAlias('api.insta', 250)
+  } finally {
+    spy.mockRestore()
+  }
+}
+
+describe('the renewal lock survives a holder that outlives the staleness window', () => {
+  it('a superseded holder does not delete the new holder lock', () => {
+    // The sequence that defeats a pid-only lock: A takes it, A is slow, B
+    // breaks the stale lock and takes its own, then A finishes and releases --
+    // deleting B's lock and leaving the file unlocked while B is still
+    // renewing. The lock fails exactly when it is under load.
+    const a = acquireRenewalLock('api.insta')!
+    expect(a).toBeTruthy()
+    const b = acquireRenewalLock('api.insta', Date.now() + 61_000)!
+    expect(b, 'the stale lock was not broken').toBeTruthy()
+
+    a() // the superseded holder releases
+
+    expect(acquireRenewalLock('api.insta'), "the superseded holder deleted the new holder's lock").toBeUndefined()
+    b()
+    const c = acquireRenewalLock('api.insta')
+    expect(c, 'the lock was never released').toBeTruthy()
+    c!()
   })
 })

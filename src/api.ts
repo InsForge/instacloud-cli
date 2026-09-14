@@ -62,21 +62,25 @@ export class ApiClient {
   }
 
   // Like request but returns {status, body} so callers can branch on 202 (approval_required).
-  async rawRequest(method: string, path: string, body?: unknown, opts: { auth?: boolean } = {}): Promise<RawResult> {
-    const res = await this.raw(method, path, body, opts.auth ?? true)
+  async rawRequest(method: string, path: string, body?: unknown, opts: { auth?: boolean; signal?: AbortSignal } = {}): Promise<RawResult> {
+    const res = await this.raw(method, path, body, opts.auth ?? true, opts.signal)
     if (res.status >= 400) throw new ApiError(res.status, res.body?.error ?? `HTTP ${res.status}`, res.body)
     return res
   }
 
-  private async raw(method: string, path: string, body: unknown, auth: boolean): Promise<RawResult> {
-    let r = await this.fetch(method, path, body, auth)
+  private async raw(method: string, path: string, body: unknown, auth: boolean, signal?: AbortSignal): Promise<RawResult> {
+    let r = await this.fetch(method, path, body, auth, signal)
     if (r.status === 401 && auth && this.cfg.refreshToken) {
-      if (await this.refresh()) r = await this.fetch(method, path, body, auth)
+      if (await this.refresh()) r = await this.fetch(method, path, body, auth, signal)
     }
     return r
   }
 
-  private async fetch(method: string, path: string, body: unknown, auth: boolean): Promise<RawResult> {
+  // `signal` is threaded rather than wrapped in a Promise.race by the caller:
+  // a race leaves the request in flight, so the CLI would return but the
+  // process would stay alive until the socket settled -- exactly the hang the
+  // deadline exists to prevent. Aborting frees the event loop.
+  private async fetch(method: string, path: string, body: unknown, auth: boolean, signal?: AbortSignal): Promise<RawResult> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Insta-Hints': '1', 'User-Agent': USER_AGENT }
     if (auth && this.cfg.accessToken) headers.Authorization = `Bearer ${this.cfg.accessToken}`
     if (auth) Object.assign(headers, await agentHeaders(this, method, path, body === undefined ? '' : JSON.stringify(body)))
@@ -84,6 +88,7 @@ export class ApiClient {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     })
     const text = await res.text()
     let parsed: any = null
