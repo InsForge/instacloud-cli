@@ -1,7 +1,7 @@
 import { homedir } from 'node:os'
 import { agentMode, setupProjectAgentSession } from '../agent.js'
 import { ApiClient, requireProject } from '../api.js'
-import { writeProject } from '../config.js'
+import { HOME_LINK_REFUSAL, isHomeLinkTarget, writeProject } from '../config.js'
 import { info, die, printJson, handleApproval, renderNextActions } from '../util.js'
 import { installObserve } from '../observe/install.js'
 import { installRoot } from './observe.js'
@@ -71,6 +71,9 @@ export async function projectCreate(name: string | undefined, opts: { org?: stri
     info('  (or just ask your coding agent — it has the insta skill and will do this for you)')
     return
   }
+  // Refuse the home directory BEFORE provisioning: refusing only inside writeProject created the
+  // project on the control plane and then failed, with no id printed under --json.
+  if (await isHomeLinkTarget()) die(HOME_LINK_REFUSAL)
   const api = await ApiClient.load()
   const orgId = await resolveOrg(api, opts.org)
   const out = await api.request('POST', `/orgs/${orgId}/projects`, { name: resolved })
@@ -98,6 +101,10 @@ export async function projectList(opts: { org?: string; json?: boolean }): Promi
 }
 
 export async function projectLink(id: string, opts: { json?: boolean } = {}): Promise<void> {
+  // Refuse the home directory BEFORE anything with side effects. In agent mode the session below is
+  // saved, and .gitignore edited, at the link root; refusing only inside writeProject left both
+  // behind in ~ after the command had already failed.
+  if (await isHomeLinkTarget()) die(HOME_LINK_REFUSAL)
   const api = await ApiClient.load()
   if (agentMode()) await setupProjectAgentSession(api, id)
   const { project } = await api.request('GET', `/projects/${id}`)
