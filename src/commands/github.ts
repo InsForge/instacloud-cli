@@ -101,8 +101,8 @@ const pollDelay = (s: number) => Math.min(Math.max(s, 1), 60)
 
 // GitHub shows the person a code to type; the platform holds the device code and finishes the exchange,
 // so nothing secret passes through the CLI.
-export async function authorizeTerminal(api: ApiClient, orgId: string, wait: (s: number) => Promise<void> = sleepSeconds): Promise<RepoRow[]> {
-  const start = await api.request<GitHubDeviceStart>('POST', `/orgs/${encodeURIComponent(orgId)}/github/device`, {})
+export async function authorizeTerminal(api: ApiClient, wait: (s: number) => Promise<void> = sleepSeconds): Promise<RepoRow[]> {
+  const start = await api.request<GitHubDeviceStart>('POST', '/me/github/device', {})
   const deadline = Date.parse(start.expiresAt)
   // A NaN deadline makes every comparison false, which reads as an instant expiry — or, inverted, as a
   // loop with no way out. Fail on it rather than guess which.
@@ -119,7 +119,7 @@ export async function authorizeTerminal(api: ApiClient, orgId: string, wait: (s:
     await wait(interval)
     let answer: GitHubDevicePoll
     try {
-      answer = await api.request<GitHubDevicePoll>('POST', `/orgs/${encodeURIComponent(orgId)}/github/device/poll`, { state: start.state })
+      answer = await api.request<GitHubDevicePoll>('POST', '/me/github/device/poll', { state: start.state })
     } catch (e) {
       // A dropped link, or the per-IP limiter this cadence already tripped on the login flow, must not
       // end an authorization the person may be one click from finishing.
@@ -137,39 +137,21 @@ export async function authorizeTerminal(api: ApiClient, orgId: string, wait: (s:
   throw new Error('the GitHub authorization expired before it was confirmed — run the command again')
 }
 
-// Only the platform's own "you have no usable authorization" may send the person to GitHub: any other
-// failure is real, and a device flow cannot fix it.
-const needsAuthorization = (e: unknown): boolean => e instanceof ApiError && e.status === 400 && /not linked|no longer accepted/i.test(e.message)
-
-// The repositories THIS caller's GitHub account can reach — the same question the platform asks again
-// when the connect lands, so a repo missing here would be refused there anyway.
 // Someone has to read the code and type it at GitHub. A terminal qualifies, and so does agent mode —
-// an agent relays the URL to the person driving it — but --json and a bare pipe have no reader, and a
-// ten-minute wait there is a stall where the old code failed with something to act on.
+// an agent relays the URL to the person driving it — but --json and a bare pipe have no reader.
 export function canAuthorizeHere(opts: { json?: boolean } = {}): boolean {
   if (opts.json) return false
   return !!agentMode() || !!process.stderr.isTTY
 }
 
-export async function findCallerRepo(api: ApiClient, orgId: string, ref: RepoRef, authorize: typeof authorizeTerminal = authorizeTerminal, canAuthorize = canAuthorizeHere()): Promise<{ installationId: number; repoId: number }> {
-  if (!orgId) throw new Error('this directory is linked without an org — set INSTA_ORG_ID alongside INSTA_PROJECT_ID, or link it with `insta project link`')
-  let repos: RepoRow[]
-  try {
-    repos = (await api.request<{ repos?: RepoRow[] }>('POST', `/orgs/${encodeURIComponent(orgId)}/github/repos`, {})).repos ?? []
-  } catch (e) {
-    // Two 403s carry an action; a third kind would be guessed at, so it is rethrown as the platform put it.
-    if (e instanceof ApiError && e.status === 403 && /unclassified_agent_action/.test(e.message)) {
-      throw new Error('this backend does not let an agent authorize GitHub yet — connect the repository from the console, or pass --public for a public repository')
-    }
-    if (e instanceof ApiError && e.status === 403 && /requires admin/i.test(e.message)) {
-      throw new Error('connecting a repository needs the org admin role — ask an admin to connect it, or pass --public for a public repository')
-    }
-    if (!needsAuthorization(e)) throw e
-    if (!canAuthorize) {
-      throw new Error('this GitHub account is not authorized for InstaCloud yet, and nothing here can read the code GitHub shows — run `insta compute connect-repo` from a terminal, connect the repository from the console, or pass --public for a public repository')
-    }
-    repos = await authorize(api, orgId)
+// The repositories THIS caller's GitHub account can reach — the same question the platform asks again
+// when the connect lands, so a repo missing here would be refused there anyway.
+export async function findCallerRepo(api: ApiClient, ref: RepoRef, authorize: typeof authorizeTerminal = authorizeTerminal, canAuthorize = canAuthorizeHere()): Promise<{ installationId: number; repoId: number }> {
+  const mine = await api.request<{ linked: boolean; repos: RepoRow[] }>('GET', '/me/github/repos')
+  if (!mine.linked && !canAuthorize) {
+    throw new Error('this GitHub account is not authorized for InstaCloud yet, and nothing here can read the code GitHub shows — run `insta compute connect-repo` from a terminal, connect the repository from the console, or pass --public for a public repository')
   }
+  const repos = mine.linked ? mine.repos : await authorize(api)
   const whole = (n: unknown) => n !== null && n !== '' && Number.isInteger(Number(n)) && Number(n) > 0
   const hit = repos.find((r) => r.owner.toLowerCase() === ref.owner.toLowerCase() && r.repo.toLowerCase() === ref.repo.toLowerCase())
   if (hit && whole(hit.installationId) && whole(hit.id)) return { installationId: Number(hit.installationId), repoId: Number(hit.id) }
@@ -201,7 +183,7 @@ export async function computeConnectRepo(rawRef: string, serviceName: string | u
   const svc = await targetService(api, p.projectId, opts.branch ?? p.branch, serviceName)
   const src: ConnectSource = opts.public
     ? { source: 'public', ...ref }
-    : { source: 'app', ...(await findCallerRepo(api, p.orgId, ref, authorizeTerminal, canAuthorizeHere(opts))), ...ref }
+    : { source: 'app', ...(await findCallerRepo(api, ref, authorizeTerminal, canAuthorizeHere(opts))), ...ref }
   // Detection must scan the branch that will be built: the build refuses commands that differ from what it detects there.
   const detected = await api.request<{ services: Candidate[] }>('POST', `/projects/${p.projectId}/github/detect`, { ...src, ...(opts.repoBranch ? { ref: opts.repoBranch } : {}) })
   const candidate = pickCandidate(detected.services, opts.rootDir)
