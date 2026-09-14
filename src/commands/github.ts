@@ -179,9 +179,11 @@ export async function findCallerRepo(api: ApiClient, ref: RepoRef, authorize: ty
   const stopAt = Date.now() + 900_000
   let interval = 5
   while (Date.now() < stopAt) {
-    await wait(interval)
+    await wait(Math.min(interval, (stopAt - Date.now()) / 1000))
+    const remaining = stopAt - Date.now()
+    if (remaining <= 0) break
     try {
-      mine = await api.request<GitHubView>('GET', '/me/github/repos')
+      mine = await api.request<GitHubView>('GET', '/me/github/repos', undefined, { signal: AbortSignal.timeout(remaining) })
     } catch (e) {
       if (e instanceof ApiError && e.status !== 429) throw e
       interval = pollDelay(interval + 5)

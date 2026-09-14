@@ -224,10 +224,26 @@ describe('GitHub App setup', () => {
   it('stops after 15 minutes when access is never granted', async () => {
     vi.useFakeTimers()
     const d = drive(linked, [linked])
-    const wait = vi.fn(async () => { vi.advanceTimersByTime(900_000) })
+    const wait = vi.fn(async (seconds: number) => { vi.advanceTimersByTime(wait.mock.calls.length === 1 ? 898_000 : seconds * 1000) })
     await expect(findCallerRepo(d.api, ref, never, true, wait, d.open)).rejects.toThrow(/timed out waiting for access.*acme\/app/)
-    expect(wait).toHaveBeenCalledOnce()
+    expect(wait.mock.calls).toEqual([[5], [2]])
+    expect(d.requests).toEqual(['GET /me/github/repos', 'POST /me/github/setup', 'GET /me/github/repos'])
     expect(d.opened).toHaveLength(1)
+  })
+  it('bounds a stalled repository request by the remaining deadline', async () => {
+    vi.useFakeTimers()
+    const d = drive(linked)
+    const request = d.api.request.bind(d.api)
+    d.api.request = (async (method: string, path: string, body: unknown, opts: { signal?: AbortSignal } = {}) => {
+      if (path !== '/me/github/repos' || d.requests.includes('POST /me/github/setup') === false) return request(method, path, body)
+      expect(opts.signal).toBeDefined()
+      expect(opts.signal).toBe(timeout.mock.results[0]!.value)
+      vi.advanceTimersByTime(895_000)
+      throw new DOMException('timed out', 'TimeoutError')
+    }) as typeof d.api.request
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    await expect(findCallerRepo(d.api, ref, never, true, async (seconds) => { vi.advanceTimersByTime(seconds * 1000) }, d.open)).rejects.toThrow(/timed out waiting for access/)
+    expect(timeout.mock.calls).toEqual([[895_000]])
   })
   it('does not hide an API failure as pending installation', async () => {
     const d = drive(linked, [new ApiError(502, 'GitHub unavailable', {})])
