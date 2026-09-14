@@ -840,7 +840,7 @@ d('the certificate is committed only once its anchor is', () => {
 // The children are TypeScript, so they need the same loader vitest uses.
 // Probed rather than assumed, and only where the rest of the file already has
 // something to run.
-const tsx = keygen && (() => {
+const hasTsx = (() => {
   try {
     execFileSync(process.execPath, ['--import', 'tsx', '-e', ''], { stdio: 'ignore' })
     return true
@@ -849,7 +849,7 @@ const tsx = keygen && (() => {
   }
 })()
 
-const dd = tsx ? describe : describe.skip
+const dd = keygen && hasTsx ? describe : describe.skip
 
 dd('separate processes installing anchors at once keep every anchor', () => {
   const CHILD = `
@@ -893,6 +893,118 @@ for (const pattern of patterns) installCertAuthority(pattern, ca)
         `the anchor for ${pattern} was discarded by a concurrent renewal`).toHaveLength(1)
     }
   }, 30_000)
+})
+
+// The lock itself has nothing to do with OpenSSH, so this is gated on the
+// loader ALONE: gating it on ssh-keygen as well would silently skip the
+// regression wherever OpenSSH is absent, which is most of the places a lock bug
+// is cheap to reproduce.
+const ddl = hasTsx ? describe : describe.skip
+
+ddl('simultaneous stale-lock recovery still admits one holder', () => {
+  // The finding. Stale takeover was `statSync` followed by an unconditional
+  // `unlinkSync`, and nothing tied the file removed to the file judged stale.
+  // Two contenders both see the dead holder's lock; the first removes it and
+  // takes a fresh one; the second's unlink then deletes THAT, and both are
+  // inside the protected section -- concurrent writers over aliases.json,
+  // ssh_config and known_hosts, which is how stanzas and anchors go missing.
+  //
+  // Not observable from one process: the whole sequence is synchronous, so an
+  // in-process "concurrent" caller serialises itself. Only real processes
+  // interleave.
+  //
+  // Driven through acquireLockFile rather than acquireRenewalLock so the
+  // staleness window is milliseconds. With the real one-minute window the race
+  // is a few microseconds wide and happens once per run, which a spawned
+  // process lands in only by luck -- the first draft of this test passed
+  // against the defect. Here every contender ABANDONS the lock periodically, so
+  // the pack goes through simultaneous stale recovery dozens of times per run.
+  const STALE_MS = 300
+  const HOLD_MS = 10
+  const ROUNDS = 15
+
+  const CHILD = `
+const [, , mod, startAt, id, lock, probe, staleMs, holdMs, rounds] = process.argv
+const { readFileSync, writeFileSync } = await import('node:fs')
+const { acquireLockFile } = await import(mod)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const STALE = Number(staleMs), HOLD = Number(holdMs)
+let held = 0
+const overlaps = []
+// A common start, so the contenders are on the lock together rather than one
+// after another.
+await sleep(Number(startAt) - Date.now())
+for (let i = 0; i < Number(rounds); i++) {
+  // A TIGHT synchronous retry, not a polite poll. Every contender has to be ON
+  // the lock at the instant it goes stale; poll it every few milliseconds
+  // instead and they arrive one at a time, the first takes it cleanly and the
+  // defect never gets its interleaving -- which is exactly how an earlier draft
+  // of this test passed against the broken code.
+  let release = acquireLockFile(lock, Date.now(), STALE)
+  const until = Date.now() + STALE * 4
+  while (!release && Date.now() < until) release = acquireLockFile(lock, Date.now(), STALE)
+  if (!release) { await sleep(1); continue }
+  // A mutual-exclusion probe rather than a count: stamp a shared file, hold,
+  // and read it back. A second holder admitted at any point during the section
+  // overwrites the stamp, and it does not matter which of the two notices.
+  // HOLD is far shorter than STALE, so a holder is never itself stale and a
+  // takeover during the section is always a defect rather than the contract.
+  writeFileSync(probe, id)
+  await sleep(HOLD)
+  const seen = readFileSync(probe, 'utf8')
+  if (seen === id) held++
+  else overlaps.push(id + ' saw ' + seen)
+  // Every fifth acquisition is ABANDONED rather than released: the process that
+  // died holding the lock. This is what puts every other contender into stale
+  // recovery on the same file at the same moment, which is the interleaving
+  // under test. Waited out, so this process is well clear of the section before
+  // anyone is entitled to break in.
+  if (i % 5 === 4) await sleep(STALE + 50)
+  else release()
+}
+process.stdout.write(JSON.stringify({ held, overlaps }))
+`
+
+  const run = (args: string[]) => new Promise<{ code: number | null; out: string; err: string }>((resolve) => {
+    const child = spawn(process.execPath, args, {
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let out = ''
+    let err = ''
+    child.stdout!.on('data', (x) => { out += String(x) })
+    child.stderr!.on('data', (x) => { err += String(x) })
+    child.on('exit', (code) => resolve({ code, out, err }))
+  })
+
+  it('never lets two contenders break the same stale lock', async () => {
+    // `.mts`, because the script is written into a directory with no
+    // package.json: a plain `.ts` there is transformed as CommonJS, and the
+    // dynamic import below is top-level await.
+    const script = join(home, 'lock-child.mts')
+    writeFileSync(script, CHILD)
+    const compute = new URL('../src/commands/compute.ts', import.meta.url).href
+
+    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    const lock = join(home, '.insta', 'ssh', 'contended.lock')
+    const probe = join(home, 'probe.txt')
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
+    const startAt = Date.now() + 1_000
+    const results = await Promise.all(ids.map((id) => run([
+      '--import', 'tsx', script, compute, String(startAt), id, lock, probe,
+      String(STALE_MS), String(HOLD_MS), String(ROUNDS),
+    ])))
+    for (const r of results) expect(r.code, `a contender failed: ${r.err}`).toBe(0)
+
+    const parsed = results.map((r) => JSON.parse(r.out) as { held: number; overlaps: string[] })
+    expect(parsed.flatMap((p) => p.overlaps),
+      'two contenders were inside the lock at once').toEqual([])
+    // The positive control. A takeover that never happens satisfies the line
+    // above trivially, and would wedge the lock for good after one crash: every
+    // round following the first abandonment would just return undefined.
+    expect(parsed.reduce((n, p) => n + p.held, 0),
+      'the abandoned lock was never broken at all').toBeGreaterThan(ids.length)
+  }, 60_000)
 })
 
 d('a certificate is DECODED, not just shape-checked', () => {

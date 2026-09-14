@@ -13,7 +13,7 @@
 // read the bytes, and a suite that skips wholesale on a machine without
 // OpenSSH is a suite that does not defend these two cases at all.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
@@ -170,6 +170,65 @@ describe('a setup that fails AFTER rotating the anchor leaves the alias working'
     expect(anchors, 'the retired CA is still trusted for this host pattern').not.toContain(caRecord(CA_OLD))
     expect(readFileSync(instaCertPath(ALIAS), 'utf8')).toBe(NEW_CERT + '\n')
     expect(readFileSync(sshConfig(), 'utf8')).toContain(`Host ${ALIAS}`)
+  })
+})
+
+describe('rolling back the ssh config restores what was there, link and all', () => {
+  // The finding. The undo path decided whether ~/.ssh/config had existed from
+  // its CONTENTS: an empty read meant "we created this file", so the rollback
+  // deleted it. An EMPTY config is not a missing one -- a dotfiles-managed
+  // ~/.ssh/config symlinked at a target that has not been populated yet reads
+  // exactly the same -- and deleting it severs the link the forward write went
+  // to the trouble of FOLLOWING, losing the user's dotfiles wiring on the one
+  // path that only runs when something else has already gone wrong.
+  const dotfiles = () => join(home, 'dotfiles', 'ssh_config')
+
+  /** ~/.ssh/config as a symlink into a dotfiles repo, target empty. */
+  const anEmptySymlinkedConfig = () => {
+    mkdirSync(join(home, 'dotfiles'), { recursive: true })
+    writeFileSync(dotfiles(), '')
+    mkdirSync(join(home, '.ssh'), { recursive: true })
+    symlinkSync(dotfiles(), sshConfig())
+  }
+
+  /** A setup that gets all the way to the certificate and fails there, so the
+   *  config block has been installed and its undo is the thing under test. */
+  const failsAtTheCertificate = () => deps({
+    mint: async () => ({
+      certificate: NEW_CERT, host: HOST, username: 'u-svc-1',
+      expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA_NEW,
+      staged: { commit: () => { throw new Error('rename failed') }, discard: () => {} },
+    }),
+  })
+
+  it('keeps an empty symlinked config, and puts its target back empty', async () => {
+    anEmptySymlinkedConfig()
+    await expect(computeSSH('api', { setup: true }, failsAtTheCertificate())).rejects.toThrow(/rename failed/)
+
+    expect(lstatSync(sshConfig()).isSymbolicLink(), 'the rollback deleted the user’s symlink').toBe(true)
+    expect(realpathSync(sshConfig()), 'the link was repointed somewhere else').toBe(realpathSync(dotfiles()))
+    expect(readFileSync(dotfiles(), 'utf8'), 'the rollback left our block in the dotfiles copy').toBe('')
+  })
+
+  it('keeps an empty regular config rather than deleting it', async () => {
+    // The same confusion without any symlink: the file existed, so the rollback
+    // owes it back, empty.
+    mkdirSync(join(home, '.ssh'), { recursive: true })
+    writeFileSync(sshConfig(), '')
+
+    await expect(computeSSH('api', { setup: true }, failsAtTheCertificate())).rejects.toThrow(/rename failed/)
+
+    expect(existsSync(sshConfig()), 'the rollback deleted a config file that was already there').toBe(true)
+    expect(readFileSync(sshConfig(), 'utf8')).toBe('')
+  })
+
+  it('still deletes a config it created itself', async () => {
+    // The positive control: without it, the two cases above are satisfied by a
+    // rollback that never cleans up, which would leave a half-written
+    // ~/.ssh/config behind on every failed first-ever setup.
+    await expect(computeSSH('api', { setup: true }, failsAtTheCertificate())).rejects.toThrow(/rename failed/)
+
+    expect(existsSync(sshConfig()), 'a failed setup left the config file it created').toBe(false)
   })
 })
 

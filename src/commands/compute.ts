@@ -752,11 +752,11 @@ export async function computeLimits(serviceName: string | undefined, opts: Limit
 
 // ---- ssh (interactive sessions) --------------------------------------------
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   aliasFor, certifiesPublicKey, isSafeAlias, isSafeConfigValue, isSafeSSHHost, isSafeSSHUsername, isSafeTimestamp, isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, planCertAuthority, renderConfigBlock, revertCertAuthority, upsertConfigBlock, type HostEntry,
 } from './ssh-config.js'
@@ -1213,6 +1213,13 @@ function withLockedFile<T>(
 function installConfigBlock(store: AliasStore): Undo {
   const cfg = join(homedir(), '.ssh', 'config')
   mkdirSync(dirname(cfg), { recursive: true, mode: 0o700 })
+  // EXISTENCE and CONTENTS are tracked apart, because an empty file is not a
+  // missing one and the undo below does opposite things for the two. A
+  // dotfiles-managed ~/.ssh/config symlinked at a target that has not been
+  // populated yet reads as '' exactly like a file we are about to create.
+  // lstat, not existsSync: a link is something that was there, whatever its
+  // target says.
+  const existedBefore = pathExists(cfg)
   const existing = existsSync(cfg) ? readFileSync(cfg, 'utf8') : ''
   const block = renderConfigBlock({
     entries: hostEntries(store),
@@ -1225,11 +1232,27 @@ function installConfigBlock(store: AliasStore): Undo {
   // Safe to restore wholesale, unlike known_hosts: nothing else writes this
   // file without the alias-store lock, and the caller holds it.
   return () => {
-    if (existing === '') {
+    if (!existedBefore) {
       try { unlinkSync(cfg) } catch { /* never created */ }
     } else {
+      // Through the SAME symlink-aware writer as the forward write, so an
+      // existing file is restored where the block was actually written --
+      // restoring the link's target rather than replacing the link.
       writeFileAtomicSync(cfg, existing, { mode: 0o600 })
     }
+  }
+}
+
+/** Does this path name anything at all -- file, directory or symlink, including
+ *  one that dangles? `existsSync` follows links and so answers a different
+ *  question: it calls a link to a missing target "not there", and deleting on
+ *  that answer destroys the link. */
+function pathExists(path: string): boolean {
+  try {
+    lstatSync(path)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -1334,8 +1357,12 @@ export function acquireRenewalLock(alias: string, now = Date.now()): (() => void
 
 /** Take a lock file, or return undefined when someone else holds a fresh one.
  *  Never waits: whether waiting is the right answer depends on what is being
- *  protected, so it belongs to the caller. */
-function acquireLockFile(path: string, now: number, staleMs: number): (() => void) | undefined {
+ *  protected, so it belongs to the caller.
+ *
+ *  Exported for the concurrency tests, which need a staleness window they can
+ *  cross in milliseconds -- the real one is a minute, and a test that waits a
+ *  minute per interleaving does not get written. */
+export function acquireLockFile(path: string, now: number, staleMs: number): (() => void) | undefined {
   const take = (): (() => void) | undefined => {
     // A token, not just the pid. A renewal slower than the staleness window
     // has its lock broken by the next caller; without an ownership check the
@@ -1359,13 +1386,84 @@ function acquireLockFile(path: string, now: number, staleMs: number): (() => voi
   }
   const held = take()
   if (held) return held
+
+  const observed = observeLock(path)
+  // Released between the exclusive create and the read: ordinary contention,
+  // and `wx` is the only arbiter that needs to settle it. Nothing is being
+  // taken from anybody here, so retrying is safe.
+  if (!observed) return take()
+  if (now - observed.mtimeMs < staleMs) return undefined
+  return breakStaleLock(path, observed.token, take)
+}
+
+/** The lock as one consistent observation: the token that is in the file and
+ *  the mtime that goes with it. */
+function observeLock(path: string): { token: string; mtimeMs: number } | undefined {
   try {
-    if (now - statSync(path).mtimeMs < staleMs) return undefined
-    unlinkSync(path)
+    // CONTENTS FIRST, and the order is the point. A takeover landing between
+    // the two reads then pairs the OLD token with the NEW mtime, and the
+    // staleness test refuses to break it -- the safe way to be wrong. Read the
+    // other way round it pairs an old mtime with the new holder's token, and
+    // the takeover proceeds to delete a lock that was taken a moment ago.
+    const token = readFileSync(path, 'utf8')
+    return { token, mtimeMs: statSync(path).mtimeMs }
   } catch {
     return undefined
   }
-  return take()
+}
+
+/** Take over the lock `token` names, having judged it abandoned.
+ *
+ *  `statSync` then an unconditional `unlinkSync` is not enough, and the gap is
+ *  not theoretical: every contender that finds the same dead holder's lock
+ *  passes the staleness test together, so the first to unlink takes a fresh
+ *  lock and the ones behind it then delete THAT and take their own. The lock
+ *  admits everybody precisely when it is contended, which is when it matters --
+ *  concurrent writers over aliases.json, ssh_config and known_hosts, i.e. lost
+ *  aliases, stanzas and anchors.
+ *
+ *  So breaking a lock is itself mutually exclusive, and the right to do it is
+ *  claimed with a HARDLINK named after the token being broken:
+ *
+ *   - link(2) is atomic and fails with EEXIST, so of all the contenders that
+ *     observed this token exactly one may proceed.
+ *   - It is non-destructive. A hardlink adds a NAME; it does not move or remove
+ *     the lock. There is no window in which the file is missing, so nothing can
+ *     slip in through one -- unlike moving it aside to inspect it, which opens
+ *     the very gap this exists to close.
+ *   - Only after that is the lock re-read and required to still be the exact
+ *     one judged stale. Tokens are unique per acquisition, so a takeover in
+ *     between shows up as different bytes and the live lock is left alone.
+ *
+ *  Residual, and deliberately not "fixed": a process killed between the link
+ *  and the unlink in `finally` leaves the claim behind, and that one lock file
+ *  can then no longer be broken (deleting it by hand is the way out). Every
+ *  scheme for reaping an abandoned claim needs to decide the claim is dead and
+ *  then remove it -- the same check-then-act this function exists to eliminate,
+ *  one level up. A wedged lock is recoverable; two writers in the same section
+ *  silently lose the user's config. */
+function breakStaleLock(path: string, token: string, take: () => (() => void) | undefined): (() => void) | undefined {
+  const claim = `${path}.stale.${createHash('sha256').update(token).digest('hex').slice(0, 32)}`
+  try {
+    linkSync(path, claim)
+  } catch {
+    // EEXIST: somebody else is already breaking this one. ENOENT: it is gone.
+    // Anything else (a filesystem with no hardlinks) means we cannot establish
+    // who is entitled to break it -- and cannot-establish is not a licence to
+    // delete somebody's lock. Failing closed costs a renewal that gets skipped
+    // or a `--setup` that reports the file as busy; failing open costs the
+    // user's ssh_config. The caller retries if it waits.
+    return undefined
+  }
+  try {
+    if (readFileSync(path, 'utf8') !== token) return undefined
+    unlinkSync(path)
+    return take()
+  } catch {
+    return undefined
+  } finally {
+    try { unlinkSync(claim) } catch { /* the inode is released with the last name */ }
+  }
 }
 
 /** Side-effect seams, following the `TrackDeps` convention used by telemetry.
