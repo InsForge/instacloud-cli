@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import { computeSSH, installCertAuthority, instaCertPath, instaAliasStorePath, instaKeyPath, writeAliasStore, readAliasStore, validateCertResponse, acquireLockFile, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate } from '../src/commands/compute.js'
 import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey } from '../src/commands/ssh-config.js'
+import { canSymlink } from './support/can-symlink.js'
 
 // Redirect the whole ~/.insta and ~/.ssh tree into a temp dir.
 //
@@ -1366,7 +1367,8 @@ d('a CA key is validated whole, not by its first field', () => {
   })
 })
 
-d('a symlinked certificate is written THROUGH, not replaced', () => {
+// Both OpenSSH and symlink privilege, the latter probed rather than assumed.
+;(keygen && canSymlink ? describe : describe.skip)('a symlinked certificate is written THROUGH, not replaced', () => {
   it('keeps the link and updates its target', () => {
     // Same reason writeFileAtomicSync resolves: rename(2) replaces the LINK,
     // so a certificate someone symlinked into a dotfiles repo would be severed
@@ -1657,6 +1659,19 @@ describe('a lock that guards a file is broken only when its holder is GONE', () 
     got!()
   })
 
+  it.skipIf(!canSymlink)('refuses a lock path that is a symlink, and never writes through it', () => {
+    // The takeover writes into the inode the path names. Through a link that
+    // is somebody else's file -- planted in a directory only the user can
+    // write, so self-inflicted, but a lock must not be the thing that turns a
+    // stray link into a destroyed ~/.ssh/config.
+    mkdirSync(dirname(lock()), { recursive: true })
+    const victim = join(home, 'victim'); writeFileSync(victim, 'precious\n')
+    symlinkSync(victim, lock())
+    expect(acquireLockFile(lock(), Date.now() + 10 * 60_000, 60_000), 'a symlinked lock path was taken over').toBeUndefined()
+    expect(readFileSync(victim, 'utf8'), 'the takeover wrote through the link').toBe('precious\n')
+    expect(readdirSync(dirname(lock())).filter((f) => f.includes('.stale.')), 'a claim was left behind').toEqual([])
+  })
+
   it('still breaks a slow RENEWAL holder by age, because a duplicate mint is harmless', () => {
     // The contrast, so the two rules are both pinned: the renewal lock guards
     // a request, not a file, and a wedged one silently stops an alias renewing.
@@ -1666,5 +1681,53 @@ describe('a lock that guards a file is broken only when its holder is GONE', () 
     expect(broke, 'the renewal lock no longer breaks by age').toBeTruthy()
     broke!()
     held!()
+  })
+})
+
+d('the key sent for certification is derived from the PRIVATE key', () => {
+  // The finding. id_ed25519.pub is a convenience copy, and it was trusted: a
+  // copy that had been replaced was sent to the platform, the certificate came
+  // back for THAT key, certifiesPublicKey compared it against the same copy
+  // and agreed, and the working certificate was replaced by one the private
+  // key cannot use. A copy that was missing failed every setup forever.
+  const good = { certificate: CERT, host: 'ssh.us-west-1.compute.example', username: 'u-svc-1', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
+  const apiRecording = (bodies: Array<{ publicKey: string }>) => async () => ({
+    request: async () => ({ services: [{ id: 'svc-1', name: 'api', type: 'compute' }] }),
+    rawRequest: async (_m: string, _p: string, body: { publicKey: string }) => { bodies.push(body); return { status: 200, body: good } },
+  } as never)
+  const material = (record: string) => record.trim().split(/\s+/).slice(0, 2).join(' ')
+  const ours = () => material(readFileSync(join(fixtures, 'user.pub'), 'utf8'))
+
+  it('sends the key the private file derives, not a .pub that disagrees, and repairs the .pub', async () => {
+    installTheKeyCertWasIssuedFor()
+    writeFileSync(instaKeyPath() + '.pub', readFileSync(join(fixtures, 'other.pub'), 'utf8'))
+    const bodies: Array<{ publicKey: string }> = []
+    const { deps: d } = deps({ mint: undefined, loadApi: apiRecording(bodies) })
+    await computeSSH('api', {}, d)
+    expect(material(bodies[0]!.publicKey), 'the replaced .pub was sent for certification').toBe(ours())
+    expect(material(readFileSync(instaKeyPath() + '.pub', 'utf8')), 'the .pub was left disagreeing with the private key').toBe(ours())
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe(CERT + '\n')
+  })
+
+  it('recreates a missing .pub instead of failing every setup', async () => {
+    installTheKeyCertWasIssuedFor()
+    unlinkSync(instaKeyPath() + '.pub')
+    const bodies: Array<{ publicKey: string }> = []
+    const { deps: d } = deps({ mint: undefined, loadApi: apiRecording(bodies) })
+    await computeSSH('api', {}, d)
+    expect(material(bodies[0]!.publicKey)).toBe(ours())
+    expect(material(readFileSync(instaKeyPath() + '.pub', 'utf8'))).toBe(ours())
+  })
+
+  it('refuses to mint when the private key cannot be read, and touches nothing', async () => {
+    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    writeFileSync(instaKeyPath(), 'not a key\n')
+    writeFileSync(instaKeyPath() + '.pub', readFileSync(join(fixtures, 'user.pub'), 'utf8'))
+    writeFileSync(instaCertPath('api.insta'), 'the-working-certificate\n')
+    const bodies: Array<{ publicKey: string }> = []
+    const { deps: d } = deps({ mint: undefined, loadApi: apiRecording(bodies) })
+    await expect(computeSSH('api', {}, d)).rejects.toThrow(/cannot be read by ssh-keygen/)
+    expect(bodies, 'a certificate was requested for a key that cannot be used').toEqual([])
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe('the-working-certificate\n')
   })
 })

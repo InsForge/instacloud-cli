@@ -20,6 +20,7 @@ import { execFileSync, spawn } from 'node:child_process'
 import {
   computeSSH, installCertAuthority, instaAliasStorePath, instaCertPath, readAliasStore, stageCertificate, writeAliasStore,
 } from '../src/commands/compute.js'
+import { canSymlink } from './support/can-symlink.js'
 
 // BOTH variables: os.homedir() reads $HOME on POSIX and $USERPROFILE on
 // Windows, and a redirection that silently does nothing produces tests that
@@ -39,11 +40,6 @@ beforeEach(() => {
     throw new Error(`the home redirection did not take: got ${instaAliasStorePath()}, want ${want}`)
   }
   mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
-  // The key pair already exists, which is the steady state: it is generated
-  // once, by the first --setup ever run, and every later one reads it. Written
-  // here rather than generated so ensureKeyPair never shells out to ssh-keygen.
-  writeFileSync(join(home, '.insta', 'ssh', 'id_ed25519'), 'PRIVATE\n')
-  writeFileSync(join(home, '.insta', 'ssh', 'id_ed25519.pub'), 'ssh-ed25519 AAAA test@insta\n')
 })
 afterEach(() => {
   process.env.HOME = prevHome
@@ -70,12 +66,16 @@ const OLD_CERT = certFor(0x22)
 
 const HOST = 'ssh.us-west-1.compute.example'
 const ALIAS = 'api.insta'
+const PUBLIC_KEY = 'ssh-ed25519 AAAA test@insta'
 const knownHosts = () => join(home, '.ssh', 'known_hosts')
 const sshConfig = () => join(home, '.ssh', 'config')
 
 const deps = (over: Record<string, unknown> = {}) => ({
   loadApi: (async () => ({ request: async () => ({ services: [{ id: 'svc-1', name: 'api', type: 'compute' }] }) })) as never,
   loadProject: (async () => ({ projectId: 'proj-1' })) as never,
+  // The real one derives the key from the private key with ssh-keygen; this
+  // file is about the ORDER of the writes and stays free of OpenSSH.
+  keyPair: () => PUBLIC_KEY,
   mint: (async (_a: unknown, _p: string, serviceId: string, _k: string, alias: string) => ({
     certificate: NEW_CERT, host: HOST, username: `u-${serviceId}`,
     expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA_NEW,
@@ -93,6 +93,11 @@ const deps = (over: Record<string, unknown> = {}) => ({
 /** The state of a WORKING alias: an anchor for the CA that signed the
  *  certificate sitting at `<alias>-cert.pub`, and a store entry naming it. */
 const anAlreadyWorkingAlias = () => {
+  // A user's own line and their trailing blank lines sit in the file too, so
+  // "put back" below is measured byte for byte against a file that has more
+  // in it than our anchor.
+  mkdirSync(join(home, '.ssh'), { recursive: true })
+  writeFileSync(knownHosts(), 'github.com ssh-ed25519 AAAAuser\n\n\n')
   installCertAuthority(HOST, CA_OLD)
   writeAliasStore({ [ALIAS]: { projectId: 'proj-1', serviceId: 'svc-1', host: HOST, username: 'u-svc-1' } })
   writeFileSync(instaCertPath(ALIAS), OLD_CERT + '\n')
@@ -114,6 +119,7 @@ describe('a setup that fails AFTER rotating the anchor leaves the alias working'
 
   it('puts the retired CA back when the config write fails', async () => {
     anAlreadyWorkingAlias()
+    const before = readFileSync(knownHosts(), 'utf8')
     const d = deps({ installConfig: () => { throw new Error('disk full') } })
     await expect(computeSSH('api', { setup: true }, d)).rejects.toThrow(/disk full/)
 
@@ -121,6 +127,10 @@ describe('a setup that fails AFTER rotating the anchor leaves the alias working'
     expect(anchors, 'the CA vouching for the installed certificate was left retired')
       .toContain(caRecord(CA_OLD))
     expect(anchors, 'a failed setup left the new anchor behind').not.toContain(caRecord(CA_NEW))
+    // BYTE FOR BYTE: the user's line, their blank lines and our anchor, in the
+    // order they were. "The old CA is present" is satisfied by a rollback that
+    // rewrote everything else.
+    expect(anchors, 'known_hosts was not put back exactly as it was').toBe(before)
     expect(readFileSync(instaCertPath(ALIAS), 'utf8'),
       'the working certificate was replaced by a setup that failed').toBe(OLD_CERT + '\n')
   })
@@ -131,6 +141,7 @@ describe('a setup that fails AFTER rotating the anchor leaves the alias working'
     // the interleaving a test that only fails the config write never reaches.
     anAlreadyWorkingAlias()
     const before = readFileSync(sshConfig(), 'utf8')
+    const anchorsBefore = readFileSync(knownHosts(), 'utf8')
     const d = deps({
       mint: async () => ({
         certificate: NEW_CERT, host: HOST, username: 'u-svc-1',
@@ -141,6 +152,7 @@ describe('a setup that fails AFTER rotating the anchor leaves the alias working'
     await expect(computeSSH('api', { setup: true }, d)).rejects.toThrow(/rename failed/)
 
     expect(readFileSync(knownHosts(), 'utf8')).toContain(caRecord(CA_OLD))
+    expect(readFileSync(knownHosts(), 'utf8'), 'known_hosts was not put back exactly as it was').toBe(anchorsBefore)
     expect(readFileSync(instaCertPath(ALIAS), 'utf8')).toBe(OLD_CERT + '\n')
     expect(readFileSync(sshConfig(), 'utf8'),
       'the ssh config was left describing a setup that never completed').toBe(before)
@@ -155,7 +167,9 @@ describe('a setup that fails AFTER rotating the anchor leaves the alias working'
     const d = deps({ installConfig: () => { throw new Error('disk full') } })
     await expect(computeSSH('api', { setup: true }, d)).rejects.toThrow(/disk full/)
     expect(readAliasStore(), 'a failed setup recorded its alias anyway').toEqual({})
+    expect(existsSync(instaAliasStorePath()), 'a failed setup left an (empty) store behind').toBe(false)
     expect(existsSync(sshConfig()), 'a failed setup created an ssh config').toBe(false)
+    expect(existsSync(knownHosts()), 'a failed setup left an empty known_hosts behind').toBe(false)
   })
 
   it('does retire the old CA when the setup succeeds', async () => {
@@ -173,7 +187,7 @@ describe('a setup that fails AFTER rotating the anchor leaves the alias working'
   })
 })
 
-describe('rolling back the ssh config restores what was there, link and all', () => {
+describe.skipIf(!canSymlink)('rolling back the ssh config restores what was there, link and all', () => {
   // The finding. The undo path decided whether ~/.ssh/config had existed from
   // its CONTENTS: an empty read meant "we created this file", so the rollback
   // deleted it. An EMPTY config is not a missing one -- a dotfiles-managed
@@ -348,6 +362,53 @@ describe('a plain issuance keeps an ALREADY INSTALLED alias coherent', () => {
   })
 })
 
+describe('a failed setup puts the alias store back BYTE FOR BYTE', () => {
+  // The undo used to write readAliasStore()'s output back, and the reader
+  // drops entries it cannot use -- so the failure path deleted a hand-edited
+  // entry the user was about to fix, and turned a store that never existed
+  // into `{}`, while the command reported it had changed nothing.
+  const failing = () => deps({ installConfig: () => { throw new Error('disk full') } })
+
+  it('keeps an entry the reader would have dropped, and the formatting', async () => {
+    const raw = '{\n  "api.insta": {"projectId": "proj-1", "serviceId": "svc-1", "host": "' + HOST + '", "username": "u-svc-1"},\n  "broken.insta": {"projectId": ""}\n}\n'
+    writeFileSync(instaAliasStorePath(), raw)
+    await expect(computeSSH('api', { setup: true }, failing())).rejects.toThrow(/disk full/)
+    expect(readFileSync(instaAliasStorePath(), 'utf8'),
+      "the undo rewrote the store from the reader's output").toBe(raw)
+  })
+
+  it('leaves no store behind when there was none', async () => {
+    await expect(computeSSH('api', { setup: true }, failing())).rejects.toThrow(/disk full/)
+    expect(existsSync(instaAliasStorePath()), 'a failed setup created the store it then emptied').toBe(false)
+  })
+})
+
+describe('a config that is not UTF-8 is refused, not rewritten', () => {
+  // Decoding as UTF-8 and writing back turns every byte that did not decode
+  // into U+FFFD -- a Latin-1 comment in an old ~/.ssh/config, rewritten by a
+  // command that promised to add one block at the top.
+  it('refuses, and leaves every byte as it was', async () => {
+    mkdirSync(join(home, '.ssh'), { recursive: true })
+    const raw = Buffer.concat([Buffer.from('# J'), Buffer.from([0xfc]), Buffer.from('rgen\nHost bastion\n  User someone\n')])
+    writeFileSync(sshConfig(), raw)
+    await expect(computeSSH('api', { setup: true }, deps())).rejects.toThrow(/not valid UTF-8/)
+    expect(readFileSync(sshConfig()).equals(raw), 'the config was rewritten').toBe(true)
+    expect(existsSync(instaAliasStorePath()), 'the refused setup recorded its alias').toBe(false)
+    expect(existsSync(instaCertPath(ALIAS)), 'the refused setup committed its certificate').toBe(false)
+  })
+
+  it('still edits an ordinary UTF-8 config, accents included', async () => {
+    // The positive control: a guard that refuses everything non-ASCII would
+    // satisfy the case above and lock out every home directory with an accent.
+    mkdirSync(join(home, '.ssh'), { recursive: true })
+    writeFileSync(sshConfig(), '# Jürgen\nHost bastion\n')
+    await computeSSH('api', { setup: true }, deps())
+    const cfg = readFileSync(sshConfig(), 'utf8')
+    expect(cfg).toContain('# Jürgen')
+    expect(cfg).toContain(`Host ${ALIAS}`)
+  })
+})
+
 // Two `insta compute ssh` runs for DIFFERENT services -- a project with an
 // `api` and a `worker` is the ordinary case, not a contrived one -- both read
 // the same aliases.json, each adds only its own entry, and each writes both
@@ -403,6 +464,7 @@ const CA = readFileSync(caFile, 'utf8').trim()
 const deps = {
   loadApi: async () => ({ request: async () => ({ services: [{ id: 'svc-' + name, name, type: 'compute' }] }) }),
   loadProject: async () => ({ projectId: 'proj-1' }),
+  keyPair: () => 'ssh-ed25519 AAAA test@insta',
   mint: async (_a, _p, serviceId, _k, alias) => ({
     certificate: CERT, host: 'ssh.us-west-1.compute.example', username: 'u-' + serviceId,
     expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA,

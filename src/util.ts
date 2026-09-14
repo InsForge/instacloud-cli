@@ -23,7 +23,7 @@ import { randomBytes } from 'node:crypto'
  * block. Resolving first keeps the write atomic (the temp file still lands
  * beside the real file, on the real file's filesystem) AND keeps the link.
  */
-export function writeFileAtomicSync(target: string, data: string, opts: { mode?: number; backup?: boolean } = {}): void {
+export function writeFileAtomicSync(target: string, data: string | Buffer, opts: { mode?: number; backup?: boolean } = {}): void {
   const mode = opts.mode ?? 0o600
   const path = resolveThroughSymlink(target)
   const tmp = join(dirname(path), `.${basename(path)}.insta-${process.pid}-${randomBytes(6).toString('hex')}`)

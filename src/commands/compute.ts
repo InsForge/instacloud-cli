@@ -923,38 +923,61 @@ export function certNeedsRenewal(
   }
 }
 
-/** The key pair every certificate is issued for, generated on first use.
+/** The public key of the pair every certificate is issued for, DERIVED from
+ *  the private key -- the one file that decides whether a certificate can be
+ *  used at all.
+ *
+ *  `id_ed25519.pub` is a convenience copy, and trusting it was a hole. A copy
+ *  that had been replaced or corrupted was what got sent to the platform; the
+ *  certificate came back for THAT key; certifiesPublicKey compared it against
+ *  the same copy and agreed; and the working certificate was replaced by one
+ *  the private key cannot use. `ssh-keygen -y` reads the private key and
+ *  prints its public half, so what is sent, checked and recorded is the key
+ *  ssh will actually offer. A copy that disagrees is rewritten from it, and a
+ *  missing one -- a first generation interrupted between its two writes -- is
+ *  recreated rather than failing every setup thereafter. A private key
+ *  ssh-keygen cannot read fails HERE, before anything is minted or replaced,
+ *  and says what to do.
  *
  *  Generation is SERIALISED on the setup lock. Two first-ever setups on a
  *  fresh machine -- a script setting up `api` and `worker` side by side is the
  *  ordinary way to get there -- both found no key and both ran ssh-keygen at
- *  the same path. The second hit "already exists, overwrite?" on a closed
- *  stdin and failed; or one read a private key the other had just written
- *  whose `.pub` did not exist yet; or their writes interleaved and left one
- *  process's private key beside the other's public key, with a certificate
- *  then issued for a key no longer on disk. It is the same lock the setup
- *  transaction takes, which is safe only because every caller runs this
- *  BEFORE taking that lock itself: the lock is not re-entrant.
- *
- *  The steady state -- both files present -- takes no lock, so the renewal
- *  hook stays lock-free on the path it runs on every ssh. */
+ *  the same path; the second hit "already exists, overwrite?" on a closed
+ *  stdin and failed. It is the same lock the setup transaction takes, which is
+ *  safe only because every caller runs this BEFORE taking that lock itself:
+ *  the lock is not re-entrant. A key already on disk takes no lock. */
 function ensureKeyPair(): string {
   const key = instaKeyPath()
-  const read = () => {
-    chmodSync(key, 0o600)
-    return readFileSync(key + '.pub', 'utf8').trim()
+  if (!existsSync(key)) {
+    withAliasStoreLock(() => {
+      mkdirSync(instaSSHDir(), { recursive: true, mode: 0o700 })
+      // Re-checked under the lock: the process this one queued behind may have
+      // been the one generating it.
+      if (!existsSync(key)) {
+        execFileSync('ssh-keygen', ['-t', 'ed25519', '-N', '', '-C', 'insta compute ssh', '-f', key], { stdio: 'pipe' })
+      }
+    })
   }
-  if (existsSync(key) && existsSync(key + '.pub')) return read()
-  return withAliasStoreLock(() => {
-    mkdirSync(instaSSHDir(), { recursive: true, mode: 0o700 })
-    // Re-checked under the lock: the process this one queued behind may have
-    // been the one generating it.
-    if (!existsSync(key)) {
-      execFileSync('ssh-keygen', ['-t', 'ed25519', '-N', '', '-C', 'insta compute ssh', '-f', key], { stdio: 'pipe' })
-    }
-    return read()
-  })
+  chmodSync(key, 0o600)
+  let derived: string
+  try {
+    derived = execFileSync('ssh-keygen', ['-y', '-f', key], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException & { stderr?: string | Buffer }
+    if (err.code === 'ENOENT') throw new Error('ssh-keygen is not installed, so the ssh key cannot be read -- install OpenSSH and run again')
+    const why = String(err.stderr ?? '').trim().split('\n')[0] || err.message
+    throw new Error(`the ssh key at ${key} cannot be read by ssh-keygen (${why}); move it aside and run --setup again to generate a new one`)
+  }
+  const pub = key + '.pub'
+  const stored = existsSync(pub) ? readFileSync(pub, 'utf8').trim() : undefined
+  if (stored === undefined || keyMaterial(stored) !== keyMaterial(derived)) {
+    writeFileAtomicSync(pub, derived + '\n', { mode: 0o644 })
+  }
+  return derived
 }
+
+/** `<type> <blob>` of a public-key record, comment dropped. */
+const keyMaterial = (record: string) => record.split(/\s+/).slice(0, 2).join(' ')
 
 type CertResponse = { certificate: string; host: string; username: string; expiresAt: string; caPublicKey?: string }
 
@@ -1107,7 +1130,8 @@ export function installCertAuthority(hostPattern: string, caPublicKey: string): 
   // each renames its own result over the other's -- see withKnownHostsLock.
   return withKnownHostsLock(() => {
     mkdirSync(dirname(knownHosts), { recursive: true, mode: 0o700 })
-    const existing = existsSync(knownHosts) ? readFileSync(knownHosts, 'utf8') : ''
+    const existedBefore = pathExists(knownHosts)
+    const existing = readUserText(knownHosts)
     const plan = planCertAuthority(existing, hostPattern, caPublicKey)
     if (plan.next === existing) return () => {}
     writeFileAtomicSync(knownHosts, plan.next, { mode: 0o600 })
@@ -1117,8 +1141,15 @@ export function installCertAuthority(hostPattern: string, caPublicKey: string): 
     // command leaves the old certificate in place with its CA gone: an alias
     // that worked a moment ago now cannot authenticate, and nothing said so.
     return () => withKnownHostsLock(() => {
-      const now = existsSync(knownHosts) ? readFileSync(knownHosts, 'utf8') : ''
-      writeFileAtomicSync(knownHosts, revertCertAuthority(now, plan), { mode: 0o600 })
+      const reverted = revertCertAuthority(readUserText(knownHosts), plan)
+      // A file this command CREATED and would now leave empty goes away with
+      // the anchor: a failed first setup must not leave an empty known_hosts
+      // behind as its only trace. One `ssh` has since written to stays.
+      if (!existedBefore && reverted === '') {
+        try { unlinkSync(knownHosts) } catch { /* never created */ }
+      } else {
+        writeFileAtomicSync(knownHosts, reverted, { mode: 0o600 })
+      }
     })
   })
 }
@@ -1291,7 +1322,7 @@ function installConfigBlock(store: AliasStore): Undo {
   // lstat, not existsSync: a link is something that was there, whatever its
   // target says.
   const existedBefore = pathExists(cfg)
-  const existing = existsSync(cfg) ? readFileSync(cfg, 'utf8') : ''
+  const existing = readUserText(cfg)
   const block = renderConfigBlock({
     entries: hostEntries(store),
     identityFile: instaKeyPath(),
@@ -1340,6 +1371,43 @@ function pathExists(path: string): boolean {
   } catch {
     return false
   }
+}
+
+/** How to put a file back exactly as it is now: its bytes, or its absence.
+ *
+ *  The BYTES, not readAliasStore's reading of them. The reader drops entries
+ *  it cannot use, on purpose, so an undo that wrote the reader's output back
+ *  would delete a hand-edited entry the user was about to fix and turn a store
+ *  that never existed into `{}` -- on the failure path, where the command has
+ *  just promised it changed nothing. */
+function snapshotForUndo(path: string): Undo {
+  const existed = pathExists(path)
+  let bytes: Buffer | undefined
+  if (existed) {
+    try { bytes = readFileSync(path) } catch { bytes = undefined }
+  }
+  return () => {
+    if (!existed) {
+      try { unlinkSync(path) } catch { /* never created */ }
+    } else if (bytes !== undefined) {
+      writeFileAtomicSync(path, bytes, { mode: 0o600 })
+    }
+  }
+}
+
+/** The text of a user-owned file this command is about to rewrite, or '' when
+ *  there is none -- REFUSING one that is not UTF-8. Decoding such a file and
+ *  writing it back turns every byte that did not decode into U+FFFD: a
+ *  Latin-1 comment in a twenty-year-old ~/.ssh/config would be rewritten,
+ *  silently, by a command that promised to add one block at the top. */
+function readUserText(path: string): string {
+  if (!existsSync(path)) return ''
+  const raw = readFileSync(path)
+  const text = raw.toString('utf8')
+  if (!Buffer.from(text, 'utf8').equals(raw)) {
+    throw new Error(`refusing to edit ${path}: it is not valid UTF-8, and rewriting it would alter bytes this command does not own`)
+  }
+  return text
 }
 
 /**
@@ -1447,7 +1515,7 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
         // host into a renewal that gives up -- one failed renewal and a
         // `--setup` to repair it, never a half-moved alias.
         const steps: Array<() => Undo | void> = []
-        if (moved) steps.push(() => { writeAliasStore(store); return () => writeAliasStore(before) })
+        if (moved) steps.push(() => { const back = snapshotForUndo(instaAliasStorePath()); writeAliasStore(store); return back })
         if (ca !== undefined) steps.push(() => installCertAuthority(hostPatternFor(out.host), ca))
         if (moved && installed) steps.push(() => installConfigBlock(store))
         steps.push(() => out.staged.commit())
@@ -1523,6 +1591,11 @@ export function acquireLockFile(path: string, now: number, staleMs: number): (()
   const held = take()
   if (held) return held
 
+  // A lock path that is a LINK is refused before anything reads or writes
+  // through it. `wx` already refuses to create over a link, and the takeover
+  // below writes into the inode the path names -- through a link that is
+  // somebody else's file.
+  if (isSymlink(path)) return undefined
   const observed = observeLock(path)
   // Released between the exclusive create and the read: ordinary contention,
   // and `wx` is the only arbiter that needs to settle it. Nothing is being
@@ -1530,6 +1603,14 @@ export function acquireLockFile(path: string, now: number, staleMs: number): (()
   if (!observed) return take()
   if (!isAbandoned(observed, now, staleMs)) return undefined
   return breakStaleLock(path, observed.token, token) ? release : undefined
+}
+
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink()
+  } catch {
+    return false
+  }
 }
 
 /** The lock as one consistent observation: the token that is in the file and
@@ -1674,6 +1755,10 @@ function breakStaleLock(path: string, stale: string, mine: string): boolean {
  *  step, and both shipped past unit tests of every piece. */
 export type SSHDeps = {
   mint?: typeof mintCert
+  /** The public key to have certified. The real one derives it from the
+   *  private key with ssh-keygen; the transaction tests, which are about the
+   *  ORDER of writes and deliberately free of OpenSSH, hand in a constant. */
+  keyPair?: typeof ensureKeyPair
   loadApi?: () => Promise<ApiClient>
   loadProject?: typeof requireProject
   installCA?: typeof installCertAuthority
@@ -1702,7 +1787,7 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
   // had done nothing. Nothing is written until the alias is known to be ours.
   assertAliasFree(readAliasStore(), alias, { projectId: p.projectId, serviceId: svc.id, branch })
 
-  const out = await mint(api, p.projectId, svc.id, ensureKeyPair(), alias)
+  const out = await mint(api, p.projectId, svc.id, (deps.keyPair ?? ensureKeyPair)(), alias)
   /** Whether ~/.ssh ends up describing this alias — decided under the lock, and
    *  the only honest basis for advertising `ssh <alias>`. */
   let installed = false
@@ -1751,7 +1836,7 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
       // Every step that can be taken back registers how -- see commitWithUndo.
       const ca = out.caPublicKey
       const steps: Array<() => Undo | void> = [
-        () => { writeAliasStore(store); return () => writeAliasStore(before) },
+        () => { const back = snapshotForUndo(instaAliasStorePath()); writeAliasStore(store); return back },
       ]
       if (installed) {
         // planCertAuthority parses the key and refuses a bad one, so a hostile

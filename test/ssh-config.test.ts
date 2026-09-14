@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   renderConfigBlock, renderEnsureCertMatch, upsertConfigBlock, upsertCertAuthority,
-  planCertAuthority, revertCertAuthority, certifiesPublicKey, parseCAPublicKey,
+  planCertAuthority, revertCertAuthority, certifiesPublicKey, parseCAPublicKey, hasOwnedBlock,
   aliasFor, isSafeAlias, isSafeConfigValue, quoteConfigPath, BLOCK_BEGIN, BLOCK_END, CA_MARKER,
 } from '../src/commands/ssh-config.js'
 
@@ -1236,5 +1236,59 @@ describe('the generated config works on Windows, where multiplexing does not', (
       expect(out, `${platform} lost connection multiplexing`).toContain('ControlMaster auto')
       expect(out).toContain('ControlPersist 10m')
     }
+  })
+})
+
+describe('a marker is a whole line, never a mention of one', () => {
+  // The finding. indexOf found the marker TEXT wherever it occurred, so a
+  // user's comment that mentioned it -- documentation of this very block, one
+  // line above it -- became the start of "our" block, and everything from the
+  // middle of that line to the real end marker was cut: their comment
+  // truncated, their stanzas in between deleted. `includes` in hasOwnedBlock
+  // made the same mention count as an installed block.
+  const blk = (host: string) => `${BLOCK_BEGIN}\nHost api.insta\n  HostName ${host}\n${BLOCK_END}\n`
+
+  it("leaves a comment that mentions the begin marker, and the stanzas after it, alone", () => {
+    const mention = `# the managed section below starts at ${BLOCK_BEGIN} -- do not edit it`
+    const existing = `${mention}\nHost bastion\n  User someone\n${blk('OLD')}Host other\n  Port 2222\n`
+    const out = upsertConfigBlock(existing, blk('NEW'))
+    expect(out, "the user's comment was cut in half").toContain(mention)
+    expect(out, 'a stanza between the mention and the real block was deleted').toContain('Host bastion\n  User someone')
+    expect(out).toContain('Host other\n  Port 2222')
+    expect(out).toContain('HostName NEW')
+    expect(out, 'the real block was not replaced').not.toContain('HostName OLD')
+    expect(out.split(BLOCK_END).length - 1).toBe(1)
+  })
+
+  it('does not treat a mention as an installed block', () => {
+    expect(hasOwnedBlock(`# run --setup to add the ${BLOCK_BEGIN} block\nHost *\n`), 'a mention read as an installed block').toBe(false)
+    expect(hasOwnedBlock(`${BLOCK_BEGIN}\nHost api.insta\n`), 'a truncated block is still ours').toBe(true)
+    expect(hasOwnedBlock(`  ${BLOCK_BEGIN}  \nHost api.insta\n`), 'a marker line with whitespace around it is still the marker').toBe(true)
+  })
+
+  it('ignores an end marker mentioned in a comment when looking for the real one', () => {
+    const existing = `# ends at ${BLOCK_END}\n${blk('OLD')}Host *\n`
+    const out = upsertConfigBlock(existing, blk('NEW'))
+    expect(out).toContain(`# ends at ${BLOCK_END}`)
+    expect(out).not.toContain('HostName OLD')
+    expect(out).toContain('Host *')
+  })
+
+  it('removes every well-formed block, so a file that somehow holds two comes back with one', () => {
+    const out = upsertConfigBlock(`${blk('A')}\n${blk('B')}Host *\n`, blk('NEW'))
+    expect(out.split(BLOCK_BEGIN).length - 1).toBe(1)
+    expect(out).toContain('HostName NEW')
+    expect(out).toContain('Host *')
+  })
+})
+
+describe("a user's own anchor is theirs even when its comment mentions us", () => {
+  it('is not retired by a rotation for the same host pattern', () => {
+    // The same class as the config markers: `includes(CA_MARKER)` made any
+    // anchor whose comment contained our tag ours to retire.
+    const theirs = `@cert-authority ssh.*.compute.example ssh-ed25519 ${RETIRED_CA.split(' ')[1]} ${CA_MARKER} (copied from the insta block)\n`
+    const out = upsertCertAuthority(theirs, 'ssh.*.compute.example', ROTATED_CA)
+    expect(out, 'a user anchor was retired because its comment mentioned our marker').toContain(theirs.trimEnd())
+    expect(out).toContain(ROTATED_CA.split(' ')[1]!)
   })
 })

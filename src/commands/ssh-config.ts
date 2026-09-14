@@ -253,22 +253,41 @@ export function upsertConfigBlock(existing: string, block: string): string {
  *  about where an alias points. The BEGIN marker alone is enough -- a file
  *  edited down to half a block is still a file we own a block in. */
 export function hasOwnedBlock(existing: string): boolean {
-  return existing.includes(BLOCK_BEGIN)
+  return existing.split('\n').some(isMarkerLine(BLOCK_BEGIN))
 }
 
-/** `existing` with our fenced block cut out, wherever it was. */
+/** A marker is a WHOLE LINE, never a substring of one.
+ *
+ *  Matching the marker text wherever it occurred made a user's comment that
+ *  merely mentioned it -- documentation of this very block, one line above
+ *  it -- the start of "our" block: everything from the middle of that line to
+ *  the real end marker was cut, the user's stanzas in between included. The
+ *  same substring made a plain issuance believe a block was installed. A line
+ *  that IS the marker is ours; a line that contains it is theirs. */
+const isMarkerLine = (marker: string) => (line: string) => line.trim() === marker
+
+/** `existing` with our fenced block cut out, wherever it was -- every
+ *  well-formed one, so a file that somehow holds two comes back with one. */
 function removeOwnedBlock(existing: string): string {
-  const begin = existing.indexOf(BLOCK_BEGIN)
-  if (begin === -1) return existing
-  const end = existing.indexOf(BLOCK_END, begin)
-  // A begin marker with no end is a file someone edited by hand. Leave it
-  // alone rather than guessing where our block stopped; the fresh block goes
-  // on top, and first-wins means it takes effect either way.
-  if (end === -1) return existing
-  const after = end + BLOCK_END.length
-  // Swallow the newline that followed the end marker, so repeated runs do not
-  // accumulate blank lines.
-  return existing.slice(0, begin) + existing.slice(after).replace(/^\n/, '')
+  const lines = existing.split('\n')
+  const isBegin = isMarkerLine(BLOCK_BEGIN), isEnd = isMarkerLine(BLOCK_END)
+  const out: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    if (isBegin(lines[i]!)) {
+      const end = lines.findIndex((l, n) => n > i && isEnd(l))
+      // The end marker's own line goes with the block, newline included, so
+      // repeated runs do not accumulate blank lines.
+      if (end !== -1) { i = end; continue }
+      // A begin marker with no end is a file someone edited by hand. Leave it
+      // -- and everything after it -- alone rather than guessing where our
+      // block stopped; the fresh block goes on top, and first-wins means it
+      // takes effect either way.
+      out.push(...lines.slice(i))
+      break
+    }
+    out.push(lines[i]!)
+  }
+  return out.join('\n')
 }
 
 /** A hostname we are willing to derive a trust anchor from.
@@ -663,16 +682,24 @@ export function revertCertAuthority(current: string, plan: CertAuthorityPlan): s
   return body.length === 0 ? '' : body.join('\n') + '\n'
 }
 
+/** A known_hosts line this CLI wrote: `@cert-authority <pattern> <type> <blob>`
+ *  followed by CA_MARKER as the WHOLE comment. The marker is matched as the
+ *  exact trailing fields, not as a substring: a user's own anchor whose
+ *  comment happens to mention us is theirs, and rotation must not retire it. */
+export function isOurAnchor(line: string): boolean {
+  const f = line.trim().split(/\s+/)
+  return f[0] === '@cert-authority' && f.length === 4 + CA_MARKER_FIELDS && f.slice(4).join(' ') === CA_MARKER
+}
+const CA_MARKER_FIELDS = CA_MARKER.split(' ').length
+
 function isSupersededAnchor(line: string, hostPattern: string, key: string): boolean {
-  if (!line.startsWith('@cert-authority') || !line.includes(CA_MARKER)) return false
+  if (!isOurAnchor(line)) return false
   // Compared FIELD BY FIELD, never with `includes`. A base64 key is an
   // unanchored substring of any longer key sharing its prefix, so a substring
   // test would delete a DIFFERENT region's anchor that happened to extend ours
   // -- and a deleted anchor is not a visible failure, it is a host-key prompt
   // on every connection to a region that used to be trusted.
-  // `''` for a line too short to carry one: it matches no host pattern and
-  // covers nothing, so such a line is simply never superseded.
-  const [, pattern = '', keyType, keyBlob] = line.split(/\s+/)
+  const [, pattern = '', keyType, keyBlob] = line.trim().split(/\s+/)
   // Rotation: the platform issued a new CA for a pattern we already anchor.
   if (pattern === hostPattern) return true
   const [wantType, wantBlob] = key.split(/\s+/)

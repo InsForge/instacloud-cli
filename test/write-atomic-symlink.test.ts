@@ -3,12 +3,15 @@ import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { writeFileAtomicSync, resolveThroughSymlink } from '../src/util.js'
+import { canSymlink } from './support/can-symlink.js'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'insta-atomic-')) })
 afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
-describe('a symlinked config is written THROUGH, not replaced', () => {
+// Skipped, with the reason in the probe, where the OS refuses the test process
+// symlinks at all; CI's runners allow them, so nothing is skipped there.
+describe.skipIf(!canSymlink)('a symlinked config is written THROUGH, not replaced', () => {
   it('keeps the link and updates its target', () => {
     // The dotfiles setup: the real file lives in a repo, ~/.ssh/config is a
     // link at it. rename(2) over the link would leave the repo holding a stale
