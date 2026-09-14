@@ -3,9 +3,10 @@
 // browser opener — and the guard branches, without touching config or network. die() prints the
 // reason to stderr and throws CliExit('exit 1'), so rejections assert 'exit 1' and the message
 // is read from a captured stderr where it matters.
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { login, loginClaim, loginDevice } from '../src/commands/auth.js'
 import { openUrl } from '../src/util.js'
+import { configureAgent } from '../src/agent.js'
 
 type DeviceRunner = typeof loginDevice
 
@@ -87,5 +88,25 @@ describe('login dispatch', () => {
     expect(await stderrOf(() => login({ claim: 'me@example.com', apiKey: 'insta_x' }, mustNotRun, claimMustNotRun).catch(() => {}))).toMatch(/choose one login mode/)
     expect(await stderrOf(() => login({ claim: '' }, mustNotRun, claimMustNotRun).catch(() => {}))).toMatch(/--claim needs an email/)
     expect(await stderrOf(() => login({ claim: 'not-an-email' }, mustNotRun, claimMustNotRun).catch(() => {}))).toMatch(/--claim needs an email/)
+  })
+
+  it('--claim refuses a password (that belongs to --email)', async () => {
+    const err = await stderrOf(() => expect(login({ claim: 'me@example.com', password: 'x' }, mustNotRun, claimMustNotRun)).rejects.toThrow('exit 1'))
+    expect(err).toMatch(/choose one login mode/)
+  })
+
+  it('--claim refuses an explicitly empty --email too', async () => {
+    const err = await stderrOf(() => expect(login({ claim: 'me@example.com', email: '' }, mustNotRun, claimMustNotRun)).rejects.toThrow('exit 1'))
+    expect(err).toMatch(/choose one login mode/)
+  })
+
+  describe('--claim in agent mode', () => {
+    afterEach(() => configureAgent(null))
+    it('passes no browser opener — the human is not at this machine', async () => {
+      configureAgent({ source: 'cli-explicit', client: 'codex' })
+      const { run, calls } = fakeClaim()
+      await login({ claim: 'me@example.com' }, mustNotRun, run)
+      expect(calls).toEqual([{ email: 'me@example.com', open: undefined }])
+    })
   })
 })

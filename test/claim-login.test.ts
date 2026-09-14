@@ -95,4 +95,69 @@ describe('claimGrant', () => {
     const bad: ClaimPoster = async () => ({ registration_id: 'reg_1' })
     await expect(claimGrant('me@example.com', 'unknown', bad, async () => {})).rejects.toThrow(/malformed registration response/)
   })
+
+  it('a re-mint honours the fresh interval and opens the browser again', async () => {
+    const opened: string[] = []
+    const remint = { registration_id: 'reg_1', claim_attempt_id: 'cla_3', status: 'initiated', expires_at: 'x', claim_attempt: { user_code: '202020', expires_in: 600, verification_uri: 'https://console.test/claim?claim_attempt_token=cat_3', interval: 7 } }
+    const { post, wait, waits } = fakeFlow(['expired_token', 'authorization_pending', 'token:insta_new'], remint)
+    await expect(claimGrant('me@example.com', 'unknown', post, wait, (u) => { opened.push(u); return true })).resolves.toBe('insta_new')
+    expect(waits[1]).toBe(7) // the poll right after the re-mint paces to its fresh interval, not the stale slow_down backoff
+    expect(opened).toEqual(['https://console.test/claim?claim_attempt_token=cat_1', 'https://console.test/claim?claim_attempt_token=cat_3'])
+  })
+
+  it('rejects a re-mint missing verification_uri', async () => {
+    const badRemint = { registration_id: 'reg_1', claim_attempt: { user_code: '303030', expires_in: 600, interval: 5 } }
+    const { post, wait } = fakeFlow(['expired_token'], badRemint)
+    await expect(claimGrant('me@example.com', 'unknown', post, wait)).rejects.toThrow(/malformed claim response/)
+  })
+
+  it('gives every poll — the token poll and the re-mint — an AbortSignal', async () => {
+    const seen: Array<{ path: string; signal: unknown }> = []
+    let polled = 0
+    const post: ClaimPoster = async (path, _body, signal) => {
+      seen.push({ path, signal })
+      if (path === '/agent/auth') return START
+      if (path === '/agent/auth/claim') return REMINT
+      if (path === '/api/auth/oauth2/token') {
+        polled += 1
+        if (polled === 1) throw new ApiError(400, 'expired_token')
+        return { access_token: 'insta_done' }
+      }
+      throw new Error(`unexpected path ${path}`)
+    }
+    await claimGrant('me@example.com', 'unknown', post, async () => {})
+    const polls = seen.filter((s) => s.path !== '/agent/auth')
+    expect(polls.length).toBeGreaterThan(0)
+    for (const p of polls) expect(p.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('keeps polling through a poll timeout, and expires once the deadline passes', async () => {
+    const shortStart = { ...START, claim_token_expires: new Date(Date.now() + 60).toISOString() }
+    let polled = 0
+    const post: ClaimPoster = async (path) => {
+      if (path === '/agent/auth') return shortStart
+      if (path === '/api/auth/oauth2/token') {
+        polled += 1
+        const e = new Error('the operation timed out'); e.name = 'TimeoutError'
+        throw e
+      }
+      throw new Error(`unexpected path ${path}`)
+    }
+    const wait = () => new Promise<void>((r) => setTimeout(r, 25))
+    await expect(claimGrant('me@example.com', 'unknown', post, wait)).rejects.toThrow(/expired before me@example.com confirmed/)
+    expect(polled).toBeGreaterThan(1) // a timeout alone must not end the attempt before the deadline
+  })
+
+  it('a re-mint that times out is asked again on the next expired_token', async () => {
+    const { post: scripted, wait, posts } = fakeFlow(['expired_token', 'expired_token', 'authorization_pending', 'token:insta_new'])
+    let remints = 0
+    const post: ClaimPoster = async (path, body, signal) => {
+      if (path === '/agent/auth/claim' && remints++ === 0) { const e = new Error('the operation timed out'); e.name = 'TimeoutError'; throw e }
+      return scripted(path, body, signal)
+    }
+    const lines = await stdoutLines(() => claimGrant('me@example.com', 'unknown', post, wait))
+    expect(lines.join('')).toContain('101010')
+    expect(remints).toBe(2) // the timed-out re-mint did not count as the one allowed re-mint
+    expect(posts.filter((p) => p.path === '/agent/auth/claim')).toHaveLength(1) // only the successful one reached the scripted poster
+  })
 })

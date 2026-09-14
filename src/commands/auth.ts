@@ -25,11 +25,11 @@ export async function login(
   // Login modes are exclusive — pick one. Check presence (not truthiness) so an explicit
   // empty --api-key= is rejected by validation rather than silently falling through.
   if (opts.apiKey !== undefined) {
-    if (opts.device || opts.oauth || opts.email || opts.claim !== undefined) die('choose one login mode: --api-key, --claim, --device, --oauth, or --email')
+    if (opts.device || opts.oauth !== undefined || opts.email !== undefined || opts.claim !== undefined) die('choose one login mode: --api-key, --claim, --device, --oauth, or --email')
     return loginApiKey(opts.apiKey, opts)
   }
   if (opts.claim !== undefined) {
-    if (opts.device || opts.oauth || opts.email) die('choose one login mode: --api-key, --claim, --device, --oauth, or --email')
+    if (opts.device || opts.oauth !== undefined || opts.email !== undefined || opts.password !== undefined) die('choose one login mode: --api-key, --claim, --device, --oauth, or --email (a password belongs to --email)')
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(opts.claim)) die('--claim needs an email address: the account that will authorize this agent')
     // The human types the code on the console; open it here only when a browser is on this machine.
     return claim(opts.claim, opts, agentMode() ? undefined : openUrl)
@@ -94,7 +94,7 @@ export async function loginClaim(email: string, opts: { apiUrl?: string; env?: s
   const target = targetApiUrl(opts)
   if (target) api.setApiUrl(target)
   const client = agentMode()?.client ?? 'unknown'
-  const key = await grant(email, client, (path, body) => api.request('POST', path, body, { auth: false }), sleepSeconds, open)
+  const key = await grant(email, client, (path, body, signal) => api.request('POST', path, body, { auth: false, signal }), sleepSeconds, open)
   const user = await applyApiKeyLogin(api, key)
   await api.persist()
   info(`logged in as ${user.email ?? user.id} @ ${api.apiUrl}`)
@@ -219,7 +219,7 @@ export async function deviceGrant(post: DevicePoster, wait: (s: number) => Promi
 const CLAIM_GRANT = 'urn:workos:agent-auth:grant-type:claim'
 type ClaimBlock = { user_code: string; expires_in: number; verification_uri: string; interval?: number }
 type ClaimStart = { registration_id: string; claim_token: string; claim_token_expires: string; claim: ClaimBlock }
-export type ClaimPoster = (path: string, body: Record<string, unknown>) => Promise<any>
+export type ClaimPoster = (path: string, body: Record<string, unknown>, signal?: AbortSignal) => Promise<any>
 
 export async function claimGrant(email: string, client: string, post: ClaimPoster, wait: (s: number) => Promise<void> = sleepSeconds, open?: (url: string) => boolean): Promise<string> {
   const start = (await post('/agent/auth', { type: 'service_auth', login_hint: email, client })) as ClaimStart
@@ -230,7 +230,7 @@ export async function claimGrant(email: string, client: string, post: ClaimPoste
   const deadline = Math.min(Number.isFinite(expiresAt) ? expiresAt : Infinity, Date.now() + 86_400_000)
   const show = (block: ClaimBlock, fresh: boolean) => {
     if (fresh) info('the code expired — here is a new one.')
-    if (!fresh && open) { info('opening your browser…'); open(block.verification_uri) }
+    if (open) { info('opening your browser…'); open(block.verification_uri) }
     info(`to authorize this agent, open this link, sign in as ${email}, and enter this code: ${block.user_code}`)
     info(`  ${block.verification_uri}`)
   }
@@ -242,25 +242,30 @@ export async function claimGrant(email: string, client: string, post: ClaimPoste
   const expired = () => new Error(`the request expired before ${email} confirmed it — run \`insta login --claim ${email}\` again`)
   while (Date.now() < deadline) {
     await wait(interval)
+    const signal = AbortSignal.timeout(Math.max(1_000, Math.min(deadline - Date.now(), 30_000)))
     let grant: { access_token?: string } | null = null
     try {
-      grant = (await post('/api/auth/oauth2/token', { grant_type: CLAIM_GRANT, claim_token: start.claim_token })) as { access_token?: string }
+      grant = (await post('/api/auth/oauth2/token', { grant_type: CLAIM_GRANT, claim_token: start.claim_token }, signal)) as { access_token?: string }
     } catch (e) {
+      if (e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')) { if (Date.now() >= deadline) throw expired(); continue }
       if (!(e instanceof ApiError)) continue // transport blip — keep polling until the deadline
       const code = e.message
       if (code === 'authorization_pending') continue
       if (code === 'slow_down' || e.status === 429) { interval += 5; continue }
       if (code === 'expired_token') {
         if (reminted) throw expired()
-        reminted = true
         let again: { claim_attempt?: ClaimBlock }
         try {
-          again = (await post('/agent/auth/claim', { claim_token: start.claim_token, email })) as { claim_attempt?: ClaimBlock }
+          again = (await post('/agent/auth/claim', { claim_token: start.claim_token, email }, signal)) as { claim_attempt?: ClaimBlock }
         } catch (re) {
           if (re instanceof ApiError && re.message === 'claim_expired') throw expired()
+          if (!(re instanceof ApiError)) continue // re-mint timeout or transport blip: the next expired_token asks again
           throw re
         }
-        if (!again?.claim_attempt?.user_code) throw new Error('malformed claim response (missing claim_attempt)')
+        reminted = true
+        if (!again?.claim_attempt?.user_code || !again.claim_attempt.verification_uri) throw new Error('malformed claim response (missing claim_attempt)')
+        const fresh = Number(again.claim_attempt.interval)
+        if (Number.isFinite(fresh)) interval = Math.max(fresh, 1)
         show(again.claim_attempt, true)
         continue
       }
