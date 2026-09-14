@@ -11,7 +11,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { computeSSH, instaCertPath, instaAliasStorePath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias } from '../src/commands/compute.js'
+import { computeSSH, instaCertPath, instaAliasStorePath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias, hostPatternFor } from '../src/commands/compute.js'
+import { isSSHCertificateRecord, mayWidenCAHost } from '../src/commands/ssh-config.js'
 
 // Redirect the whole ~/.insta and ~/.ssh tree into a temp dir.
 //
@@ -46,7 +47,12 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true })
 })
 
-const CERT = 'ssh-ed25519-cert-v01@openssh.com RkFLRS1DRVJULUJPRFktRk9SLVRFU1RTLUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB'
+// A STRUCTURALLY VALID certificate: the blob's first SSH `string` field
+// carries the same type name as the text field, which is what
+// isSSHCertificateRecord decodes and checks. A blob of arbitrary base64 of
+// the right length is deliberately NOT accepted, and is tested below.
+const CERT_TYPE = 'ssh-ed25519-cert-v01@openssh.com'
+const CERT = `${CERT_TYPE} AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=`
 const CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICAcaFakeCAKeyForTestsOnlyAAAAAAAAAAAAAAAAAAAA'
 
 // A project whose service list holds one compute service named `api`.
@@ -672,5 +678,56 @@ describe.skipIf(!keygen)('an automatic renewal replaces the certificate it was i
     const urls = await renew(() => ({ status: 200, body: good }))
     expect(urls, 'the hook called the platform for an alias it knows nothing about').toEqual([])
     expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe('the-expiring-certificate\n')
+  })
+})
+
+describe('a certificate is DECODED, not just shape-checked', () => {
+  // The escalation this closes: a textual check accepts
+  // `<valid type> <64+ chars of base64>`, which anyone can construct, and the
+  // cost of accepting it is that a working alias's live credential has already
+  // been replaced by the time ssh reports the problem.
+  const structural: Array<[string, string]> = [
+    ['a blob of arbitrary base64 the right length', `${CERT_TYPE} ${'A'.repeat(400)}`],
+    ['a blob whose inner type disagrees with the text field', 'ssh-ed25519-cert-v01@openssh.com AAAAHHNzaC1yc2EtY2VydC12MDFAb3BlbnNzaC5jb21BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ=='],
+    ['a blob whose first length field overruns it', `${CERT_TYPE} ////8HNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=`],
+    ['a blob with a zero-length type field', `${CERT_TYPE} AAAAAEFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ==`],
+    ['a blob truncated inside its type field', `${CERT_TYPE} AAAAIHNzaC1lZDI1NTE=`],
+  ]
+  for (const [what, value] of structural) {
+    it(`refuses ${what}`, () => {
+      expect(isSSHCertificateRecord(value), `${what} was accepted`).toBe(false)
+    })
+  }
+
+  it('accepts the certificate shape the gateway actually issues', () => {
+    // The positive control: a decoder strict enough to refuse everything above
+    // can also refuse every real certificate, and that failure is invisible
+    // from a table of rejections.
+    expect(isSSHCertificateRecord(CERT)).toBe(true)
+    expect(isSSHCertificateRecord(`${CERT} user@host`), 'a trailing comment was rejected').toBe(true)
+  })
+})
+
+describe('the CA wildcard stays on the ssh gateway name', () => {
+  const S = ['compute.example'] as const
+
+  it('widens the gateway name', () => {
+    expect(hostPatternFor('ssh.us-west-1.compute.example', S)).toBe('ssh.*.compute.example')
+  })
+
+  // Tenant service hostnames live under the SAME suffix, so a wildcard on any
+  // other first label lets the CA vouch for an unrelated platform host that
+  // merely shares the shape -- the over-scoping the wildcard exists to avoid.
+  const notGateway = ['api.us-west-1.compute.example', 'www.us-west-1.compute.example', 'sshx.us-west-1.compute.example']
+  for (const host of notGateway) {
+    it(`anchors ${host} exactly, because its first label is not the gateway`, () => {
+      expect(mayWidenCAHost(host, S), 'a non-gateway host widened the CA').toBe(false)
+      expect(hostPatternFor(host, S)).toBe(host)
+    })
+  }
+
+  it('still refuses a gateway name with no region label', () => {
+    expect(mayWidenCAHost('ssh.compute.example', S)).toBe(false)
+    expect(mayWidenCAHost('ssh.a.b.compute.example', S), 'widened a label that is not the region').toBe(false)
   })
 })

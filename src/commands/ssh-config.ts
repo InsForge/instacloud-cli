@@ -284,7 +284,29 @@ export function isSSHCertificateRecord(v: unknown): v is string {
   if (parts.length < 2) return false
   const type = parts[0]!, blob = parts[1]!
   if (!CERT_TYPE_RE.test(type)) return false
-  return /^[A-Za-z0-9+/]+={0,3}$/.test(blob) && blob.length >= 64
+  if (!/^[A-Za-z0-9+/]+={0,3}$/.test(blob) || blob.length < 64) return false
+  // DECODED, not just shape-checked. `<valid type> AAAA...` of the right length
+  // is trivially constructible and passed every textual test while still being
+  // unusable -- and the cost of accepting it is that a working alias's live
+  // credential has already been replaced by the time ssh says so.
+  //
+  // An OpenSSH certificate blob begins with an SSH `string`: a 4-byte
+  // big-endian length followed by that many bytes, holding the certificate's
+  // own type name. It must agree with the type in the text field; a blob that
+  // does not even carry a well-formed first field is not a certificate at all.
+  // Decoding it here keeps the check dependency-free and off the subprocess
+  // path, which matters because this runs during OpenSSH's own config parse.
+  let raw: Buffer
+  try {
+    raw = Buffer.from(blob, 'base64')
+  } catch {
+    return false
+  }
+  if (raw.length < 4) return false
+  const nameLen = raw.readUInt32BE(0)
+  // A sane field length, checked before it is used as an offset.
+  if (nameLen === 0 || nameLen > 128 || raw.length < 4 + nameLen) return false
+  return raw.subarray(4, 4 + nameLen).toString('utf8') === type
 }
 
 /** An SSH principal safe to place in a command line.
@@ -361,11 +383,21 @@ export const CA_WIDENABLE_SUFFIXES = [
 export function mayWidenCAHost(host: string, suffixes: readonly string[] = CA_WIDENABLE_SUFFIXES): boolean {
   const under = suffixes.find((suffix) => host.endsWith(`.${suffix}`))
   if (!under) return false
-  // Still require the shape the wildcard assumes -- <name>.<region>.<suffix> --
-  // so the label being widened is genuinely the region and not part of the
-  // suffix itself.
-  return host.slice(0, host.length - under.length - 1).split('.').length >= 2
+  // The shape the wildcard assumes -- <gateway>.<region>.<suffix> -- so the
+  // label being widened is genuinely the region and not part of the suffix.
+  const head = host.slice(0, host.length - under.length - 1).split('.')
+  if (head.length !== 2) return false
+  // And the first label must be the SSH GATEWAY, which is the scope this
+  // anchor was always meant to have. Tenant service hostnames live under the
+  // same suffix, so widening `api.us-west-1.<suffix>` to `api.*.<suffix>`
+  // would let the CA vouch for an unrelated platform host that merely shares
+  // the shape -- the exact over-scoping the wildcard was introduced to avoid.
+  return head[0] === SSH_GATEWAY_LABEL
 }
+
+/** The first label of every SSH gateway name, and the only first label a
+ *  wildcard anchor may carry. */
+export const SSH_GATEWAY_LABEL = 'ssh'
 
 export function isSafeCAHostPattern(v: unknown): v is string {
   if (typeof v !== 'string' || v.length === 0 || v.length > 253) return false
