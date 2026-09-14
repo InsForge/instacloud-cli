@@ -52,6 +52,21 @@ describe('a symlinked config is written THROUGH, not replaced', () => {
     expect(readFileSync(p, 'utf8')).toBe('fresh\n')
   })
 
+  it('refuses to write when the link cannot be resolved, rather than severing it', () => {
+    // ELOOP, not ENOENT. A blanket catch returned the LINK path and the caller
+    // then renamed over it -- destroying a dotfiles symlink because we could
+    // not read it, which is the exact harm resolving exists to prevent. Only a
+    // missing target licenses replacement; every other failure is
+    // "cannot confirm", and cannot-confirm is not a licence to write.
+    const a = join(dir, 'loop-a')
+    const b = join(dir, 'loop-b')
+    symlinkSync(b, a)
+    symlinkSync(a, b)
+    expect(() => resolveThroughSymlink(a), 'a symlink cycle was silently treated as a plain path').toThrow()
+    expect(() => writeFileAtomicSync(a, 'x\n')).toThrow()
+    expect(lstatSync(a).isSymbolicLink(), 'the link was severed anyway').toBe(true)
+  })
+
   it('materializes a DANGLING link rather than failing', () => {
     // Nothing to write through, so replacing the link is the only remaining
     // move -- but it must not throw and leave the user with no config at all.

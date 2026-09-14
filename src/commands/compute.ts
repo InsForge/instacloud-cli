@@ -757,7 +757,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import {
-  aliasFor, isSafeAlias, isSafeConfigValue, renderConfigBlock, upsertCertAuthority, upsertConfigBlock, type HostEntry,
+  aliasFor, isSafeAlias, isSafeConfigValue, isSafeSSHHost, renderConfigBlock, upsertCertAuthority, upsertConfigBlock, type HostEntry,
 } from './ssh-config.js'
 
 /** Where this CLI keeps its own SSH material. Deliberately NOT ~/.ssh: we never
@@ -771,7 +771,7 @@ export const instaCertPath = (alias: string) => join(instaSSHDir(), `${alias}-ce
 export const instaAliasStorePath = () => join(instaSSHDir(), 'aliases.json')
 
 /** The renewal-hook command prefix. ssh-config.ts appends the validated alias. */
-export const ENSURE_CERT_COMMAND = 'insta compute ssh --ensure-cert'
+export const ENSURE_CERT_COMMAND = 'insta __ssh-ensure-cert'
 
 type SSHOpts = LifeOpts & { setup?: boolean; ensureCert?: string; json?: boolean }
 
@@ -963,13 +963,21 @@ function installConfigBlock(store: AliasStore): void {
  * EVERY ssh invocation — including `scp`, `ssh -G` and an IDE's connections:
  *
  *  - Cheap when there is nothing to do. The local certificate is checked FIRST;
- *    a valid one returns before any config, project or API work happens.
+ *    a valid one returns before any config, project or API work happens. This
+ *    is also why the config block invokes the HIDDEN `__ssh-ensure-cert`
+ *    command rather than `compute ssh --ensure-cert`: `guard` awaits
+ *    trackCommand() after every action, which reads global and project config,
+ *    can create ~/.insta/telemetry.json and issues a PostHog request with a
+ *    timeout of up to 1.5s. Returning early from the action does not skip any
+ *    of that. Telemetry already skips command paths beginning `__` (the same
+ *    rule __update-check relies on), so the fast path is genuinely local only
+ *    when the hook enters through that name.
  *  - Silent and fail-safe. An unlinked directory, an expired login or a network
  *    outage must not print anything or fail the parse: the existing certificate
  *    stays in place and the login then fails with SSH's own message, not a CLI
  *    error spliced into the middle of an ssh session.
  */
-async function ensureCertForAlias(alias: string): Promise<void> {
+export async function ensureCertForAlias(alias: string): Promise<void> {
   try {
     if (!isSafeAlias(alias)) return
     if (!certNeedsRenewal(instaCertPath(alias))) return
@@ -985,30 +993,65 @@ async function ensureCertForAlias(alias: string): Promise<void> {
   }
 }
 
-export async function computeSSH(serviceName: string | undefined, opts: SSHOpts): Promise<void> {
+/** Side-effect seams, following the `TrackDeps` convention used by telemetry.
+ *  Present so the ORDER of operations is testable: the two defects this seam
+ *  exists for -- minting before the collision check, and advertising a command
+ *  that cannot use the credential -- are both invisible to a test of any single
+ *  step, and both shipped past unit tests of every piece. */
+export type SSHDeps = {
+  mint?: typeof mintCert
+  loadApi?: () => Promise<ApiClient>
+  loadProject?: typeof requireProject
+  installCA?: typeof installCertAuthority
+  installConfig?: typeof installConfigBlock
+  emit?: (line: string) => void
+}
+
+export async function computeSSH(serviceName: string | undefined, opts: SSHOpts, deps: SSHDeps = {}): Promise<void> {
   if (opts.ensureCert !== undefined) return ensureCertForAlias(opts.ensureCert)
 
-  const api = await ApiClient.load()
-  const p = await requireProject()
+  const mint = deps.mint ?? mintCert
+  const emit = deps.emit ?? info
+  const api = await (deps.loadApi ?? ApiClient.load)()
+  const p = await (deps.loadProject ?? requireProject)()
   const branch = opts.branch ?? p.branch
   const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
   const svc = resolveSoleService(services as ComputeRow[], 'compute', serviceName)
   const alias = aliasFor(svc.name)
 
-  const out = await mintCert(api, p.projectId, svc.id, ensureKeyPair(), alias)
-
+  // BEFORE the mint, and the order is the fix. mintCert writes
+  // `<alias>-cert.pub` as part of succeeding, so checking afterwards meant a
+  // collision had already overwritten the certificate of the alias it was
+  // about to refuse -- the previously working `api.insta` could no longer
+  // authenticate, and the command that broke it exited with an error saying it
+  // had done nothing. Nothing is written until the alias is known to be ours.
   const store = readAliasStore()
   assertAliasFree(store, alias, { projectId: p.projectId, serviceId: svc.id, branch })
+
+  const out = await mint(api, p.projectId, svc.id, ensureKeyPair(), alias)
+  // The plane authored these and they are about to be written into ~/.ssh
+  // files, so they are checked at the boundary rather than trusted because of
+  // where they came from.
+  if (!isSafeConfigValue(out.host) || !isSafeConfigValue(out.username)) {
+    throw new Error('the platform returned an ssh host or username this CLI will not write to ~/.ssh/config')
+  }
+  if (!isSafeSSHHost(out.host)) throw new Error(`the platform returned an unusable ssh host: ${JSON.stringify(String(out.host).slice(0, 64))}`)
+
   store[alias] = { projectId: p.projectId, ...(branch ? { branch } : {}), serviceId: svc.id, host: out.host, username: out.username }
   writeAliasStore(store)
 
   if (opts.setup) {
-    if (out.caPublicKey) installCertAuthority(hostPatternFor(out.host), out.caPublicKey)
-    installConfigBlock(store)
+    // upsertCertAuthority parses the key and refuses a bad one, so a hostile or
+    // malformed response fails HERE instead of appending lines to known_hosts.
+    if (out.caPublicKey) (deps.installCA ?? installCertAuthority)(hostPatternFor(out.host), out.caPublicKey)
+    ;(deps.installConfig ?? installConfigBlock)(store)
   }
 
   if (opts.json) return printJson({ alias, host: out.host, username: out.username, expiresAt: out.expiresAt, configured: !!opts.setup })
-  for (const line of sshAdvice({ alias, host: out.host, username: out.username, expiresAt: out.expiresAt, serviceName: svc.name, configured: !!opts.setup })) info(line)
+  for (const line of sshAdvice({
+    alias, host: out.host, username: out.username, expiresAt: out.expiresAt, serviceName: svc.name,
+    configured: !!opts.setup, identityFile: instaKeyPath(), certificateFile: instaCertPath(alias),
+  })) emit(line)
 }
 
 /** What to tell the user once the certificate is in hand.
@@ -1023,14 +1066,28 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts)
  */
 export function sshAdvice(r: {
   alias: string; host: string; username: string; expiresAt: string; serviceName: string; configured: boolean
+  identityFile: string; certificateFile: string
 }): string[] {
   const head = r.configured
     ? [`ssh ${r.alias}  →  ${r.username}@${r.host}`]
     : [
-        `ssh ${r.username}@${r.host}`,
-        `  run \`insta compute ssh ${r.serviceName} --setup\` once to get the shorter \`ssh ${r.alias}\` and automatic renewal`,
+        // Every option here is load-bearing. The key lives at
+        // ~/.insta/ssh/id_ed25519 and the certificate at <alias>-cert.pub;
+        // NEITHER is a path OpenSSH looks in by default, so a bare
+        // `ssh user@host` offers the user's own keys and not the credential
+        // this command just issued -- it fails, having printed success.
+        // IdentitiesOnly stops a loaded agent from spending the server's
+        // MaxAuthTries on unrelated keys before ours is ever tried.
+        `ssh -i ${shQuote(r.identityFile)} -o CertificateFile=${shQuote(r.certificateFile)} -o IdentitiesOnly=yes ${r.username}@${r.host}`,
+        `  run \`insta compute ssh ${r.serviceName} --setup\` once for the shorter \`ssh ${r.alias}\`, automatic renewal, and scp/-L support`,
       ]
   return [...head, `  certificate valid until ${r.expiresAt}`]
+}
+
+/** POSIX single-quoting, for a command line we PRINT for a human to paste.
+ *  A home directory with a space in it is the ordinary case this exists for. */
+function shQuote(v: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(v) ? v : `'${v.replace(/'/g, `'\\''`)}'`
 }
 
 /** `ssh.us-west-1.compute.example` -> `ssh.*.compute.example`.

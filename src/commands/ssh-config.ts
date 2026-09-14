@@ -29,10 +29,15 @@ export function isSafeAlias(alias: string): boolean {
  *  space silently becomes a directive plus arguments, and one carrying a
  *  newline becomes an ENTIRELY NEW directive under our `Host` stanza. These
  *  come from an API response and from a store the reader deliberately tolerates
- *  being hand-edited, so neither is trusted input. */
+ *  being hand-edited, so neither is trusted input.
+ *
+ *  A BACKSLASH is rejected for the same reason paths normalise it away:
+ *  OpenSSH treats it as an escape introducer inside a config argument, so
+ *  `HostName evil\.example` is not the host it appears to be. A value that is
+ *  accepted here must survive to ssh as exactly one literal directive value. */
 export function isSafeConfigValue(v: unknown): v is string {
   // eslint-disable-next-line no-control-regex
-  return typeof v === 'string' && v.length > 0 && v.length <= 253 && !/[\s\u0000-\u001f\u007f"']/.test(v)
+  return typeof v === 'string' && v.length > 0 && v.length <= 253 && !/[\s\u0000-\u001f\u007f"'\\]/.test(v)
 }
 
 /** ssh_config's own quoting for a path.
@@ -199,9 +204,71 @@ function removeOwnedBlock(existing: string): string {
   return existing.slice(0, begin) + existing.slice(after).replace(/^\n/, '')
 }
 
+/** A hostname we are willing to derive a trust anchor from.
+ *
+ *  Stricter than isSafeConfigValue, and for a different file: known_hosts is
+ *  newline-delimited with no fencing, so an unvalidated value does not corrupt
+ *  ONE line, it appends whatever it likes -- including a broader
+ *  `@cert-authority *` that would make the attacker's CA trusted for every host
+ *  the user ever ssh's to. This value arrives in an HTTP response body, so it
+ *  is checked before it reaches the file, not after. */
+const SSH_HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i
+
+export function isSafeSSHHost(v: unknown): v is string {
+  return typeof v === 'string' && v.length > 0 && v.length <= 253 && SSH_HOSTNAME_RE.test(v)
+}
+
+/** Exactly ONE OpenSSH public-key record: `<type> <base64>` with an optional
+ *  comment, and nothing else -- no second line, no leading directive.
+ *
+ *  `renderCertAuthority` only trimmed, so an embedded newline in the CA value
+ *  smuggled additional known_hosts lines past it. Parsing to the three fields
+ *  we will actually write, and rebuilding the line from THOSE, means a value
+ *  either is one key record or is refused; there is no third outcome where
+ *  part of it is honoured. */
+const CA_KEY_TYPES = new Set([
+  'ssh-ed25519', 'ssh-rsa', 'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521',
+  'sk-ssh-ed25519@openssh.com', 'sk-ecdsa-sha2-nistp256@openssh.com',
+])
+
+export function parseCAPublicKey(value: unknown): { type: string; blob: string } {
+  if (typeof value !== 'string') throw new Error('the platform returned no ssh certificate authority key')
+  const line = value.trim()
+  if (/[\n\r]/.test(line)) throw new Error('refusing a certificate authority key spanning multiple lines')
+  const parts = line.split(/[ \t]+/)
+  if (parts.length < 2) throw new Error(`refusing a malformed certificate authority key: ${JSON.stringify(line.slice(0, 64))}`)
+  const type = parts[0]!, blob = parts[1]!
+  if (!CA_KEY_TYPES.has(type)) throw new Error(`refusing a certificate authority key of unsupported type ${JSON.stringify(type.slice(0, 32))}`)
+  if (!/^[A-Za-z0-9+/]+={0,3}$/.test(blob) || blob.length < 32) {
+    throw new Error('refusing a certificate authority key whose body is not base64')
+  }
+  return { type, blob }
+}
+
 /** The trust anchor line for known_hosts, tagged as ours. */
 export function renderCertAuthority(hostPattern: string, caKey: string): string {
-  return `@cert-authority ${hostPattern} ${caKey.trim()} ${CA_MARKER}\n`
+  // Rebuilt from the PARSED fields rather than interpolating what we were
+  // handed: that is what makes "exactly one key record" a property of the
+  // output instead of a hope about the input.
+  const { type, blob } = parseCAPublicKey(caKey)
+  if (!isSafeCAHostPattern(hostPattern)) {
+    throw new Error(`refusing a certificate authority host pattern: ${JSON.stringify(String(hostPattern).slice(0, 64))}`)
+  }
+  return `@cert-authority ${hostPattern} ${type} ${blob} ${CA_MARKER}\n`
+}
+
+/** A host pattern narrow enough to anchor a CA to.
+ *
+ *  One wildcard label at most, and never a bare `*` or a pattern with no dots:
+ *  `@cert-authority *` makes the platform's CA authoritative for github.com and
+ *  every other host the user connects to. The wildcard is only legitimate in
+ *  the REGION position, which is what hostPatternFor produces. */
+export function isSafeCAHostPattern(v: unknown): v is string {
+  if (typeof v !== 'string' || v.length === 0 || v.length > 253) return false
+  const labels = v.split('.')
+  if (labels.length < 3) return false
+  if (labels.filter((l) => l === '*').length > 1) return false
+  return labels.every((l) => l === '*' || /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/i.test(l))
 }
 
 /**

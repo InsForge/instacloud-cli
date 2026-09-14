@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  assertAliasFree, isValidAliasRecord, readAliasStore, writeAliasStore, hostEntries, sshAdvice,
+  assertAliasFree, isValidAliasRecord, readAliasStore, writeAliasStore, hostEntries, sshAdvice, ENSURE_CERT_COMMAND,
   type AliasStore,
 } from '../src/commands/compute.js'
 
@@ -119,6 +119,8 @@ describe('the command only advertises an alias it actually installed', () => {
   const base = {
     alias: 'api.insta', host: 'ssh.us-west-1.example', username: 'svc-abc',
     expiresAt: '2026-09-14T22:00:00Z', serviceName: 'api',
+    identityFile: '/home/dev/.insta/ssh/id_ed25519',
+    certificateFile: '/home/dev/.insta/ssh/api.insta-cert.pub',
   }
 
   it('offers the short alias once --setup has written it', () => {
@@ -127,14 +129,35 @@ describe('the command only advertises an alias it actually installed', () => {
     expect(out).toContain('svc-abc@ssh.us-west-1.example')
   })
 
-  it('offers the DIRECTLY USABLE command when --setup was omitted', () => {
-    // The regression this guards: printing `ssh api.insta` when no ssh_config
-    // stanza exists. The user copies it, ssh says "Could not resolve hostname
-    // api.insta", and the feature looks broken rather than merely un-set-up.
-    const lines = sshAdvice({ ...base, configured: false })
-    const command = lines[0]
-    expect(command, 'an uninstalled alias was advertised as the command to run').toBe('ssh svc-abc@ssh.us-west-1.example')
-    expect(command).not.toContain('api.insta')
+  it('offers a command that actually uses the credential just issued', () => {
+    // Two regressions in one line, and the second replaced the first. Printing
+    // `ssh api.insta` fails because no ssh_config stanza exists. Printing a
+    // bare `ssh user@host` fails for a subtler reason: the key lives at
+    // ~/.insta/ssh/id_ed25519 and the certificate at <alias>-cert.pub, and
+    // NEITHER is a path OpenSSH looks in, so ssh offers the user's own keys and
+    // never the credential this command just minted. Both print success and
+    // then fail on first use.
+    const command = sshAdvice({ ...base, configured: false })[0]!
+    // The alias must not be the DESTINATION (the cert filename legitimately
+    // contains it), because nothing has taught ssh what `api.insta` resolves to.
+    expect(command.split(/\s+/), 'the uninstalled alias was advertised as the destination').not.toContain('api.insta')
+    expect(command.trimEnd().endsWith('svc-abc@ssh.us-west-1.example')).toBe(true)
+    expect(command, 'the private key was not offered').toContain('-i /home/dev/.insta/ssh/id_ed25519')
+    expect(command, 'the certificate was not offered').toContain('-o CertificateFile=/home/dev/.insta/ssh/api.insta-cert.pub')
+    // Without this a loaded agent can burn the server's MaxAuthTries on
+    // unrelated keys before ours is ever offered.
+    expect(command, 'IdentitiesOnly was missing').toContain('-o IdentitiesOnly=yes')
+    expect(command).toContain('svc-abc@ssh.us-west-1.example')
+  })
+
+  it('quotes paths containing a space, since the line is meant to be pasted', () => {
+    const command = sshAdvice({
+      ...base, configured: false,
+      identityFile: '/Users/Jun Wen/.insta/ssh/id_ed25519',
+      certificateFile: '/Users/Jun Wen/.insta/ssh/api.insta-cert.pub',
+    })[0]!
+    expect(command).toContain(`-i '/Users/Jun Wen/.insta/ssh/id_ed25519'`)
+    expect(command).toContain(`-o CertificateFile='/Users/Jun Wen/.insta/ssh/api.insta-cert.pub'`)
   })
 
   it('still tells the unconfigured user how to GET the alias', () => {
@@ -150,5 +173,23 @@ describe('the command only advertises an alias it actually installed', () => {
     for (const configured of [true, false]) {
       expect(sshAdvice({ ...base, configured }).at(-1)).toContain('2026-09-14T22:00:00Z')
     }
+  })
+})
+
+describe('the renewal hook enters through an internal command name', () => {
+  it('uses the __-prefixed command telemetry skips', () => {
+    // OpenSSH runs this while PARSING the config -- on every ssh, scp, `ssh -G`
+    // and IDE connection. Under `compute ssh --ensure-cert`, guard awaited
+    // trackCommand() after the action regardless of how early the action
+    // returned: it reads global and project config, can create
+    // ~/.insta/telemetry.json, and issues a PostHog request with a timeout of
+    // up to 1.5s. A network round trip on the critical path of every ordinary
+    // ssh is exactly what the hook was specified not to do. trackCommand skips
+    // command paths beginning `__` (the rule __update-check already relies on),
+    // so the fast path is only genuinely local under that name.
+    expect(ENSURE_CERT_COMMAND).toContain('__')
+    expect(ENSURE_CERT_COMMAND.split(/\s+/).some((t) => t.startsWith('__')),
+      'the hook command is not __-prefixed, so telemetry runs on every ssh').toBe(true)
+    expect(ENSURE_CERT_COMMAND).not.toContain('--ensure-cert')
   })
 })

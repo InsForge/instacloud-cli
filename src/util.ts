@@ -41,14 +41,23 @@ export function writeFileAtomicSync(target: string, data: string, opts: { mode?:
 }
 
 /** The real file `path` names, following symlinks; `path` itself when it is not
- *  a link, does not exist, or dangles (a dangling link has no target to write
- *  through, so replacing it with a real file is the only thing left to do). */
+ *  a link, does not exist, or dangles.
+ *
+ *  ONLY `ENOENT` falls back. A blanket catch here was a quiet hole: `ELOOP` (a
+ *  symlink cycle) and `EACCES` (a directory on the path the user cannot
+ *  traverse) would both return the link path, and the caller would then rename
+ *  over the LINK -- severing a dotfiles symlink because we could not read it,
+ *  which is precisely the destruction resolving exists to avoid. A missing
+ *  target is the one case where replacing the link is the only thing left to
+ *  do; every other failure means "cannot confirm", and cannot-confirm is not a
+ *  licence to write. */
 export function resolveThroughSymlink(path: string): string {
   try {
     if (!lstatSync(path).isSymbolicLink()) return path
     return realpathSync(path)
-  } catch {
-    return path
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return path
+    throw e
   }
 }
 

@@ -408,6 +408,16 @@ program.command('upgrade').description('Update the insta CLI to the latest relea
 program.command('autoupdate [mode]').description('Show or set auto-update: on | off (default: on while pre-1.0)')
   .action(guard((mode) => selfUpdate.autoupdate(mode)))
 program.command('__update-check', { hidden: true }).action(guard(() => selfUpdate.backgroundCheck(cliVersion())))
+// The ssh_config renewal hook. Hidden, and named with the `__` prefix that
+// trackCommand skips, because OpenSSH runs it while PARSING the config on EVERY
+// ssh/scp/`ssh -G`/IDE connection. Under the normal `compute ssh --ensure-cert`
+// path, guard's trackCommand ran afterwards regardless of the action returning
+// early -- reading config, possibly creating ~/.insta/telemetry.json, and
+// making a PostHog request with a timeout of up to 1.5s. That is a network
+// round trip on the critical path of every ordinary ssh, which is exactly what
+// the hook was specified not to do.
+program.command('__ssh-ensure-cert <alias>', { hidden: true })
+  .action(guard((alias: string) => computeCmd.ensureCertForAlias(alias)))
 
 selfUpdate.maybeUpdate(cliVersion(), process.argv)
 program.parseAsync(computeArgv)

@@ -223,7 +223,7 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
 })
 
 describe('known_hosts trust anchor', () => {
-  const CA = 'ssh-ed25519 AAAAC3CA'
+  const CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICAcaFakeCAKeyForTestsOnlyAAAAAAAAAAAAAAAAAAAA'
 
   it('adds the @cert-authority line, tagged as ours', () => {
     const out = upsertCertAuthority('', '*.compute.example', CA)
@@ -242,28 +242,28 @@ describe('known_hosts trust anchor', () => {
   // key. Filtering on the NEW key's text cannot find the retired one, so the
   // old CA would stay trusted for that pattern indefinitely.
   it('retires the previous CA when the platform rotates for the same host pattern', () => {
-    const first = upsertCertAuthority('', 'ssh.*.compute.example', 'ssh-ed25519 AAAAOLD')
-    const rotated = upsertCertAuthority(first, 'ssh.*.compute.example', 'ssh-ed25519 AAAANEW')
+    const first = upsertCertAuthority('', 'ssh.*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOldOldOldFakeRetiredCAKeyForTestsAAAAAAAAAAAA')
+    const rotated = upsertCertAuthority(first, 'ssh.*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINewNewNewFakeRotatedCAKeyForTestsAAAAAAAAAAAA')
     const lines = rotated.trim().split('\n').filter((l) => l.startsWith('@cert-authority'))
     expect(lines, 'the retired CA is still trusted for this host pattern').toHaveLength(1)
-    expect(lines[0]).toContain('AAAANEW')
-    expect(rotated).not.toContain('AAAAOLD')
+    expect(lines[0]).toContain('AAAAC3NzaC1lZDI1NTE5AAAAINewNewNewFakeRotatedCAKeyForTestsAAAAAAAAAAAA')
+    expect(rotated).not.toContain('AAAAC3NzaC1lZDI1NTE5AAAAIOldOldOldFakeRetiredCAKeyForTestsAAAAAAAAAAAA')
   })
 
   it("keeps the user's other known_hosts entries, including their own anchors", () => {
     const existing = [
-      'github.com ssh-ed25519 AAAAsomething',
-      '@cert-authority ssh.*.compute.example ssh-ed25519 AAAAUSERADDED',
+      'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISomethingUnrelatedGithubHostKeyAAAAAAAAAAAAAA',
+      '@cert-authority ssh.*.compute.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIUserAddedTheirOwnAnchorHereAAAAAAAAAAAAAAAAAA',
       '',
     ].join('\n')
     const out = upsertCertAuthority(existing, 'ssh.*.compute.example', CA)
-    expect(out).toContain('github.com ssh-ed25519 AAAAsomething')
-    expect(out, 'we deleted an anchor the user added by hand').toContain('AAAAUSERADDED')
+    expect(out).toContain('github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISomethingUnrelatedGithubHostKeyAAAAAAAAAAAAAA')
+    expect(out, 'we deleted an anchor the user added by hand').toContain('AAAAC3NzaC1lZDI1NTE5AAAAIUserAddedTheirOwnAnchorHereAAAAAAAAAAAAAAAAAA')
     expect(out).toContain(`@cert-authority ssh.*.compute.example ${CA} ${CA_MARKER}`)
   })
 
   it('does not need a trailing newline in the existing file to stay well-formed', () => {
-    const out = upsertCertAuthority('github.com ssh-ed25519 AAAA', '*.x', 'ssh-ed25519 CA')
+    const out = upsertCertAuthority('github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGithubHostKeyNotOursAAAAAAAAAAAAA', 'ssh.*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBareCAForTheUnmarkedLineTestAAAAAAAAA')
     expect(out.split('\n').filter(Boolean)).toHaveLength(2)
   })
 })
@@ -519,6 +519,11 @@ describe('unsafe values never reach ssh_config', () => {
     ['a tab', 'ssh.example.com\tProxyCommand'],
     ['a double quote', 'ssh."example".com'],
     ['a single quote', "ssh.'example'.com"],
+    // OpenSSH treats a backslash as an escape introducer in a config argument,
+    // so the value ssh ends up using is not the one written. Reachable for the
+    // USERNAME in particular: the host is additionally gated by isSafeSSHHost,
+    // but the username's only guard is this one.
+    ['a backslash', 'ssh.example\\.com'],
     ['a NUL', 'ssh.example.com' + String.fromCharCode(0)],
     ['an empty string', ''],
   ] as const
@@ -622,29 +627,29 @@ describe('our block is relocated to the top, not replaced where it sits', () => 
 })
 
 describe('a trust anchor is matched field by field, never by substring', () => {
-  const CA = 'ssh-ed25519 AAAAKEY'
+  const CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyKeyKeyFakeCAKeyForTestsAAAAAAAAAAAAAAAAAAA'
 
   it('keeps an anchor whose key merely EXTENDS ours', () => {
     // A base64 blob is an unanchored substring of any longer blob sharing its
     // prefix. Deleting that line is not a visible failure -- it is a host-key
     // prompt on every connection to a region that used to be trusted.
-    const other = `@cert-authority *.other.example ssh-ed25519 AAAAKEYLONGER ${CA_MARKER}\n`
+    const other = `@cert-authority *.other.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyKeyKeyFakeCAKeyForTestsAAAAAAAAAAAAAAAAAAALONGER ${CA_MARKER}\n`
     const out = upsertCertAuthority(other, '*.compute.example', CA)
     expect(out, 'an unrelated anchor was deleted by a substring match').toContain('*.other.example')
     expect(out).toContain('*.compute.example')
   })
 
   it('keeps an anchor whose HOST PATTERN merely extends ours', () => {
-    const other = `@cert-authority *.compute.example.net ssh-ed25519 AAAAOTHER ${CA_MARKER}\n`
+    const other = `@cert-authority *.compute.example.net ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherOtherFakeCAKeyForTestsAAAAAAAAAAAAAAAAAA ${CA_MARKER}\n`
     const out = upsertCertAuthority(other, '*.compute.example', CA)
     expect(out).toContain('*.compute.example.net')
   })
 
   it('still replaces the anchor for the SAME host pattern (rotation)', () => {
-    const first = upsertCertAuthority('', '*.compute.example', 'ssh-ed25519 AAAAOLD')
-    const rotated = upsertCertAuthority(first, '*.compute.example', 'ssh-ed25519 AAAANEW')
-    expect(rotated, 'the retired CA stayed trusted').not.toContain('AAAAOLD')
-    expect(rotated).toContain('AAAANEW')
+    const first = upsertCertAuthority('', '*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOldOldOldFakeRetiredCAKeyForTestsAAAAAAAAAAAA')
+    const rotated = upsertCertAuthority(first, '*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINewNewNewFakeRotatedCAKeyForTestsAAAAAAAAAAAA')
+    expect(rotated, 'the retired CA stayed trusted').not.toContain('AAAAC3NzaC1lZDI1NTE5AAAAIOldOldOldFakeRetiredCAKeyForTestsAAAAAAAAAAAA')
+    expect(rotated).toContain('AAAAC3NzaC1lZDI1NTE5AAAAINewNewNewFakeRotatedCAKeyForTestsAAAAAAAAAAAA')
     expect(rotated.split('@cert-authority').length - 1).toBe(1)
   })
 
@@ -656,7 +661,7 @@ describe('a trust anchor is matched field by field, never by substring', () => {
   })
 
   it('never touches an anchor the user added themselves', () => {
-    const mine = '@cert-authority *.compute.example ssh-ed25519 AAAAKEY\n'
+    const mine = '@cert-authority *.compute.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyKeyKeyFakeCAKeyForTestsAAAAAAAAAAAAAAAAAAA\n'
     const out = upsertCertAuthority(mine, '*.compute.example', CA)
     expect(out, 'an unmarked anchor the user owns was deleted').toContain(mine.trim())
   })
