@@ -106,15 +106,21 @@ async function update(change: (policy: any, state: Awaited<ReturnType<typeof cur
   if (moved.length) process.stderr.write(`note: this also changed decisions you did not name:\n${moved.join('\n')}\n`)
 }
 
-export async function set(mode: string, opts: { json?: boolean }) {
+export async function set(mode: string, opts: { json?: boolean }, deps?: AgentPolicyDeps) {
   const normalized = mode.replace(/-/g, '_')
   // `branch_developer` is the pre-rename name for `branch_specific`, still accepted here so a
   // script written against the old CLI keeps working. `customize` is deliberately NOT settable:
   // it means "carrying overrides", which is what `agent-policy rule set` produces.
   const resolved = normalized === 'branch_developer' ? 'branch_specific' : normalized
   if (!PRESETS.includes(resolved)) throw new Error('mode must be full-access, read-only, or branch-specific')
-  // A preset carries no rules; Platform refuses one that does.
-  return update(policy => { policy.mode = resolved; policy.rules = {} }, opts)
+  // A preset carries no rules; Platform refuses one that does. Which field carries "no rules"
+  // depends on the same capability check `applyRule` makes: without an `actionCatalog` Platform
+  // predates the rename, so it only knows the old mode name and only reads the old rule field —
+  // clearing `rules` there would leave every override standing under the new mode.
+  return update((policy, { out }) => {
+    if (out.actionCatalog) { policy.mode = resolved; policy.rules = {} }
+    else { policy.mode = resolved === 'branch_specific' ? 'branch_developer' : resolved; policy.branchDeveloperRules = {} }
+  }, opts, undefined, deps)
 }
 
 export async function protect(branch: string, enabled: boolean, opts: { json?: boolean }, deps?: AgentPolicyDeps) {
