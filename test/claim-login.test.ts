@@ -132,7 +132,9 @@ describe('claimGrant', () => {
   })
 
   it('keeps polling through a poll timeout, and expires once the deadline passes', async () => {
-    const shortStart = { ...START, claim_token_expires: new Date(Date.now() + 60).toISOString() }
+    let t = 0
+    const now = () => t
+    const shortStart = { ...START, claim_token_expires: new Date(30).toISOString() }
     let polled = 0
     const post: ClaimPoster = async (path) => {
       if (path === '/agent/auth') return shortStart
@@ -143,8 +145,8 @@ describe('claimGrant', () => {
       }
       throw new Error(`unexpected path ${path}`)
     }
-    const wait = () => new Promise<void>((r) => setTimeout(r, 25))
-    await expect(claimGrant('me@example.com', 'unknown', post, wait)).rejects.toThrow(/expired before me@example.com confirmed/)
+    const wait = async (s: number) => { t += s }
+    await expect(claimGrant('me@example.com', 'unknown', post, wait, undefined, now)).rejects.toThrow(/expired before me@example.com confirmed/)
     expect(polled).toBeGreaterThan(1) // a timeout alone must not end the attempt before the deadline
   })
 

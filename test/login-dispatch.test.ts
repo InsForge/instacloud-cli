@@ -95,6 +95,23 @@ describe('login dispatch', () => {
     expect(err).toMatch(/choose one login mode/)
   })
 
+  it('--claim refuses $INSTA_PASSWORD too (the documented --password fallback)', async () => {
+    const prev = process.env.INSTA_PASSWORD
+    process.env.INSTA_PASSWORD = 'hunter2'
+    try {
+      const err = await stderrOf(() => expect(login({ claim: 'me@example.com' }, mustNotRun, claimMustNotRun)).rejects.toThrow('exit 1'))
+      expect(err).toMatch(/choose one login mode/)
+    } finally {
+      if (prev === undefined) delete process.env.INSTA_PASSWORD
+      else process.env.INSTA_PASSWORD = prev
+    }
+  })
+
+  it('--api-key refuses a password too', async () => {
+    const err = await stderrOf(() => expect(login({ apiKey: 'insta_x', password: 'p' }, mustNotRun, claimMustNotRun)).rejects.toThrow('exit 1'))
+    expect(err).toMatch(/choose one login mode/)
+  })
+
   it('--claim refuses an explicitly empty --email too', async () => {
     const err = await stderrOf(() => expect(login({ claim: 'me@example.com', email: '' }, mustNotRun, claimMustNotRun)).rejects.toThrow('exit 1'))
     expect(err).toMatch(/choose one login mode/)

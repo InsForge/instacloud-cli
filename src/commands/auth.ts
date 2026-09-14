@@ -25,11 +25,11 @@ export async function login(
   // Login modes are exclusive — pick one. Check presence (not truthiness) so an explicit
   // empty --api-key= is rejected by validation rather than silently falling through.
   if (opts.apiKey !== undefined) {
-    if (opts.device || opts.oauth !== undefined || opts.email !== undefined || opts.claim !== undefined) die('choose one login mode: --api-key, --claim, --device, --oauth, or --email')
+    if (opts.device || opts.oauth !== undefined || opts.email !== undefined || opts.claim !== undefined || opts.password !== undefined || process.env.INSTA_PASSWORD !== undefined) die('choose one login mode: --api-key, --claim, --device, --oauth, or --email')
     return loginApiKey(opts.apiKey, opts)
   }
   if (opts.claim !== undefined) {
-    if (opts.device || opts.oauth !== undefined || opts.email !== undefined || opts.password !== undefined) die('choose one login mode: --api-key, --claim, --device, --oauth, or --email (a password belongs to --email)')
+    if (opts.device || opts.oauth !== undefined || opts.email !== undefined || opts.password !== undefined || process.env.INSTA_PASSWORD !== undefined) die('choose one login mode: --api-key, --claim, --device, --oauth, or --email (a password belongs to --email)')
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(opts.claim)) die('--claim needs an email address: the account that will authorize this agent')
     // The human types the code on the console; open it here only when a browser is on this machine.
     return claim(opts.claim, opts, agentMode() ? undefined : openUrl)
@@ -221,13 +221,13 @@ type ClaimBlock = { user_code: string; expires_in: number; verification_uri: str
 type ClaimStart = { registration_id: string; claim_token: string; claim_token_expires: string; claim: ClaimBlock }
 export type ClaimPoster = (path: string, body: Record<string, unknown>, signal?: AbortSignal) => Promise<any>
 
-export async function claimGrant(email: string, client: string, post: ClaimPoster, wait: (s: number) => Promise<void> = sleepSeconds, open?: (url: string) => boolean): Promise<string> {
+export async function claimGrant(email: string, client: string, post: ClaimPoster, wait: (s: number) => Promise<void> = sleepSeconds, open?: (url: string) => boolean, now: () => number = Date.now): Promise<string> {
   const start = (await post('/agent/auth', { type: 'service_auth', login_hint: email, client })) as ClaimStart
   if (!start?.claim_token || !start.claim?.user_code || !start.claim.verification_uri) {
     throw new Error('malformed registration response (missing claim) — is the platform up to date?')
   }
   const expiresAt = Date.parse(start.claim_token_expires)
-  const deadline = Math.min(Number.isFinite(expiresAt) ? expiresAt : Infinity, Date.now() + 86_400_000)
+  const deadline = Math.min(Number.isFinite(expiresAt) ? expiresAt : Infinity, now() + 86_400_000)
   const show = (block: ClaimBlock, fresh: boolean) => {
     if (fresh) info('the code expired — here is a new one.')
     if (open) { info('opening your browser…'); open(block.verification_uri) }
@@ -240,14 +240,16 @@ export async function claimGrant(email: string, client: string, post: ClaimPoste
   let interval = Number.isFinite(rawInterval) ? Math.max(rawInterval, 1) : 5
   let reminted = false
   const expired = () => new Error(`the request expired before ${email} confirmed it — run \`insta login --claim ${email}\` again`)
-  while (Date.now() < deadline) {
+  while (now() < deadline) {
     await wait(interval)
-    const signal = AbortSignal.timeout(Math.max(1_000, Math.min(deadline - Date.now(), 30_000)))
+    const remaining = deadline - now()
+    if (remaining <= 0) throw expired()
+    const signal = AbortSignal.timeout(Math.ceil(Math.min(remaining, 30_000)))
     let grant: { access_token?: string } | null = null
     try {
       grant = (await post('/api/auth/oauth2/token', { grant_type: CLAIM_GRANT, claim_token: start.claim_token }, signal)) as { access_token?: string }
     } catch (e) {
-      if (e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')) { if (Date.now() >= deadline) throw expired(); continue }
+      if (e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')) { if (now() >= deadline) throw expired(); continue }
       if (!(e instanceof ApiError)) continue // transport blip — keep polling until the deadline
       const code = e.message
       if (code === 'authorization_pending') continue
