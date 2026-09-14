@@ -1306,6 +1306,28 @@ d('a CA key is decoded too, not just base64-checked', () => {
   })
 })
 
+d('every CA key type OpenSSH can generate passes the shape check', () => {
+  // The positive control for the per-type shapes in ssh-config.test.ts, which
+  // are hand-built from the wire format. If that reading of the format were
+  // wrong, every hand-built case would agree with itself and a REAL key of
+  // that type would be refused -- and setup would fail against a platform
+  // that rotated to a type it has every right to use. These are the keys
+  // ssh-keygen actually writes.
+  const real: Array<[string, string[]]> = [
+    ['ssh-rsa', ['-t', 'rsa', '-b', '2048']],
+    ['ecdsa-sha2-nistp256', ['-t', 'ecdsa', '-b', '256']],
+    ['ecdsa-sha2-nistp384', ['-t', 'ecdsa', '-b', '384']],
+    ['ecdsa-sha2-nistp521', ['-t', 'ecdsa', '-b', '521']],
+  ]
+  for (const [type, args] of real) {
+    it(`accepts a real ${type} key`, () => {
+      const path = join(fixtures, `ca-${type}`)
+      execFileSync('ssh-keygen', ['-q', ...args, '-N', '', '-f', path, '-C', 'ca'])
+      expect(parseCAPublicKey(readFileSync(`${path}.pub`, 'utf8')).type).toBe(type)
+    })
+  }
+})
+
 d('a CA key is validated whole, not by its first field', () => {
   const field = (b: Buffer) => { const n = Buffer.alloc(4); n.writeUInt32BE(b.length, 0); return Buffer.concat([n, b]) }
 
