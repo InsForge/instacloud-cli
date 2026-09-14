@@ -67,13 +67,71 @@ describe('a symlinked config is written THROUGH, not replaced', () => {
     expect(lstatSync(a).isSymbolicLink(), 'the link was severed anyway').toBe(true)
   })
 
-  it('materializes a DANGLING link rather than failing', () => {
-    // Nothing to write through, so replacing the link is the only remaining
-    // move -- but it must not throw and leave the user with no config at all.
+  it('writes THROUGH a dangling link, creating the target it names', () => {
+    // A dangling link is not an unknown destination: `readlink` still says
+    // exactly where the user wired the file. Replacing it with a regular file
+    // -- which is what rename(2) over the link does -- destroys that wiring
+    // silently, and a dotfiles repo that has not been populated yet is the
+    // ordinary way to arrive here, not a corrupt state.
+    const target = join(dir, 'gone')
     const link = join(dir, 'dangling')
-    symlinkSync(join(dir, 'gone'), link)
+    symlinkSync(target, link)
+
     writeFileAtomicSync(link, 'body\n')
+
+    expect(lstatSync(link).isSymbolicLink(), 'the dangling link was severed').toBe(true)
+    expect(readFileSync(target, 'utf8'), 'the target the link names was not created').toBe('body\n')
     expect(readFileSync(link, 'utf8')).toBe('body\n')
+  })
+
+  it('follows a RELATIVE dangling link the way the kernel would', () => {
+    // readlink returns the link text verbatim, which is resolved against the
+    // directory holding the LINK -- not the process cwd. Getting that wrong
+    // writes a stray file into wherever the CLI happened to be run from.
+    const sub = join(dir, 'repo'); mkdirSync(sub)
+    const link = join(sub, 'config')
+    symlinkSync('../real_config', link)
+
+    writeFileAtomicSync(link, 'body\n')
+
+    expect(lstatSync(link).isSymbolicLink()).toBe(true)
+    expect(readFileSync(join(dir, 'real_config'), 'utf8')).toBe('body\n')
+  })
+
+  it('walks a chain that dangles only at its end', () => {
+    const top = join(dir, 'top')
+    const mid = join(dir, 'mid')
+    const end = join(dir, 'end')
+    symlinkSync(mid, top)
+    symlinkSync(end, mid)
+
+    writeFileAtomicSync(top, 'body\n')
+
+    expect(lstatSync(top).isSymbolicLink()).toBe(true)
+    expect(lstatSync(mid).isSymbolicLink()).toBe(true)
+    expect(readFileSync(end, 'utf8')).toBe('body\n')
+  })
+
+  it('fails without touching the link when the target directory is missing', () => {
+    // Nothing safe is left to do: the intended target cannot be created and the
+    // link is the only record of where it belongs. Failing loudly keeps the
+    // wiring; severing it to produce a writable path does not.
+    const link = join(dir, 'into-nowhere')
+    symlinkSync(join(dir, 'no', 'such', 'dir', 'config'), link)
+
+    expect(() => writeFileAtomicSync(link, 'body\n')).toThrow()
+    expect(lstatSync(link).isSymbolicLink(), 'the link was severed to make the write succeed').toBe(true)
+  })
+
+  it('backs up the dangling link’s target, not the link', () => {
+    const target = join(dir, 'target'); writeFileSync(target, 'old\n')
+    const link = join(dir, 'link'); symlinkSync(target, link)
+    rmSync(target)
+    // The target is gone, so there is nothing to back up -- and the write must
+    // still land on the target rather than on the link.
+    writeFileAtomicSync(link, 'new\n', { backup: true })
+    expect(lstatSync(link).isSymbolicLink()).toBe(true)
+    expect(readFileSync(target, 'utf8')).toBe('new\n')
   })
 
   it('leaves no temporary file behind on success', () => {
@@ -106,6 +164,14 @@ describe('a symlinked config is written THROUGH, not replaced', () => {
       // macOS resolves /var -> /private/var, so compare against the same
       // resolution rather than the path we happened to construct.
       expect(resolveThroughSymlink(link)).toBe(realpathSync(real))
+    })
+    it('resolves a dangling link to the target it names', () => {
+      // Not realpathSync(dir) here, unlike the live-link case above: there is
+      // no target to call realpath on, so the answer is the LINK TEXT resolved
+      // against the link's directory, verbatim.
+      const link = join(dir, 'dangling'); symlinkSync(join(dir, 'gone'), link)
+      expect(resolveThroughSymlink(link), 'a dangling link resolved to itself, so a write would replace it')
+        .toBe(join(dir, 'gone'))
     })
   })
 })

@@ -259,6 +259,95 @@ describe('a certificate issued for another key never replaces a working one', ()
   })
 })
 
+describe('a plain issuance keeps an ALREADY INSTALLED alias coherent', () => {
+  // The finding. Every `insta compute ssh` commits the new certificate and
+  // rewrites aliases.json, but the ssh_config stanza and the known_hosts anchor
+  // were only touched under `--setup`. So a plain issuance that came back with
+  // a moved host, a renamed principal or a rotated CA updated half the files
+  // backing a WORKING `ssh api.insta` and left the other half saying what it
+  // said yesterday: the alias kept routing to the old host, carrying a
+  // certificate issued for the new one, and the command printed success.
+  const MOVED_HOST = 'ssh.eu-central-1.compute.example'
+  const CA_ROT = caKey(0xc3)
+
+  /** The alias as a real `--setup` leaves it: store, anchor, certificate and a
+   *  config stanza, all agreeing on HOST / u-svc-1 / CA_NEW. */
+  const anInstalledAlias = () => computeSSH('api', { setup: true }, deps())
+
+  /** The service comes back somewhere else, as someone else, under a new CA. */
+  const moved = (over: Record<string, unknown> = {}) => deps({
+    mint: (async (_a: unknown, _p: string, _s: string, _k: string, alias: string) => ({
+      certificate: OLD_CERT, host: MOVED_HOST, username: 'u-moved',
+      expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA_ROT,
+      staged: stageCertificate(instaCertPath(alias), OLD_CERT + '\n', { verify: () => {} }),
+    })) as never,
+    ...over,
+  })
+
+  it('moves the config stanza with the certificate', async () => {
+    await anInstalledAlias()
+    await computeSSH('api', {}, moved())
+
+    const config = readFileSync(sshConfig(), 'utf8')
+    expect(config, 'the alias kept routing to the host the service left')
+      .not.toContain(`HostName ${HOST}`)
+    expect(config).toContain(`HostName ${MOVED_HOST}`)
+    expect(config, 'the alias kept logging in as a principal the certificate no longer names')
+      .toContain('User u-moved')
+    expect(readAliasStore()[ALIAS]).toMatchObject({ host: MOVED_HOST, username: 'u-moved' })
+    expect(readFileSync(instaCertPath(ALIAS), 'utf8')).toBe(OLD_CERT + '\n')
+  })
+
+  it('installs the anchor for the CA that signed what it just committed', async () => {
+    await anInstalledAlias()
+    await computeSSH('api', {}, moved())
+    expect(readFileSync(knownHosts(), 'utf8'),
+      'the committed certificate is signed by a CA this machine does not trust')
+      .toContain(caRecord(CA_ROT))
+  })
+
+  it('tells the user the alias works, because it does', async () => {
+    await anInstalledAlias()
+    const lines: string[] = []
+    await computeSSH('api', {}, moved({ emit: (l: string) => lines.push(l) }))
+    // Not the long `ssh -i … -o CertificateFile=…` form: that advice is for an
+    // alias that was never installed, and repeating it for one that IS installed
+    // reads as a feature that never got set up.
+    expect(lines[0]).toContain(`ssh ${ALIAS}`)
+    expect(lines[0]).toContain(`u-moved@${MOVED_HOST}`)
+  })
+
+  it('still installs NOTHING when no alias was ever set up', async () => {
+    // The negative control, and the reason the check reads the LIVE config
+    // rather than assuming. Without it every case above is satisfied by
+    // installing the block unconditionally -- which turns a plain issuance into
+    // a `--setup` nobody asked for.
+    const lines: string[] = []
+    await computeSSH('api', {}, moved({ emit: (l: string) => lines.push(l) }))
+    expect(existsSync(sshConfig()), 'a plain issuance created an ssh config').toBe(false)
+    expect(existsSync(knownHosts()), 'a plain issuance wrote a trust anchor').toBe(false)
+    expect(lines[0], 'an uninstalled alias was offered as the destination').toContain('-o CertificateFile=')
+  })
+
+  it('leaves the installed alias untouched when the re-issue fails', async () => {
+    await anInstalledAlias()
+    const before = readFileSync(sshConfig(), 'utf8')
+    await expect(computeSSH('api', {}, moved({
+      mint: (async () => ({
+        certificate: OLD_CERT, host: MOVED_HOST, username: 'u-moved',
+        expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA_ROT,
+        staged: { commit: () => { throw new Error('rename failed') }, discard: () => {} },
+      })) as never,
+    }))).rejects.toThrow(/rename failed/)
+
+    expect(readFileSync(sshConfig(), 'utf8'),
+      'a failed plain issuance left the stanza describing a move that never happened').toBe(before)
+    expect(readFileSync(knownHosts(), 'utf8'),
+      'the CA vouching for the installed certificate was left retired').toContain(caRecord(CA_NEW))
+    expect(readAliasStore()[ALIAS]).toMatchObject({ host: HOST, username: 'u-svc-1' })
+  })
+})
+
 // Two `--setup` runs for DIFFERENT services -- a project with an `api` and a
 // `worker` is the ordinary case, not a contrived one -- both read the same
 // aliases.json, each adds only its own entry, and each writes both the store

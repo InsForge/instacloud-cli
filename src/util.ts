@@ -1,8 +1,8 @@
 // Output + small pure helpers (env serialization is unit-tested).
 import { createInterface } from 'node:readline'
 import { spawn } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, lstatSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { chmodSync, copyFileSync, existsSync, lstatSync, readlinkSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
 
 /**
@@ -40,26 +40,54 @@ export function writeFileAtomicSync(target: string, data: string, opts: { mode?:
   }
 }
 
-/** The real file `path` names, following symlinks; `path` itself when it is not
- *  a link, does not exist, or dangles.
+/** The file `path` ultimately NAMES: itself when it is not a link, otherwise the
+ *  end of the symlink chain -- whether or not that end exists yet.
  *
- *  ONLY `ENOENT` falls back. A blanket catch here was a quiet hole: `ELOOP` (a
- *  symlink cycle) and `EACCES` (a directory on the path the user cannot
- *  traverse) would both return the link path, and the caller would then rename
- *  over the LINK -- severing a dotfiles symlink because we could not read it,
- *  which is precisely the destruction resolving exists to avoid. A missing
- *  target is the one case where replacing the link is the only thing left to
- *  do; every other failure means "cannot confirm", and cannot-confirm is not a
- *  licence to write. */
+ *  A DANGLING link resolves to the target it names, not to itself. `realpath`
+ *  gives up with ENOENT there, and returning the link path made the caller
+ *  rename over the LINK: a `~/.ssh/config` symlinked into a dotfiles repo that
+ *  has not been populated yet -- a fresh clone, a new machine -- was silently
+ *  turned into a regular file, destroying wiring that `readlink` could still
+ *  read off the link perfectly well. So the chain is walked by hand from there,
+ *  and the write lands on the file the user actually pointed at, creating it.
+ *
+ *  Every OTHER failure still propagates. A blanket catch was a quiet hole:
+ *  `ELOOP` (a symlink cycle) and `EACCES` (a directory the user cannot
+ *  traverse) would both return the link path and sever a link because we could
+ *  not read it. Cannot-confirm is not a licence to write -- and with the
+ *  dangling case handled above, there is no longer any case where replacing a
+ *  link is the right answer. */
 export function resolveThroughSymlink(path: string): string {
-  try {
-    if (!lstatSync(path).isSymbolicLink()) return path
-    return realpathSync(path)
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return path
-    throw e
+  // realpath resolves a live chain in one call and reports ELOOP for a cycle,
+  // so a hand-walk only ever runs past the point where the chain dangles --
+  // which is finite by construction. The cap is for a link created underneath
+  // us mid-walk, where finite is no longer guaranteed.
+  for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
+    let link: string
+    try {
+      if (!lstatSync(path).isSymbolicLink()) return path
+      return realpathSync(path)
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') throw e
+    }
+    try {
+      link = readlinkSync(path)
+    } catch (e) {
+      // ENOENT from both calls means nothing is at `path` at all -- it is the
+      // file to create, which is what the caller wants written.
+      if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return path
+      throw e
+    }
+    // Link text is resolved against the directory holding the LINK, as the
+    // kernel does it -- not against the process cwd, which would scatter files
+    // into wherever the CLI happened to be run from.
+    path = resolve(dirname(path), link)
   }
+  throw new Error(`too many levels of symbolic links resolving ${JSON.stringify(path)}`)
 }
+
+/** Linux allows 40; the exact number does not matter, only that the walk ends. */
+const MAX_SYMLINK_HOPS = 40
 
 /** How to launch the default browser for `url` on `platform`. Pure so the Windows encoding is
  *  testable. On Windows NO shell may ever parse the URL: cmd.exe splits at bare `&` (which #138

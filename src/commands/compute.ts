@@ -758,7 +758,7 @@ import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
-  aliasFor, certifiesPublicKey, isSafeAlias, isSafeConfigValue, isSafeSSHHost, isSafeSSHUsername, isSafeTimestamp, isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, planCertAuthority, renderConfigBlock, revertCertAuthority, upsertConfigBlock, type HostEntry,
+  aliasFor, certifiesPublicKey, hasOwnedBlock, isSafeAlias, isSafeConfigValue, isSafeSSHHost, isSafeSSHUsername, isSafeTimestamp, isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, planCertAuthority, renderConfigBlock, revertCertAuthority, upsertConfigBlock, type HostEntry,
 } from './ssh-config.js'
 
 /** Where this CLI keeps its own SSH material. Deliberately NOT ~/.ssh: we never
@@ -1243,6 +1243,20 @@ function installConfigBlock(store: AliasStore): Undo {
   }
 }
 
+/** Is there a live ssh_config block backing the alias store right now?
+ *
+ *  Read under the alias-store lock, like every other access to this file, so it
+ *  cannot observe a half-written block. A config we cannot read at all counts
+ *  as no block: the answer only ever ADDS writes, so the safe way to be wrong
+ *  is to leave ~/.ssh alone. */
+function configBlockInstalled(): boolean {
+  try {
+    return hasOwnedBlock(readFileSync(join(homedir(), '.ssh', 'config'), 'utf8'))
+  } catch {
+    return false
+  }
+}
+
 /** Does this path name anything at all -- file, directory or symlink, including
  *  one that dangles? `existsSync` follows links and so answers a different
  *  question: it calls a link to a missing target "not there", and deleting on
@@ -1477,6 +1491,7 @@ export type SSHDeps = {
   loadProject?: typeof requireProject
   installCA?: typeof installCertAuthority
   installConfig?: typeof installConfigBlock
+  configInstalled?: typeof configBlockInstalled
   emit?: (line: string) => void
 }
 
@@ -1501,6 +1516,9 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
   assertAliasFree(readAliasStore(), alias, { projectId: p.projectId, serviceId: svc.id, branch })
 
   const out = await mint(api, p.projectId, svc.id, ensureKeyPair(), alias)
+  /** Whether ~/.ssh ends up describing this alias — decided under the lock, and
+   *  the only honest basis for advertising `ssh <alias>`. */
+  let installed = false
   try {
     // --setup PROMISES a trust anchor, so a response without one cannot be
     // reported as configured. Skipping installCA and carrying on left plain
@@ -1529,6 +1547,20 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
         [alias]: { projectId: p.projectId, ...(branch ? { branch } : {}), serviceId: svc.id, host: out.host, username: out.username },
       }
 
+      // Whether ~/.ssh is BACKING this store, not merely whether --setup was
+      // passed. The store and the certificate are rewritten by every issuance,
+      // `--setup` or not; the config block and the anchor used to be rewritten
+      // only by `--setup`. So a plain re-issue that came back with a moved
+      // host, a renamed principal or a rotated CA updated half of what an
+      // installed `ssh api.insta` depends on and left the rest describing
+      // yesterday -- the alias went on routing to the old host holding a
+      // certificate minted for the new one, and the command printed success.
+      //
+      // Once the block exists it is a rendering of the whole store, so any
+      // store write has to re-render it. All four artifacts then move together
+      // under the one lock, with the same undo chain as a setup.
+      installed = opts.setup || (deps.configInstalled ?? configBlockInstalled)()
+
       // Every step that can be taken back registers how, because the steps
       // AFTER an anchor rotation can still fail and the rotation is what
       // retires the CA vouching for the certificate already installed. Undone
@@ -1537,7 +1569,7 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
       try {
         writeAliasStore(store)
         undo.push(() => writeAliasStore(before))
-        if (opts.setup) {
+        if (installed) {
           // planCertAuthority parses the key and refuses a bad one, so a hostile
           // or malformed response fails HERE instead of appending lines to
           // known_hosts.
@@ -1564,10 +1596,10 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
     out.staged.discard()
   }
 
-  if (opts.json) return printJson({ alias, host: out.host, username: out.username, expiresAt: out.expiresAt, configured: !!opts.setup })
+  if (opts.json) return printJson({ alias, host: out.host, username: out.username, expiresAt: out.expiresAt, configured: installed })
   for (const line of sshAdvice({
     alias, host: out.host, username: out.username, expiresAt: out.expiresAt, serviceName: svc.name,
-    configured: !!opts.setup, identityFile: instaKeyPath(), certificateFile: instaCertPath(alias),
+    configured: installed, identityFile: instaKeyPath(), certificateFile: instaCertPath(alias),
   })) emit(line)
 }
 

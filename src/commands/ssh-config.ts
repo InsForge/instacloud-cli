@@ -222,6 +222,18 @@ export function upsertConfigBlock(existing: string, block: string): string {
   return block + '\n' + rest
 }
 
+/** Is our block live in this ssh_config?
+ *
+ *  The block is rendered from the WHOLE alias store and replaced wholesale, so
+ *  its presence is what makes the store the thing `ssh <alias>` actually reads.
+ *  That is the signal a plain (non-`--setup`) issuance needs: once the block is
+ *  there, changing the store without re-rendering it leaves the two disagreeing
+ *  about where an alias points. The BEGIN marker alone is enough -- a file
+ *  edited down to half a block is still a file we own a block in. */
+export function hasOwnedBlock(existing: string): boolean {
+  return existing.includes(BLOCK_BEGIN)
+}
+
 /** `existing` with our fenced block cut out, wherever it was. */
 function removeOwnedBlock(existing: string): string {
   const begin = existing.indexOf(BLOCK_BEGIN)
