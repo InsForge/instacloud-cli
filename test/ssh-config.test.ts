@@ -14,9 +14,12 @@ const entry = (alias = 'api.insta', hostName = 'ssh.us-west-1.compute.example', 
   alias, hostName, user, certificateFile: `/home/dev/.insta/ssh/${alias}-cert.pub`,
 })
 
+const KNOWN_HOSTS = '/home/dev/.ssh/known_hosts'
+
 const block = (entries = [entry()]) => renderConfigBlock({
   entries,
   identityFile: '/home/dev/.insta/ssh/id_ed25519',
+  knownHostsFile: KNOWN_HOSTS,
   ensureCertCommand: 'insta compute ssh --ensure-cert',
 })
 
@@ -80,6 +83,37 @@ describe('ssh_config block', () => {
     expect(b).toContain('IdentityFile "/home/dev/.insta/ssh/id_ed25519"')
   })
 
+  // Our block goes at the TOP and first-wins protects every keyword we WRITE.
+  // It says nothing about a keyword we leave UNSET: OpenSSH goes on filling
+  // those from later matching blocks, so a `Host *` carrying
+  // `UserKnownHostsFile none` -- or a custom path, or a per-project file --
+  // decides where our alias looks for host keys. The CA that `--setup` installed
+  // in ~/.ssh/known_hosts is then never consulted, and the alias meets a
+  // host-key prompt or an outright refusal that points nowhere near the cause.
+  it('pins the known_hosts file the trust anchor was installed in', () => {
+    expect(block()).toContain(`  UserKnownHostsFile "${KNOWN_HOSTS}"`)
+  })
+
+  // A keyword binds only inside the stanza it appears in, so one pin at the top
+  // of the block leaves every other alias exposed to the same later `Host *`.
+  it('pins it in every stanza, not just the first', () => {
+    const b = block([entry('api.insta'), entry('worker.insta', 'ssh.eu-west-1.compute.example', 'svc-def')])
+    expect(b.split('UserKnownHostsFile').length - 1, 'a stanza was left without a pin').toBe(2)
+  })
+
+  // Through quoteConfigPath like every other path we write: this one is a home
+  // directory too, so a space in it would split the directive and OpenSSH would
+  // reject the WHOLE file -- taking the user's unrelated hosts down with it.
+  it('quotes the known_hosts path, and refuses one it cannot write literally', () => {
+    expect(renderConfigBlock({
+      entries: [entry()], identityFile: '/Users/Jun Wen/.insta/ssh/id_ed25519',
+      knownHostsFile: '/Users/Jun Wen/.ssh/known_hosts',
+    })).toContain('UserKnownHostsFile "/Users/Jun Wen/.ssh/known_hosts"')
+    expect(() => renderConfigBlock({
+      entries: [entry()], identityFile: '/k', knownHostsFile: '/home/${HOME}/.ssh/known_hosts',
+    })).toThrow()
+  })
+
   it('renews the certificate while OpenSSH parses the config', () => {
     // Without this, "after setup it is just ssh" stops being true the moment
     // the first certificate expires -- which, with a TTL measured in hours, is
@@ -108,7 +142,7 @@ describe('ssh_config block', () => {
     for (const bad of ['a;rm -rf ~.insta', '$(id).insta', 'a b.insta', '../../evil.insta', 'api.insta$(id)', 'API.insta']) {
       expect(isSafeAlias(bad), `${bad} passed alias validation`).toBe(false)
       expect(() => renderEnsureCertMatch(bad, 'insta compute ssh --ensure-cert')).toThrow()
-      expect(() => renderConfigBlock({ entries: [entry(bad)], identityFile: '/k' })).toThrow()
+      expect(() => renderConfigBlock({ entries: [entry(bad)], identityFile: '/k', knownHostsFile: KNOWN_HOSTS })).toThrow()
     }
   })
 
@@ -174,10 +208,17 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
     return map
   }
 
+  /** Everything below renders through this, so the known_hosts pin is part of
+   *  every effective-config case rather than only its own. */
+  const rendered = (over: Record<string, unknown> = {}) => renderConfigBlock({
+    entries: [entry()], identityFile: join(dir, 'id_ed25519'), knownHostsFile: join(dir, 'known_hosts'),
+    ...over,
+  } as never)
+
   it('resolves the alias to the service host and remote user', () => {
     // No hook here: `ssh -G` evaluates Match exec, and this assertion is about
     // routing. The hook gets its own test below.
-    const body = renderConfigBlock({ entries: [entry()], identityFile: join(dir, 'id_ed25519') })
+    const body = rendered()
     const g = effective('api.insta', body)
     expect(g.get('hostname'), '`ssh api.insta` would resolve api.insta in DNS').toBe('ssh.us-west-1.compute.example')
     expect(g.get('user'), '`ssh api.insta` would log in as the local OS username').toBe('svc-abc')
@@ -186,9 +227,8 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
   })
 
   it('keeps two services routed to their own hosts', () => {
-    const body = renderConfigBlock({
+    const body = rendered({
       entries: [entry('api.insta'), entry('worker.insta', 'ssh.eu-west-1.compute.example', 'svc-def')],
-      identityFile: join(dir, 'id_ed25519'),
     })
     expect(effective('api.insta', body).get('hostname')).toBe('ssh.us-west-1.compute.example')
     expect(effective('worker.insta', body).get('hostname')).toBe('ssh.eu-west-1.compute.example')
@@ -196,13 +236,50 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
   })
 
   it("does not capture the user's own global settings", () => {
-    const body = upsertConfigBlock(
-      'ServerAliveInterval 77\n',
-      renderConfigBlock({ entries: [entry()], identityFile: join(dir, 'id_ed25519') }),
-    )
+    const body = upsertConfigBlock('ServerAliveInterval 77\n', rendered())
     const g = effective('some.unrelated.host', body)
     expect(g.get('serveraliveinterval'), "our block swallowed the user's global keywords").toBe('77')
     expect(g.get('hostname')).toBe('some.unrelated.host')
+  })
+
+  // The finding, and `ssh -G` is the only thing that can settle it. Being first
+  // in the file protects the keywords we WRITE; it does nothing for one we
+  // leave unset, which OpenSSH goes on filling from later matching blocks. A
+  // `Host *` redirecting UserKnownHostsFile is ordinary -- `none` in a hardened
+  // config, a per-project file in a shared one -- and either way the CA that
+  // `--setup` installed in ~/.ssh/known_hosts stops being consulted for our
+  // alias. What the user then sees is a host-key prompt or a refusal, on a
+  // connection they were told needs no host-key management at all.
+  const LATER_OVERRIDE = 'Host *\n  UserKnownHostsFile none\n'
+
+  it('keeps our known_hosts against a later UserKnownHostsFile', () => {
+    const g = effective('api.insta', upsertConfigBlock(LATER_OVERRIDE, rendered()))
+    expect(g.get('userknownhostsfile'), 'the CA installed by --setup is never consulted')
+      .toBe(join(dir, 'known_hosts'))
+  })
+
+  it('is the pin that saves it, not our position in the file', () => {
+    // The negative control, and it is not idle: our block is ALREADY first, so
+    // a reader can reasonably assume first-wins covers this too. It does not,
+    // and this is what says so -- strip the pin and the later block takes over.
+    const unpinned = rendered().split('\n').filter((l) => !l.includes('UserKnownHostsFile')).join('\n')
+    expect(unpinned, 'the renderer emitted no pin, so this control proves nothing').not.toBe(rendered())
+    expect(effective('api.insta', upsertConfigBlock(LATER_OVERRIDE, unpinned)).get('userknownhostsfile'))
+      .toBe('none')
+  })
+
+  it("leaves the user's own hosts under the setting they chose", () => {
+    // The pin is scoped to OUR stanzas. Someone who redirected known_hosts for
+    // everything else keeps that for everything else.
+    expect(effective('some.unrelated.host', upsertConfigBlock(LATER_OVERRIDE, rendered())).get('userknownhostsfile'))
+      .toBe('none')
+  })
+
+  it('survives a home directory with a space in the known_hosts path', () => {
+    // Unquoted this is two arguments, and OpenSSH rejects the whole FILE for it
+    // -- so the pin would break every host the user has rather than just ours.
+    const spaced = `${SPACED}/known_hosts`
+    expect(effective('api.insta', rendered({ knownHostsFile: spaced })).get('userknownhostsfile')).toBe(spaced)
   })
 
   it('fires the renewal hook with the alias, and only for that alias', () => {
@@ -213,9 +290,8 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
     // argument with double quotes, so a nested quote would end it early.
     const hook = join(dir, 'hook.sh')
     writeFileSync(hook, `#!/bin/sh\necho "$1" >> ${log}\n`, { mode: 0o755 })
-    const body = renderConfigBlock({
+    const body = rendered({
       entries: [entry('api.insta'), entry('worker.insta', 'ssh.eu-west-1.compute.example', 'svc-def')],
-      identityFile: join(dir, 'id_ed25519'),
       ensureCertCommand: hook,
     })
     effective('api.insta', body)
@@ -227,7 +303,7 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
   // spaced path is reject the entire FILE rather than the one directive.
   const SPACED = '/Users/Jun Wen/.insta/ssh'
 
-  const spacedBlock = () => renderConfigBlock({
+  const spacedBlock = () => rendered({
     entries: [{
       alias: 'api.insta',
       hostName: 'ssh.us-west-1.compute.example',
@@ -283,16 +359,18 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
     // for `C:\Users\Jun Wen\...` is put in front of a real parser here instead.
     // The forward slashes are what makes it parseable at all: OpenSSH reads a
     // backslash as an escape introducer, so `\U` would be eaten.
-    const g = effective('api.insta', renderConfigBlock({
+    const g = effective('api.insta', rendered({
       entries: [{
         alias: 'api.insta', hostName: 'ssh.us-west-1.compute.example', user: 'svc-abc',
         certificateFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\api.insta-cert.pub',
       }],
       identityFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\id_ed25519',
+      knownHostsFile: 'C:\\Users\\Jun Wen\\.ssh\\known_hosts',
       platform: 'win32',
     }))
     expect(g.get('identityfile')).toBe('C:/Users/Jun Wen/.insta/ssh/id_ed25519')
     expect(g.get('certificatefile')).toBe('C:/Users/Jun Wen/.insta/ssh/api.insta-cert.pub')
+    expect(g.get('userknownhostsfile')).toBe('C:/Users/Jun Wen/.ssh/known_hosts')
   })
 
   // `ssh -G` is NOT the parser to ask about these two keywords: it dumps
@@ -323,7 +401,7 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
   // fail to authenticate, it fails to run.
   const PERCENT = '/Users/dev%team/.insta/ssh'
 
-  const percentBlock = () => renderConfigBlock({
+  const percentBlock = () => rendered({
     entries: [{
       alias: 'api.insta',
       hostName: 'ssh.us-west-1.compute.example',
@@ -835,11 +913,13 @@ describe('paths are quoted, because a home directory may contain a space', () =>
         certificateFile: '/Users/Jun Wen/.insta/ssh/api.insta-cert.pub',
       }],
       identityFile: '/Users/Jun Wen/.insta/ssh/id_ed25519',
+      knownHostsFile: '/Users/Jun Wen/.ssh/known_hosts',
     })
     // Unquoted, ssh reads the argument as `/Users/Jun` and every connection
     // fails with a misleading "no such identity" on a perfectly valid home.
     expect(out).toContain('IdentityFile "/Users/Jun Wen/.insta/ssh/id_ed25519"')
     expect(out).toContain('CertificateFile "/Users/Jun Wen/.insta/ssh/api.insta-cert.pub"')
+    expect(out).toContain('UserKnownHostsFile "/Users/Jun Wen/.ssh/known_hosts"')
   })
 
   it('refuses a path that would break out of the quoting', () => {
@@ -1019,9 +1099,11 @@ describe('a Windows path is normalised, not escaped away', () => {
         certificateFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\api.insta-cert.pub',
       }],
       identityFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\id_ed25519',
+      knownHostsFile: 'C:\\Users\\Jun Wen\\.ssh\\known_hosts',
     })
     expect(out).toContain('IdentityFile "C:/Users/Jun Wen/.insta/ssh/id_ed25519"')
     expect(out).toContain('CertificateFile "C:/Users/Jun Wen/.insta/ssh/api.insta-cert.pub"')
+    expect(out).toContain('UserKnownHostsFile "C:/Users/Jun Wen/.ssh/known_hosts"')
     expect(out, 'a raw backslash survived into the config').not.toContain('\\')
   })
 
@@ -1032,7 +1114,7 @@ describe('a Windows path is normalised, not escaped away', () => {
 
 describe('the generated config works on Windows, where multiplexing does not', () => {
   const win = (entries = [entry()]) => renderConfigBlock({
-    entries, identityFile: '/home/dev/.insta/ssh/id_ed25519', platform: 'win32',
+    entries, identityFile: '/home/dev/.insta/ssh/id_ed25519', knownHostsFile: KNOWN_HOSTS, platform: 'win32',
   })
 
   it('omits ControlMaster, ControlPath and ControlPersist on win32', () => {
@@ -1052,7 +1134,7 @@ describe('the generated config works on Windows, where multiplexing does not', (
     // The POSITIVE control: dropping the multiplexing lines must not drop the
     // lines that make the alias work at all.
     const out = renderConfigBlock({
-      entries: [entry()], identityFile: '/home/dev/.insta/ssh/id_ed25519',
+      entries: [entry()], identityFile: '/home/dev/.insta/ssh/id_ed25519', knownHostsFile: KNOWN_HOSTS,
       ensureCertCommand: 'insta __ssh-ensure-cert', platform: 'win32',
     })
     expect(out).toContain('Host api.insta')
@@ -1067,7 +1149,7 @@ describe('the generated config works on Windows, where multiplexing does not', (
 
   it('keeps multiplexing everywhere else', () => {
     for (const platform of ['darwin', 'linux'] as const) {
-      const out = renderConfigBlock({ entries: [entry()], identityFile: '/home/dev/.insta/ssh/id_ed25519', platform })
+      const out = renderConfigBlock({ entries: [entry()], identityFile: '/home/dev/.insta/ssh/id_ed25519', knownHostsFile: KNOWN_HOSTS, platform })
       expect(out, `${platform} lost connection multiplexing`).toContain('ControlMaster auto')
       expect(out).toContain('ControlPersist 10m')
     }

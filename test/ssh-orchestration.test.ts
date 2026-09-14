@@ -11,7 +11,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
-import { computeSSH, instaCertPath, instaAliasStorePath, instaKeyPath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate } from '../src/commands/compute.js'
+import { computeSSH, installCertAuthority, instaCertPath, instaAliasStorePath, instaKeyPath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate } from '../src/commands/compute.js'
 import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey } from '../src/commands/ssh-config.js'
 
 // Redirect the whole ~/.insta and ~/.ssh tree into a temp dir.
@@ -106,6 +106,33 @@ const OTHER_KEY_CERT = !keygen ? '' : (() => {
   execFileSync('ssh-keygen', ['-q', '-s', join(fixtures, 'ca'), '-I', 'other', '-n', 'u-svc-1', '-V', '+1h', `${other}.pub`])
   return readFileSync(`${other}-cert.pub`, 'utf8').trim()
 })()
+
+/** The CA a machine was anchored to BEFORE a rotation. A rotation is the only
+ *  shape in which rollback can destroy something: with nothing to retire, the
+ *  anchor install is purely additive and taking it back removes only what it
+ *  added. */
+const CA_PREV = !keygen ? '' : (() => {
+  const prev = join(fixtures, 'ca-prev')
+  execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', prev, '-C', 'ca-prev@insta'])
+  return readFileSync(`${prev}.pub`, 'utf8').trim()
+})()
+
+/** A real certificate for OUR key -- the one ensureKeyPair offers and
+ *  stageCertificate checks the response against -- signed by whichever CA is
+ *  named. Signed through a uniquely named copy of the public key because
+ *  `ssh-keygen -s` derives the output name from the input's, so signing
+ *  `user.pub` twice would have the second certificate overwrite the first. */
+const signedForOurKey = (caName: string, id: string, window: string) => {
+  const base = join(fixtures, `ours-${id}`)
+  copyFileSync(join(fixtures, 'user.pub'), `${base}.pub`)
+  execFileSync('ssh-keygen', ['-q', '-s', join(fixtures, caName), '-I', id, '-n', 'u-svc-9', '-V', window, `${base}.pub`])
+  return readFileSync(`${base}-cert.pub`, 'utf8').trim()
+}
+/** In date under CA_PREV would never be renewed, so this one is genuinely
+ *  stale: certNeedsRenewal has to want it replaced for the race to be reached
+ *  at all. */
+const WORKER_STALE_CERT = !keygen ? '' : signedForOurKey('ca-prev', 'worker-stale', '-2h:-1h')
+const WORKER_FRESH_CERT = !keygen ? '' : signedForOurKey('ca', 'worker-fresh', '+1h')
 
 /** Install the key CERT was issued for where ensureKeyPair looks for it.
  *
@@ -583,6 +610,14 @@ d('a successful --setup installs everything the alias needs', () => {
     const asConfigPath = (p: string) => p.replace(/\\/g, '/')
     expect(cfg).toContain(`IdentityFile "${asConfigPath(join(home, '.insta', 'ssh', 'id_ed25519'))}"`)
     expect(cfg).toContain(`CertificateFile "${asConfigPath(instaCertPath('api.insta'))}"`)
+    // The stanza has to send ssh to the very file the anchor was written into a
+    // few lines above. Left unset it is inherited from any later `Host *` the
+    // user has -- `UserKnownHostsFile none` in a hardened config is the ordinary
+    // case -- and a perfectly good anchor then sits in a file this alias never
+    // opens. Asserted against the path the anchor was READ from, so the config
+    // and the anchor cannot drift apart without this failing.
+    expect(cfg, 'the alias does not look for host keys where the anchor was installed')
+      .toContain(`UserKnownHostsFile "${asConfigPath(join(sshDir(), 'known_hosts'))}"`)
     // Without this the alias works exactly until the first certificate expires.
     expect(cfg, 'nothing renews the certificate').toContain('Match originalhost api.insta exec "insta __ssh-ensure-cert api.insta"')
     expect(cfg.trimEnd().endsWith('# END insta compute ssh')).toBe(true)
@@ -893,6 +928,132 @@ for (const pattern of patterns) installCertAuthority(pattern, ca)
         `the anchor for ${pattern} was discarded by a concurrent renewal`).toHaveLength(1)
     }
   }, 30_000)
+})
+
+dd('a setup that fails cannot strand a renewal that succeeded', () => {
+  // The finding. The known_hosts lock covered each individual EDIT and was
+  // released before the transaction that edit belonged to had committed. So:
+  // setup A rotates the anchor from CA_PREV to CA and keeps an undo that would
+  // put CA_PREV back; renewal B arrives after that write and before A's
+  // outcome, sees CA already anchored, is handed a do-nothing undo for it, and
+  // commits a certificate signed by CA. A then fails, its undo retires CA and
+  // restores CA_PREV -- and B's freshly committed certificate now authenticates
+  // nothing. Silently, on the path that runs unattended inside `ssh`.
+  //
+  // The rule the fix restores: observing the anchor and committing the
+  // certificate that depends on it are ONE section, and the rollback happens
+  // inside it too. Not reachable from a single process -- that section is
+  // synchronous, so an in-process caller only ever serialises itself -- so B is
+  // a real process. It is `ensureCertForAlias` rather than a second setup
+  // because setups already exclude each other on aliases.lock; the renewal hook
+  // never takes that lock, which is exactly why it can land in the middle.
+  const HOST = 'ssh.us-west-1.compute.example'
+
+  // B, the renewal. Waits for A to be inside its transaction rather than
+  // starting on a timer, so the interleaving is the one being tested and not
+  // whichever one the machine's load happened to produce.
+  const CHILD = `
+const [, , computeMod, apiMod, dir, cert, ca] = process.argv
+const { existsSync, writeFileSync } = await import('node:fs')
+const { join } = await import('node:path')
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const deadline = Date.now() + 20000
+while (!existsSync(join(dir, 'inside')) && Date.now() < deadline) await sleep(10)
+const { ensureCertForAlias } = await import(computeMod)
+const { ApiClient } = await import(apiMod)
+const body = JSON.stringify({
+  certificate: cert, host: '${HOST}', username: 'u-svc-9',
+  expiresAt: '2026-09-14T22:00:00Z', caPublicKey: ca,
+})
+ApiClient.load = async () => new ApiClient(
+  { apiUrl: 'https://example.invalid', accessToken: 't' },
+  async () => ({ status: 200, text: async () => body }),
+)
+// Swallows its own failures, as the real hook does: whether B renewed is read
+// off the certificate it left behind, not off an exit code.
+await ensureCertForAlias('worker.insta', 4000)
+writeFileSync(join(dir, 'b-done'), 'x')
+`
+
+  const startB = () => {
+    const script = join(home, 'renewal-child.mts')
+    writeFileSync(script, CHILD)
+    const args = [
+      '--import', 'tsx', script,
+      new URL('../src/commands/compute.ts', import.meta.url).href,
+      new URL('../src/api.ts', import.meta.url).href,
+      home, WORKER_FRESH_CERT, CA,
+    ]
+    return new Promise<{ code: number | null; err: string }>((resolve) => {
+      const child = spawn(process.execPath, args, {
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+      let err = ''
+      child.stderr!.on('data', (chunk) => { err += String(chunk) })
+      child.on('exit', (code) => resolve({ code, err }))
+    })
+  }
+
+  /** Which CA signed the certificate `worker.insta` is actually holding. */
+  const signedBy = () => {
+    const installed = readFileSync(instaCertPath('worker.insta'), 'utf8').trim()
+    return new Map([[WORKER_STALE_CERT, CA_PREV], [WORKER_FRESH_CERT, CA]]).get(installed)
+  }
+  const anchors = () => readFileSync(join(home, '.ssh', 'known_hosts'), 'utf8')
+
+  beforeEach(() => {
+    installTheKeyCertWasIssuedFor()
+    writeFileSync(instaCertPath('worker.insta'), WORKER_STALE_CERT + '\n')
+    writeAliasStore({
+      'worker.insta': { projectId: 'proj-1', serviceId: 'svc-9', host: HOST, username: 'u-svc-9' },
+    })
+    // The machine as it is before the rotation: already anchored, to the CA
+    // that signed the certificate `worker.insta` is holding.
+    installCertAuthority(hostPatternFor(HOST), CA_PREV)
+  })
+
+  it('leaves the alias holding a certificate whose CA is still anchored', async () => {
+    const done = startB()
+    // A's LAST step before the commit, so by the time B is let in the anchor
+    // has been rotated and A's undo is loaded and waiting.
+    const { deps: d } = deps({
+      installCA: undefined,
+      installConfig: () => {
+        writeFileSync(join(home, 'inside'), 'x')
+        const deadline = Date.now() + 20_000
+        while (!existsSync(join(home, 'b-done')) && Date.now() < deadline) {
+          // Sync, because this stands in for a step of a synchronous
+          // transaction: yielding to the event loop here would make A's hold
+          // on the world looser than the real one.
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+        }
+        throw new Error('disk full')
+      },
+    })
+    await expect(computeSSH('api', { setup: true } as never, d)).rejects.toThrow(/disk full/)
+    const b = await done
+    expect(b.code, `the renewal process failed outright: ${b.err}`).toBe(0)
+
+    // Unconditional, and deliberately not "B renewed" or "B did not": either
+    // outcome is acceptable on its own. What is never acceptable is the alias
+    // holding a certificate signed by a CA this machine no longer trusts.
+    const ca = signedBy()
+    expect(ca, 'worker.insta holds a certificate this test did not produce').toBeDefined()
+    expect(anchors(), 'the alias was left with a certificate whose CA is not anchored')
+      .toContain(caRecord(ca!))
+  }, 40_000)
+
+  it('still renews when no setup is in flight', async () => {
+    // The control. Without it the test above passes for the wrong reason the
+    // moment B stops working at all -- a stale certificate and a stale anchor
+    // agree with each other perfectly.
+    writeFileSync(join(home, 'inside'), 'x')
+    const b = await startB()
+    expect(b.code, `the renewal process failed outright: ${b.err}`).toBe(0)
+    expect(signedBy(), 'the renewal did not replace the stale certificate').toBe(CA)
+    expect(anchors()).toContain(caRecord(CA))
+  }, 40_000)
 })
 
 // The lock itself has nothing to do with OpenSSH, so this is gated on the

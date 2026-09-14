@@ -771,6 +771,14 @@ export const instaKeyPath = () => join(instaSSHDir(), 'id_ed25519')
 export const instaCertPath = (alias: string) => join(instaSSHDir(), `${alias}-cert.pub`)
 export const instaAliasStorePath = () => join(instaSSHDir(), 'aliases.json')
 
+/** The known_hosts file the trust anchor goes into, and the one every stanza we
+ *  own pins with UserKnownHostsFile.
+ *
+ *  ONE definition on purpose. The anchor is only worth anything if the config
+ *  sends ssh to the file it was written to, so "where the anchor lives" and
+ *  "where the alias looks" must not be two expressions that can drift apart. */
+export const userKnownHostsPath = () => join(homedir(), '.ssh', 'known_hosts')
+
 /** The renewal-hook command prefix. ssh-config.ts appends the validated alias. */
 export const ENSURE_CERT_COMMAND = 'insta __ssh-ensure-cert'
 
@@ -1071,7 +1079,7 @@ export function stageCertificate(
  *  balancer. Re-run on every renewal too, so a rotated CA is trusted before the
  *  retired one stops signing rather than at the user's next `--setup`. */
 export function installCertAuthority(hostPattern: string, caPublicKey: string): Undo {
-  const knownHosts = join(homedir(), '.ssh', 'known_hosts')
+  const knownHosts = userKnownHostsPath()
   // The read and the write are ONE operation, and the lock is what makes them
   // one. Without it two aliases renewing together both read these contents and
   // each renames its own result over the other's -- see withKnownHostsLock.
@@ -1104,13 +1112,16 @@ function record(undo: Undo[], back: unknown): void {
 }
 
 /** How long an anchor update waits for another insta process before giving up.
- *  Short, because this still runs inside OpenSSH's config parse and the section
- *  it waits for is a read and a rename. */
+ *  Short, because this still runs inside OpenSSH's config parse: a caller that
+ *  cannot get in gives the renewal up and the login proceeds on the certificate
+ *  already installed, which is strictly better than making `ssh` wait. */
 const KNOWN_HOSTS_LOCK_WAIT_MS = 1_000
 const LOCK_POLL_MS = 20
-/** Much shorter than the renewal window, for the same reason: a lock older than
- *  this was left behind by a process that died inside a read and a rename, and
- *  every anchor update on the machine queues behind it until it is broken. */
+/** Much shorter than the renewal window: a lock older than this was left behind
+ *  by a process that died mid-transaction, and every anchor update on the
+ *  machine queues behind it until it is broken. Generous next to the section it
+ *  guards, which is an anchor update and a rename, but it also spans a
+ *  certificate commit, so it is not as tight as the wait above. */
 const KNOWN_HOSTS_LOCK_STALE_MS = 10_000
 
 /** Sleep without yielding to the event loop, which is what the callers here
@@ -1138,18 +1149,39 @@ const sleepSync = (ms: number): void => {
  * It covers insta processes. `ssh` appends host keys to the same file without
  * any lock and cannot be made to take one; that window is inherent to
  * known_hosts and is narrowed here, not closed.
+ *
+ * RE-ENTRANT, because the callers that matter hold it across a whole
+ * transaction and installCertAuthority takes it again from inside — see the
+ * depth counter below.
  */
 export function withKnownHostsLock<T>(
   fn: () => T,
   { waitMs = KNOWN_HOSTS_LOCK_WAIT_MS, sleep = sleepSync }: { waitMs?: number; sleep?: (ms: number) => void } = {},
 ): T {
-  return withLockedFile('known_hosts.lock', fn, {
+  if (knownHostsLockDepth > 0) return fn()
+  return withLockedFile('known_hosts.lock', () => {
+    knownHostsLockDepth++
+    try { return fn() } finally { knownHostsLockDepth-- }
+  }, {
     waitMs,
     sleep,
     staleMs: KNOWN_HOSTS_LOCK_STALE_MS,
     busy: 'another insta process is updating ~/.ssh/known_hosts, so the trust anchor was left as it was',
   })
 }
+
+/** How deep THIS process is inside the known_hosts lock.
+ *
+ *  A transaction holds the lock and then calls installCertAuthority, which
+ *  takes it again; on an exclusive-create lock file that is a self-deadlock,
+ *  and one that resolves as the busy error rather than a hang, so it would read
+ *  as "another process is updating known_hosts" when the other process is us.
+ *
+ *  A plain counter is enough because every section it guards is synchronous:
+ *  nothing else in this process can run between the increment and the
+ *  decrement, so the count cannot be observed mid-flight or left behind by an
+ *  interleaved caller. */
+let knownHostsLockDepth = 0
 
 /** How long a setup waits for another setup. Longer than the known_hosts wait
  *  because the section it guards CONTAINS that wait, plus two file writes. */
@@ -1224,6 +1256,7 @@ function installConfigBlock(store: AliasStore): Undo {
   const block = renderConfigBlock({
     entries: hostEntries(store),
     identityFile: instaKeyPath(),
+    knownHostsFile: userKnownHostsPath(),
     ensureCertCommand: ENSURE_CERT_COMMAND,
   })
   // Backed up: this is the file that decides whether the user can ssh anywhere
@@ -1335,13 +1368,23 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
       // can still fail outright, and on a ROTATION that leaves the retired CA
       // gone and the certificate it signed still installed. So the anchor
       // update is taken back when the rename does not happen.
-      const back = out.caPublicKey ? installCertAuthority(hostPatternFor(out.host), out.caPublicKey) : undefined
-      try {
-        out.staged.commit()
-      } catch (e) {
-        try { back?.() } catch { /* nothing better to do on the way out */ }
-        throw e
-      }
+      //
+      // ONE section from reading the anchor to committing the certificate that
+      // depends on it, rollback included -- see the note in computeSSH. This is
+      // the side of that race that gets let in mid-transaction: a renewal takes
+      // the per-alias lock and never aliases.lock, so nothing else was keeping
+      // it out.
+      const ca = out.caPublicKey
+      if (ca === undefined) out.staged.commit()
+      else withKnownHostsLock(() => {
+        const back = installCertAuthority(hostPatternFor(out.host), ca)
+        try {
+          out.staged.commit()
+        } catch (e) {
+          try { back() } catch { /* nothing better to do on the way out */ }
+          throw e
+        }
+      })
     } finally {
       out.staged.discard()
     }
@@ -1565,32 +1608,50 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
       // AFTER an anchor rotation can still fail and the rotation is what
       // retires the CA vouching for the certificate already installed. Undone
       // in reverse, so each step sees the world its own undo expects.
-      const undo: Undo[] = []
-      try {
-        writeAliasStore(store)
-        undo.push(() => writeAliasStore(before))
-        if (installed) {
-          // planCertAuthority parses the key and refuses a bad one, so a hostile
-          // or malformed response fails HERE instead of appending lines to
-          // known_hosts.
-          if (out.caPublicKey) {
-            record(undo, (deps.installCA ?? installCertAuthority)(hostPatternFor(out.host), out.caPublicKey))
+      const commitAll = () => {
+        const undo: Undo[] = []
+        try {
+          writeAliasStore(store)
+          undo.push(() => writeAliasStore(before))
+          if (installed) {
+            // planCertAuthority parses the key and refuses a bad one, so a hostile
+            // or malformed response fails HERE instead of appending lines to
+            // known_hosts.
+            if (out.caPublicKey) {
+              record(undo, (deps.installCA ?? installCertAuthority)(hostPatternFor(out.host), out.caPublicKey))
+            }
+            record(undo, (deps.installConfig ?? installConfigBlock)(store))
           }
-          record(undo, (deps.installConfig ?? installConfigBlock)(store))
+          // Last, and for the same reason as in the renewal hook: a certificate
+          // whose anchor never landed authenticates nothing, so it does not
+          // replace one that still works.
+          out.staged.commit()
+        } catch (e) {
+          // Best-effort, and failures here are swallowed on purpose: the error
+          // that got us here is the one worth reporting, and an undo that cannot
+          // run leaves exactly the state we would have had without one.
+          for (const back of undo.reverse()) {
+            try { back() } catch { /* nothing better to do on the way out */ }
+          }
+          throw e
         }
-        // Last, and for the same reason as in the renewal hook: a certificate
-        // whose anchor never landed authenticates nothing, so it does not
-        // replace one that still works.
-        out.staged.commit()
-      } catch (e) {
-        // Best-effort, and failures here are swallowed on purpose: the error
-        // that got us here is the one worth reporting, and an undo that cannot
-        // run leaves exactly the state we would have had without one.
-        for (const back of undo.reverse()) {
-          try { back() } catch { /* nothing better to do on the way out */ }
-        }
-        throw e
       }
+
+      // The ROLLBACK is inside the anchor's lock too, not just the write it
+      // takes back. Holding the lock per edit and dropping it before the
+      // transaction settled made the undo a decision about a file someone else
+      // had meanwhile committed against: this command rotates CA_PREV to CA and
+      // keeps an undo restoring CA_PREV; a renewal arriving after that write
+      // sees CA already anchored, is handed a do-nothing undo for it, and
+      // commits a certificate signed by CA; this command then fails, its undo
+      // retires CA -- and the renewal's certificate, minted and committed
+      // perfectly correctly, now authenticates nothing.
+      //
+      // Held only when there is an anchor to rotate. A re-issue that writes no
+      // anchor has nothing for a rollback to strand, and taking the lock anyway
+      // would give it a way to fail that it does not have today.
+      if (installed && out.caPublicKey) withKnownHostsLock(commitAll)
+      else commitAll()
     })
   } finally {
     out.staged.discard()

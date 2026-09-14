@@ -109,6 +109,13 @@ export type ConfigBlockOpts = {
   entries: HostEntry[]
   /** Absolute path to the private key whose certificates we mint. */
   identityFile: string
+  /** Absolute path to the known_hosts file the trust anchor is installed in.
+   *
+   *  REQUIRED rather than defaulted, because the whole point is that this is the
+   *  file installCertAuthority actually wrote to — a default here would be a
+   *  second opinion about that, and the two disagreeing is the failure this
+   *  closes. See the UserKnownHostsFile line in renderConfigBlock. */
+  knownHostsFile: string
   /** Renewal-hook command PREFIX. The alias is appended here, by this function,
    *  after validation — see renderEnsureCertMatch. Omit to skip the hook. */
   ensureCertCommand?: string
@@ -151,6 +158,21 @@ export function renderConfigBlock(o: ConfigBlockOpts): string {
       `  User ${e.user}`,
       `  IdentityFile ${quoteConfigPath(o.identityFile)}`,
       `  CertificateFile ${quoteConfigPath(e.certificateFile)}`,
+      // WRITTEN, not left to the default, and this is the one keyword where
+      // being first in the file does not save us. First-wins settles a keyword
+      // two blocks both set; a keyword we never set at all goes on being filled
+      // in by later matching blocks. So a `Host *` further down carrying
+      // `UserKnownHostsFile none` -- ordinary in a hardened config -- or a
+      // custom path takes effect for OUR alias, and the CA that setup installed
+      // in known_hosts is then never consulted. The user gets a host-key prompt
+      // or a flat refusal on the one connection they were told needs no
+      // host-key management.
+      //
+      // Naming one file deliberately drops OpenSSH's second default,
+      // ~/.ssh/known_hosts2 -- a v1-era legacy path we never write to. Pinning
+      // the file the anchor is really in is the property; inheriting a list we
+      // do not control is what we are getting away from.
+      `  UserKnownHostsFile ${quoteConfigPath(o.knownHostsFile)}`,
       // IdentitiesOnly is not tidiness. SSH offers public keys ONE AT A TIME,
       // so a user with several keys is identified non-deterministically -- the
       // server sees whichever key happened to be offered first, which may not be
