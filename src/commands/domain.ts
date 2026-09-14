@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises'
 import { ApiClient } from '../api.js'
 import { info, printJson, handleApproval, die } from '../util.js'
 import { presentUrl, resolveOrgId } from './billing.js'
@@ -36,58 +35,14 @@ export async function domainSearch(keyword: string, opts: { tlds?: string; org?:
   if (buyable) info(`buy one: insta domain buy ${buyable.domainName}`)
 }
 
-// ---- registrant contact ----
-
-export type ContactOpts = { firstName?: string; lastName?: string; companyName?: string; address1?: string; address2?: string; city?: string; state?: string; zip?: string; country?: string; email?: string; phone?: string; contactFile?: string }
-const CONTACT_KEYS = ['firstName', 'lastName', 'companyName', 'address1', 'address2', 'city', 'state', 'zip', 'country', 'email', 'phone'] as const
-
-export function contactFromOpts(opts: ContactOpts, file?: unknown): Record<string, unknown> | undefined {
-  if (file !== undefined) return file as Record<string, unknown>
-  const out: Record<string, unknown> = {}
-  for (const k of CONTACT_KEYS) if (opts[k] !== undefined) out[k] = opts[k]
-  return Object.keys(out).length ? out : undefined
-}
-
-async function readContactFile(path?: string): Promise<unknown> {
-  if (!path) return undefined
-  try { return JSON.parse(await readFile(path, 'utf8')) } catch (e) { throw new Error(`cannot read ${path} as JSON: ${(e as Error).message}`) }
-}
-
-function contactLines(c: Record<string, any> | null): string[] {
-  if (!c) return ['no registrant contact set — set one with: insta domain contact set --first-name … (or --contact-file contact.json)']
-  return [
-    `${c.firstName} ${c.lastName}${c.companyName ? ` (${c.companyName} — the organization is the legal registrant)` : ''}`,
-    `${c.address1}${c.address2 ? `, ${c.address2}` : ''}, ${c.city}, ${c.state} ${c.zip}, ${c.country}`,
-    `${c.email}  ${c.phone}`,
-  ]
-}
-
-export async function domainContactShow(opts: { org?: string; json?: boolean }, deps?: DomainDeps): Promise<void> {
-  const { api, orgId } = await orgDeps(opts, deps)
-  const r = await api.request<{ contact: Record<string, unknown> | null }>('GET', `/orgs/${orgId}/domains/contact`)
-  if (opts.json) return printJson(r)
-  for (const line of contactLines(r.contact)) info(line)
-}
-
-export async function domainContactSet(opts: ContactOpts & { org?: string; json?: boolean }, deps?: DomainDeps): Promise<void> {
-  const { api, orgId } = await orgDeps(opts, deps)
-  const contact = contactFromOpts(opts, await readContactFile(opts.contactFile))
-  if (!contact) die('pass the contact as flags (--first-name … --phone) or as --contact-file <contact.json>')
-  const r = await api.request<{ contact: Record<string, unknown> }>('PUT', `/orgs/${orgId}/domains/contact`, contact)
-  if (opts.json) return printJson(r)
-  info('registrant contact saved:')
-  for (const line of contactLines(r.contact)) info(`  ${line}`)
-}
-
 // ---- buy / attach ----
 
-export type BuyOpts = { years?: string; branch?: string; group?: string; contactFile?: string; open?: boolean; json?: boolean }
+export type BuyOpts = { years?: string; branch?: string; group?: string; open?: boolean; json?: boolean }
 
 export async function domainBuy(name: string, opts: BuyOpts, deps?: DomainDeps): Promise<void> {
   const { api, project: p } = await domainDeps(deps)
   const branch = opts.branch ?? p.branch
   const { target } = await domainTarget(api, p.projectId, branch, name, opts.group)
-  const contact = await readContactFile(opts.contactFile)
   // JSON.stringify drops undefined but keeps NaN as null, which the platform rejects as a type
   // error rather than a bad term — so a malformed --years is refused here, with the reason.
   let years: number | undefined
@@ -95,7 +50,7 @@ export async function domainBuy(name: string, opts: BuyOpts, deps?: DomainDeps):
     years = Number(opts.years)
     if (!Number.isInteger(years)) die(`--years must be a whole number of years, not ${opts.years}`)
   }
-  const res = await api.rawRequest('POST', `/projects/${p.projectId}/domains/orders`, { domainName: name, years, branch, group: target.name, contact })
+  const res = await api.rawRequest('POST', `/projects/${p.projectId}/domains/orders`, { domainName: name, years, branch, group: target.name })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const { order } = res.body as { order: Order }

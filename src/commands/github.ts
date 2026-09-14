@@ -137,15 +137,12 @@ export async function authorizeTerminal(api: ApiClient, wait: (s: number) => Pro
   throw new Error('the GitHub authorization expired before it was confirmed — run the command again')
 }
 
-// Someone has to read the code and type it at GitHub. A terminal qualifies, and so does agent mode —
-// an agent relays the URL to the person driving it — but --json and a bare pipe have no reader.
+// Device authorization needs a person to read the code; JSON and bare pipes must fail promptly.
 export function canAuthorizeHere(opts: { json?: boolean } = {}): boolean {
   if (opts.json) return false
   return !!agentMode() || !!process.stderr.isTTY
 }
 
-// The repositories THIS caller's GitHub account can reach — the same question the platform asks again
-// when the connect lands, so a repo missing here would be refused there anyway.
 export async function findCallerRepo(api: ApiClient, ref: RepoRef, authorize: typeof authorizeTerminal = authorizeTerminal, canAuthorize = canAuthorizeHere()): Promise<{ installationId: number; repoId: number }> {
   const mine = await api.request<{ linked: boolean; repos: RepoRow[] }>('GET', '/me/github/repos')
   if (!mine.linked && !canAuthorize) {
