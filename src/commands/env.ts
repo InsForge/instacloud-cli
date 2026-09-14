@@ -65,6 +65,7 @@ export async function envUse(name: string, opts: { json?: boolean } = {}): Promi
   delete next.accessToken
   delete next.refreshToken
   delete next.user
+  delete next.agentCredential
   await writeGlobal(next)
 
   if (opts.json) return printJson(envUseResult(target, from ?? null, true, hadSession))

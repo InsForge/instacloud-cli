@@ -8,21 +8,24 @@ import { storeApiKeyCredential, ApiError } from '../src/api.js'
 
 const USER: AuthedUser = { id: 'u1', email: 'tony@example.com', name: 'Tony' }
 
-// A fake ApiKeyClient that records setApiKey calls and serves /me from a script (a user object to
-// return, or an ApiError to throw — like the real client does on a rejected key).
-function fakeClient(me: { user?: AuthedUser } | ApiError) {
-  const stored: Array<{ token: string; user?: AuthedUser }> = []
+// A fake ApiKeyClient that records setApiKey calls and the probe's request opts, and serves /me
+// from a script (a user object to return, or an ApiError to throw — like the real client does on
+// a rejected key).
+function fakeClient(me: { user?: AuthedUser; via?: string; agentCredential?: boolean } | ApiError) {
+  const stored: Array<{ token: string; user?: AuthedUser; agentCredential?: boolean }> = []
+  const requestOpts: Array<{ evidence?: boolean } | undefined> = []
   const client: ApiKeyClient = {
-    setApiKey: (token, user) => { stored.push({ token, user }) },
-    request: async (method, path) => {
+    setApiKey: (token, user, agentCredential) => { stored.push({ token, user, agentCredential }) },
+    request: async (method, path, _body, opts) => {
       if (method === 'GET' && path === '/me') {
+        requestOpts.push(opts)
         if (me instanceof ApiError) throw me
         return me
       }
       throw new Error(`unexpected request ${method} ${path}`)
     },
   }
-  return { client, stored }
+  return { client, stored, requestOpts }
 }
 
 describe('applyApiKeyLogin', () => {
@@ -30,8 +33,15 @@ describe('applyApiKeyLogin', () => {
     const { client, stored } = fakeClient({ user: USER })
     await expect(applyApiKeyLogin(client, 'insta_abc123')).resolves.toEqual(USER)
     // Stored the key to auth the probe, then re-stored it with the user.
-    expect(stored[0]).toEqual({ token: 'insta_abc123', user: undefined })
-    expect(stored.at(-1)).toEqual({ token: 'insta_abc123', user: USER })
+    expect(stored[0]).toEqual({ token: 'insta_abc123', user: undefined, agentCredential: undefined })
+    expect(stored.at(-1)).toEqual({ token: 'insta_abc123', user: USER, agentCredential: false })
+  })
+
+  it('stores an agent-minted key with agentCredential true, probed with evidence: false', async () => {
+    const { client, stored, requestOpts } = fakeClient({ user: USER, via: 'api', agentCredential: true })
+    await expect(applyApiKeyLogin(client, 'insta_abc123')).resolves.toEqual(USER)
+    expect(stored.at(-1)).toEqual({ token: 'insta_abc123', user: USER, agentCredential: true })
+    expect(requestOpts).toEqual([{ evidence: false }])
   })
 
   it('rejects a key without the insta_ prefix before making any request', async () => {
@@ -82,5 +92,13 @@ describe('storeApiKeyCredential', () => {
     storeApiKeyCredential(cfg, 'insta_new')
     expect(cfg.accessToken).toBe('insta_new')
     expect(cfg.user).toEqual(USER)
+  })
+
+  it('writes agentCredential true, then a later plain store deletes it', () => {
+    const cfg: any = { apiUrl: 'https://api.test' }
+    storeApiKeyCredential(cfg, 'insta_agent', USER, true)
+    expect(cfg.agentCredential).toBe(true)
+    storeApiKeyCredential(cfg, 'insta_human', USER)
+    expect('agentCredential' in cfg).toBe(false)
   })
 })

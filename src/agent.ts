@@ -15,7 +15,7 @@ export function detectAgent(explicit: boolean, env: NodeJS.ProcessEnv = process.
 export function configureAgent(value: AgentMode | null): void { mode = value }
 export function agentMode(): AgentMode | null { return mode }
 type Session = { token: string; agentSessionId: string; projectId: string | null; expiresAt: string; privateKey: string; client: AgentMode['client']; apiUrl: string }
-export type SessionApi = { apiUrl: string; request<T = any>(method: string, path: string, body?: unknown): Promise<T> }
+export type SessionApi = { apiUrl: string; agentCredential?: boolean; request<T = any>(method: string, path: string, body?: unknown): Promise<T> }
 const hash = (v: string): string => createHash('sha256').update(v).digest('hex')
 export function canonicalTarget(path: string): string {
   const url = new URL(path, 'https://platform.invalid')
@@ -48,6 +48,7 @@ export async function saveAgentSession(session: Session, cwd = process.cwd()): P
 }
 
 export async function setupProjectAgentSession(api: SessionApi, projectId?: string): Promise<boolean> {
+  if (api.agentCredential) return false // Nothing to enroll: the key itself is the agent identity.
   const id = projectId ?? (await readProject())?.projectId
   if (!id) return false
   await saveAgentSession(await issueAgentSession(api, id))
@@ -78,7 +79,8 @@ export type AgentScope = { projectId?: string }
 export const ACCOUNT_ROUTES: ReadonlySet<string> = new Set(['agent', 'auth', 'me', 'orgs', 'regions', 'templates', 'tokens'])
 
 export async function agentHeaders(api: SessionApi, method: string, path: string, rawBody: string, scope: AgentScope = {}): Promise<Record<string, string>> {
-  if (!mode) return {}
+  // A key minted by agent auth is already an agent principal on the platform and may not enroll a session.
+  if (!mode || api.agentCredential) return {}
   if (canonicalTarget(path) === '/agent/sessions' && method === 'POST') return {
     'Insta-Actor-Type': 'agent', 'Insta-Agent-Source': mode.source, 'Insta-Agent-Client': mode.client,
   }

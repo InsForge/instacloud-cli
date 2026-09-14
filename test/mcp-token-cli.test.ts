@@ -76,6 +76,7 @@ test.each([true, false])('CLI exits nonzero for failed token registration (store
   } finally {
     server.closeAllConnections()
     await new Promise<void>((resolve) => server.close(() => resolve()))
-    await rm(home, { recursive: true, force: true })
+    // Windows: the spawned CLI may still hold the dir for a moment; fs.rm retries EBUSY.
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   }
 }, 15000)

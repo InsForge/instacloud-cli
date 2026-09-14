@@ -73,11 +73,12 @@ program.option('--agent', 'run as an agent with a verified project session and p
 program.hook('preAction', () => configureAgent(detectAgent(!!program.opts().agent)))
 
 // ---- auth ----
-program.command('login').description('Log in — bare: sign in from your browser (any account type); or --email <email> + password, --oauth <github|google>, --device (headless), --api-key <insta_…> (headless, durable token)')
+program.command('login').description('Log in — bare: sign in from your browser (any account type); or --email <email> + password, --oauth <github|google>, --device (headless), --claim <email> (agent: the named user confirms a code), --api-key <insta_…> (headless, durable token)')
   .option('--email <email>', 'account email (email + password login)')
   .option('--password <password>', 'account password (else $INSTA_PASSWORD or prompt; needs --email)')
   .option('--oauth <provider>', 'browser OAuth login: github | google')
   .option('--device', 'device-code login: like bare login but never opens a browser here — approve from any other machine (VMs, SSH, CI)')
+  .option('--claim <email>', 'agent login confirmed by that user: prints a console link + 6-digit code; they sign in as that email and type the code, and the resulting insta_ key is stored here')
   .option('--api-key <key>', 'non-interactive login with a durable insta_ API token (headless agents / CI)')
   .option('--api-url <url>', 'control-plane API base URL')
   .option('--env <name>', `deployment environment: ${ENV_NAMES.join(' | ')}`)

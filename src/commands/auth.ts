@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { ApiClient, ApiError, linkedProject } from '../api.js'
+import { agentMode } from '../agent.js'
 import { ENVS, ENV_NAMES, envForApiUrl, isEnvName } from '../env.js'
 import { info, die, printJson, promptPassword, openUrl } from '../util.js'
 
@@ -15,13 +16,23 @@ function targetApiUrl(opts: { apiUrl?: string; env?: string }): string | undefin
   return ENVS[want].api
 }
 
-// `device` is injectable so the dispatch itself is testable (repo pattern: DI fakes, no mocks).
-export async function login(opts: { email?: string; password?: string; apiUrl?: string; env?: string; oauth?: string; device?: boolean; apiKey?: string }, device: typeof loginDevice = loginDevice): Promise<void> {
+// `device`/`claim` are injectable so the dispatch itself is testable (repo pattern: DI fakes, no mocks).
+export async function login(
+  opts: { email?: string; password?: string; apiUrl?: string; env?: string; oauth?: string; device?: boolean; apiKey?: string; claim?: string },
+  device: typeof loginDevice = loginDevice,
+  claim: typeof loginClaim = loginClaim,
+): Promise<void> {
   // Login modes are exclusive — pick one. Check presence (not truthiness) so an explicit
   // empty --api-key= is rejected by validation rather than silently falling through.
   if (opts.apiKey !== undefined) {
-    if (opts.device || opts.oauth || opts.email) die('choose one login mode: --api-key, --device, --oauth, or --email')
+    if (opts.device || opts.oauth !== undefined || opts.email !== undefined || opts.claim !== undefined || opts.password !== undefined || process.env.INSTA_PASSWORD !== undefined) die('choose one login mode: --api-key, --claim, --device, --oauth, or --email')
     return loginApiKey(opts.apiKey, opts)
+  }
+  if (opts.claim !== undefined) {
+    if (opts.device || opts.oauth !== undefined || opts.email !== undefined || opts.password !== undefined || process.env.INSTA_PASSWORD !== undefined) die('choose one login mode: --api-key, --claim, --device, --oauth, or --email (a password belongs to --email)')
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(opts.claim)) die('--claim needs an email address: the account that will authorize this agent')
+    // The human types the code on the console; open it here only when a browser is on this machine.
+    return claim(opts.claim, opts, agentMode() ? undefined : openUrl)
   }
   if (opts.device) return device(opts)
   if (opts.oauth) return loginOauth(opts.oauth, opts)
@@ -76,6 +87,19 @@ export async function loginDevice(opts: { apiUrl?: string; env?: string }, open?
   info(`logged in as ${me.user.email ?? me.user.id} @ ${api.apiUrl}`)
 }
 
+// `insta login --claim <email>`: the auth.md user claimed flow. The named user confirms a code on
+// the console, the platform mints an insta_ key, and it is stored exactly as --api-key stores one.
+export async function loginClaim(email: string, opts: { apiUrl?: string; env?: string }, open?: (url: string) => boolean, grant: typeof claimGrant = claimGrant): Promise<void> {
+  const api = await ApiClient.load()
+  const target = targetApiUrl(opts)
+  if (target) api.setApiUrl(target)
+  const client = agentMode()?.client ?? 'unknown'
+  const key = await grant(email, client, (path, body, signal) => api.request('POST', path, body, { auth: false, signal }), sleepSeconds, open)
+  const user = await applyApiKeyLogin(api, key)
+  await api.persist()
+  info(`logged in as ${user.email ?? user.id} @ ${api.apiUrl}`)
+}
+
 // Non-interactive login with a durable insta_ key (minted via POST /tokens): store it and confirm against /me. No browser, no polling.
 export async function loginApiKey(key: string, opts: { apiUrl?: string; env?: string }): Promise<void> {
   const api = await ApiClient.load()
@@ -90,24 +114,24 @@ export type AuthedUser = { id: string; email: string | null; name: string | null
 
 // The client surface applyApiKeyLogin needs — ApiClient in prod, faked in tests.
 export type ApiKeyClient = {
-  request: (method: string, path: string) => Promise<any>
-  setApiKey: (token: string, user?: AuthedUser) => void
+  request: (method: string, path: string, body?: unknown, opts?: { evidence?: boolean }) => Promise<any>
+  setApiKey: (token: string, user?: AuthedUser, agentCredential?: boolean) => void
 }
 
-// Verify an insta_ key and store it: set it first so the /me probe is authed with the key itself, then re-store with the resolved user (401 → bad/revoked).
+// Verify an insta_ key with a bare /me probe (an agent-minted key cannot enroll a session, and /me says which kind this is), then store it with the user and that kind.
 export async function applyApiKeyLogin(client: ApiKeyClient, key: string): Promise<AuthedUser> {
   key = key.trim() // tolerate a trailing newline / stray whitespace from `--api-key "$(cat token)"`
   if (!key.startsWith('insta_')) throw new Error('--api-key expects an insta_ token (mint one with POST /tokens)')
   client.setApiKey(key)
-  let me: { user?: AuthedUser }
+  let me: { user?: AuthedUser; agentCredential?: boolean }
   try {
-    me = await client.request('GET', '/me')
+    me = await client.request('GET', '/me', undefined, { evidence: false })
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) throw new Error('that insta_ API key was rejected (invalid or revoked) — check it or mint a new one')
     throw e
   }
   if (!me?.user) throw new Error('unexpected response while verifying the API key')
-  client.setApiKey(key, me.user)
+  client.setApiKey(key, me.user, me.agentCredential === true)
   return me.user
 }
 
@@ -186,6 +210,77 @@ export async function deviceGrant(post: DevicePoster, wait: (s: number) => Promi
     return grant.access_token
   }
   throw new Error(`device login expired before it was approved — run \`insta login${open ? '' : ' --device'}\` again`)
+}
+
+// auth.md user claimed flow (service_auth). The agent knows the user's email; InstaCloud gives a
+// 6-digit code and a console link; only a session for that email can type the code. We poll the
+// standard token endpoint with the WorkOS claim grant and get an insta_ key back. Poster + wait
+// are injected like deviceGrant's. JSON bodies: the platform's token route accepts them.
+const CLAIM_GRANT = 'urn:workos:agent-auth:grant-type:claim'
+type ClaimBlock = { user_code: string; expires_in: number; verification_uri: string; interval?: number }
+type ClaimStart = { registration_id: string; claim_token: string; claim_token_expires: string; claim: ClaimBlock }
+export type ClaimPoster = (path: string, body: Record<string, unknown>, signal?: AbortSignal) => Promise<any>
+
+// A poll interval is seconds, from the server: clamp it so a silly value cannot become a ~1 ms timer.
+const pollInterval = (value: unknown, fallback: number): number => {
+  const n = Number(value)
+  return Number.isFinite(n) ? Math.min(Math.max(n, 1), 3600) : fallback
+}
+
+export async function claimGrant(email: string, client: string, post: ClaimPoster, wait: (s: number) => Promise<void> = sleepSeconds, open?: (url: string) => boolean, now: () => number = Date.now): Promise<string> {
+  const start = (await post('/agent/auth', { type: 'service_auth', login_hint: email, client })) as ClaimStart
+  if (!start?.claim_token || !start.claim?.user_code || !start.claim.verification_uri) {
+    throw new Error('malformed registration response (missing claim) — is the platform up to date?')
+  }
+  const expiresAt = Date.parse(start.claim_token_expires)
+  const deadline = Math.min(Number.isFinite(expiresAt) ? expiresAt : Infinity, now() + 86_400_000)
+  const show = (block: ClaimBlock, fresh: boolean) => {
+    if (fresh) info('the code expired — here is a new one.')
+    if (open) { info('opening your browser…'); open(block.verification_uri) }
+    info(`to authorize this agent, open this link, sign in as ${email}, and enter this code: ${block.user_code}`)
+    info(`  ${block.verification_uri}`)
+  }
+  show(start.claim, false)
+  info(`waiting for ${email} to confirm… (ctrl-c to abort)`)
+  let interval = pollInterval(start.claim.interval, 5)
+  let reminted = false
+  const expired = () => new Error(`the request expired before ${email} confirmed it — run \`insta login --claim ${email}\` again`)
+  while (now() < deadline) {
+    await wait(interval)
+    const remaining = deadline - now()
+    if (remaining <= 0) throw expired()
+    const signal = AbortSignal.timeout(Math.ceil(Math.min(remaining, 30_000)))
+    let grant: { access_token?: string } | null = null
+    try {
+      grant = (await post('/api/auth/oauth2/token', { grant_type: CLAIM_GRANT, claim_token: start.claim_token }, signal)) as { access_token?: string }
+    } catch (e) {
+      if (e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')) { if (now() >= deadline) throw expired(); continue }
+      if (!(e instanceof ApiError)) continue // transport blip — keep polling until the deadline
+      const code = e.message
+      if (code === 'authorization_pending') continue
+      if (code === 'slow_down' || e.status === 429) { interval = Math.min(interval + 5, 3600); continue }
+      if (code === 'expired_token') {
+        if (reminted) throw expired()
+        let again: { claim_attempt?: ClaimBlock }
+        try {
+          again = (await post('/agent/auth/claim', { claim_token: start.claim_token, email }, signal)) as { claim_attempt?: ClaimBlock }
+        } catch (re) {
+          if (re instanceof ApiError && re.message === 'claim_expired') throw expired()
+          if (!(re instanceof ApiError)) continue // re-mint timeout or transport blip: the next expired_token asks again
+          throw re
+        }
+        reminted = true
+        if (!again?.claim_attempt?.user_code || !again.claim_attempt.verification_uri) throw new Error('malformed claim response (missing claim_attempt)')
+        interval = pollInterval(again.claim_attempt.interval, interval)
+        show(again.claim_attempt, true)
+        continue
+      }
+      throw e // invalid_grant and friends: not retryable
+    }
+    if (!grant?.access_token) throw new Error('malformed token response (missing access_token)')
+    return grant.access_token
+  }
+  throw expired()
 }
 
 // Start a loopback server, open the browser at the platform bridge, and await the token.
