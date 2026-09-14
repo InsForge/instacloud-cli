@@ -2,7 +2,7 @@
 // subdirectory of a linked project must resolve the SAME link, and updates (branch switch)
 // must rewrite the link at the project root — never mint a nested .insta in the subdir.
 import { test, expect, afterEach, vi } from 'vitest'
-import { chmodSync, mkdtempSync, mkdirSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, existsSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { foreignLinkMessage, persistAutoLink, readProject, resolveProjectLink, safeUrl, writeProject } from '../src/config.js'
@@ -179,6 +179,26 @@ test('linking the home directory is refused even when an ancestor of home is lin
   expect(existsSync(linkFile(home))).toBe(false)
 })
 
+// The home check compares filesystem identity, not spelling: a symlinked or differently-cased path to
+// home names the same directory, and must be refused the same way.
+test.skipIf(process.platform === 'win32')('a symlinked path to the home directory is refused, and nothing is saved there', async () => {
+  const { home } = fakeHome()
+  const alias = join(mkdtempSync(join(tmpdir(), 'insta-home-alias-')), 'home-link')
+  symlinkSync(home, alias)
+  await expect(writeProject(proj, alias)).rejects.toBeInstanceOf(CliExit)
+  await expect(persistAutoLink(proj, alias)).resolves.toBe(false)
+  expect(existsSync(linkFile(home))).toBe(false)
+})
+
+test('a differently-cased path to the home directory is refused where the filesystem ignores case', async (ctx) => {
+  const { home } = fakeHome()
+  const cased = home.toUpperCase()
+  if (cased === home || !existsSync(cased)) ctx.skip() // case-sensitive filesystem: a different directory
+  await expect(writeProject(proj, cased)).rejects.toBeInstanceOf(CliExit)
+  await expect(persistAutoLink(proj, cased)).resolves.toBe(false)
+  expect(existsSync(linkFile(home))).toBe(false)
+})
+
 test('linking the home directory itself is refused', async () => {
   const { home } = fakeHome()
   await expect(writeProject(proj, home)).rejects.toBeInstanceOf(CliExit)
@@ -230,6 +250,19 @@ test('a hand-edited record cannot put credentials or escape sequences on the ter
   expect(msg).not.toContain('\u001b')
 })
 
+test('a committed project id cannot put a C1 escape introducer on the terminal', async () => {
+  const { root } = linkedProjectWithSubdir()
+  process.env.INSTA_API_URL = CLOUD
+  await writeProject(proj, root)
+  // U+009B is CSI on its own: terminals that honour 8-bit controls start a sequence from it alone.
+  writeFileSync(linkFile(root), JSON.stringify({ ...proj, projectId: 'p-2\u009b31m' }))
+  const f = (await resolveProjectLink(root))?.foreign
+  expect(f?.reason).toBe('changed')
+  const msg = foreignLinkMessage(f!)
+  expect(msg).toContain('p-231m')
+  expect(msg).not.toContain('\u009b')
+})
+
 // The record is sanitized when READ, not only when printed: the comparison uses it too. A copied
 // record whose URL still carries userinfo names the same control plane as the bare URL, and must
 // not be reported foreign because of it. (Printing sanitizes again, so only this case pins the
@@ -262,6 +295,20 @@ test.each([
   expect(out).not.toContain('token')
   expect(out).not.toContain('user')
   expect(normalizeUrl(out)).toBe('https://api.box.example') // still the same control plane
+})
+
+// `user:token@host` is not rejected by the parser: it reads `user:` as a scheme and puts the
+// credentials in the path, so clearing username and password removes nothing.
+test('safeUrl removes credentials from a value that parses under another scheme', () => {
+  const raw = 'user:s3cret@api.box.example'
+  expect(new URL(raw).protocol).toBe('user:') // parses, with no userinfo to clear
+  expect(safeUrl(raw)).toBe('api.box.example')
+})
+
+test('safeUrl leaves ordinary control-plane URLs unchanged, including an @ in the path', () => {
+  for (const url of ['https://api.box.example', 'http://localhost:7130', 'https://api.box.example/a@b']) {
+    expect(safeUrl(url)).toBe(url)
+  }
 })
 
 test('a whitespace-padded credentialed INSTA_API_URL is not persisted with its credentials', async () => {

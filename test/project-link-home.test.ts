@@ -10,7 +10,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { configureAgent } from '../src/agent.js'
 import { ApiClient } from '../src/api.js'
-import { projectLink } from '../src/commands/project.js'
+import { projectCreate, projectLink } from '../src/commands/project.js'
+import { branchSwitch } from '../src/commands/branch.js'
 import { CliExit } from '../src/util.js'
 
 // Without the guard, projectLink goes on to install the observe hook and the agent skills, which are
@@ -80,4 +81,38 @@ test('agent-mode project link in the home directory stops even when an ancestor 
   expect(existsSync(join(ancestor, '.insta', 'agent-session.json'))).toBe(false)
   expect(existsSync(join(home, '.insta', 'agent-session.json'))).toBe(false)
   expect(existsSync(join(ancestor, '.gitignore'))).toBe(false)
+})
+
+// `insta project create <name>` in ~ used to POST the project and only then refuse to write its link:
+// the project was provisioned, the command failed, and under --json its id was never printed.
+test('project create in the home directory stops before provisioning anything', async () => {
+  const home = tempDir('insta-home-create-')
+  process.env.HOME = home
+  process.env.USERPROFILE = home
+  vi.spyOn(process, 'cwd').mockReturnValue(home)
+  const request = vi.fn(async (_method: string, path: string) => path === '/orgs'
+    ? { orgs: [{ id: 'o-1' }] }
+    : { project: { id: 'p-new', org_id: 'o-1' }, defaultBranch: { name: 'main' }, resources: [], nextActions: [] })
+  vi.spyOn(ApiClient, 'load').mockResolvedValue({ apiUrl: 'https://test.invalid', request } as unknown as ApiClient)
+
+  await expect(projectCreate('myapp', { json: true })).rejects.toBeInstanceOf(CliExit)
+  expect(request).not.toHaveBeenCalled()
+  expect(existsSync(join(home, '.insta', 'project.json'))).toBe(false)
+})
+
+// `insta branch switch` in ~ auto-resolved a project "for this command", listed its branches, and
+// then refused to save — contradicting its own note. It now says why before any request.
+test('branch switch in the home directory stops before any request, naming why', async () => {
+  const home = tempDir('insta-home-branch-')
+  process.env.HOME = home
+  process.env.USERPROFILE = home
+  vi.spyOn(process, 'cwd').mockReturnValue(home)
+  const request = vi.fn(async () => ({ branches: [{ name: 'dev' }], orgs: [{ id: 'o-1' }], projects: [{ id: 'p-1', name: 'demo' }] }))
+  vi.spyOn(ApiClient, 'load').mockResolvedValue({ apiUrl: 'https://test.invalid', request } as unknown as ApiClient)
+  const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+  await expect(branchSwitch('dev')).rejects.toBeInstanceOf(CliExit)
+  expect(request).not.toHaveBeenCalled()
+  expect(err.mock.calls.map((c) => String(c[0])).join('')).toContain('can\'t switch branches in the home directory')
+  expect(existsSync(join(home, '.insta', 'project.json'))).toBe(false)
 })

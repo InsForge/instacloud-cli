@@ -71,6 +71,9 @@ export async function projectCreate(name: string | undefined, opts: { org?: stri
     info('  (or just ask your coding agent — it has the insta skill and will do this for you)')
     return
   }
+  // Refuse the home directory BEFORE provisioning: refusing only inside writeProject created the
+  // project on the control plane and then failed, with no id printed under --json.
+  if (await isHomeLinkTarget()) die(HOME_LINK_REFUSAL)
   const api = await ApiClient.load()
   const orgId = await resolveOrg(api, opts.org)
   const out = await api.request('POST', `/orgs/${orgId}/projects`, { name: resolved })

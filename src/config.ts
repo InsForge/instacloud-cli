@@ -1,6 +1,7 @@
 // CLI config: global (~/.insta/config.json: api url + tokens) and per-project (./.insta/project.json).
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { realpathSync } from 'node:fs'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { ensureGitignore } from './gitignore.js'
 import { die } from './util.js'
@@ -116,7 +117,19 @@ export async function writeGlobal(c: GlobalConfig): Promise<void> {
  *  so a project.json there is not a project link: honouring one made every directory under the home
  *  dir inherit it, and `insta project link` run anywhere below home silently overwrote it. */
 function isHomeDir(dir: string): boolean {
-  return resolve(dir) === resolve(homedir())
+  return canonicalDir(dir) === canonicalDir(homedir())
+}
+
+/** A directory's filesystem identity rather than its spelling: the native real path, which resolves
+ *  symlinks and returns the on-disk case on case-insensitive filesystems (macOS, Windows). Comparing
+ *  spellings let a symlinked or differently-cased path to home through the home check. A path that
+ *  doesn't exist has no identity to resolve, so it falls back to its resolved spelling. */
+function canonicalDir(dir: string): string {
+  try {
+    return realpathSync.native(resolve(dir))
+  } catch {
+    return resolve(dir)
+  }
 }
 
 export const HOME_LINK_REFUSAL = 'refusing to link the home directory — ~/.insta is the insta CLI\'s global config, not a project. Run this inside a project directory'
@@ -254,9 +267,10 @@ async function readLinkPlane(root: string): Promise<{ projectId: string; apiUrl:
   }
 }
 
-/** Text safe to echo to a terminal: control characters (escape sequences included) removed. */
+/** Text safe to echo to a terminal: C0 and C1 control characters and DEL removed — ESC and the
+ *  single-byte C1 introducers (U+009B CSI among them) alike, so no escape sequence survives. */
 function safeText(text: string): string {
-  return String(text).replace(/[\u0000-\u001f\u007f]/g, '')
+  return String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
 }
 
 /** A control-plane URL safe to persist and to print: control characters removed, surrounding
@@ -266,15 +280,19 @@ function safeText(text: string): string {
  *  lenient in ways a pattern keeps missing: it accepts leading whitespace, `\` for `/`, and a
  *  missing `//` on special schemes, and each of those defeated an anchored pattern while fetch
  *  would still have sent the credentials. A value the parser rejects is never requested, but it can
- *  still be stored or printed, so everything up to its last `@` is dropped. */
+ *  still be stored or printed, so everything up to its last `@` is dropped. The same goes for a
+ *  value that parses under any other scheme: `user:token@host` parses as scheme `user:` with the
+ *  credentials in its path, where clearing username and password removes nothing. */
 export function safeUrl(url: string): string {
   const text = safeText(url).trim()
+  const pastLastAt = () => (text.includes('@') ? text.slice(text.lastIndexOf('@') + 1) : text)
   let parsed: URL
   try {
     parsed = new URL(text)
   } catch {
-    return text.includes('@') ? text.slice(text.lastIndexOf('@') + 1) : text
+    return pastLastAt()
   }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return pastLastAt()
   if (!parsed.username && !parsed.password) return text
   parsed.username = ''
   parsed.password = ''

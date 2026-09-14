@@ -1,5 +1,5 @@
 import { ApiClient, requireProject } from '../api.js'
-import { writeProject } from '../config.js'
+import { isHomeLinkTarget, writeProject } from '../config.js'
 import { info, die, printJson, handleApproval, renderNextActions } from '../util.js'
 
 export async function branchCreate(name: string, opts: { from?: string; json?: boolean }): Promise<void> {
@@ -20,6 +20,11 @@ export async function branchList(opts: { json?: boolean }): Promise<void> {
 }
 
 export async function branchSwitch(name: string, opts: { json?: boolean } = {}): Promise<void> {
+  // A switch is remembered in ./.insta/project.json, which never lives in the home directory. Say so
+  // up front, instead of auto-resolving a project "for this command" and then refusing to save.
+  if (await isHomeLinkTarget()) {
+    die('can\'t switch branches in the home directory — the branch is remembered in ./.insta/project.json, and ~/.insta is the insta CLI\'s global config. Run this inside a project directory')
+  }
   const api = await ApiClient.load()
   const p = await requireProject()
   const { branches } = await api.request('GET', `/projects/${p.projectId}/branches`)

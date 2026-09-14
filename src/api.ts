@@ -146,7 +146,7 @@ export async function requireProject(deps: RequireProjectDeps = {}): Promise<Pro
       save: async (c) => {
         // stderr: this is a diagnostic that can precede ANY command's output — under --json,
         // stdout must stay one parseable document.
-        if (await persistAutoLink(c)) {
+        if (await persistAutoLink(c, deps.cwd)) {
           process.stderr.write(`auto-linked project ${c.projectId} → ./.insta/project.json\n`)
         } else {
           // The home directory never holds a link (~/.insta is the global config): use the choice
