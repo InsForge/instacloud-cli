@@ -10,8 +10,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { execFileSync } from 'node:child_process'
-import { computeSSH, instaCertPath, instaAliasStorePath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias, hostPatternFor, installCertificate } from '../src/commands/compute.js'
+import { execFileSync, spawn } from 'node:child_process'
+import { computeSSH, instaCertPath, instaAliasStorePath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate } from '../src/commands/compute.js'
 import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey } from '../src/commands/ssh-config.js'
 
 // Redirect the whole ~/.insta and ~/.ssh tree into a temp dir.
@@ -112,12 +112,16 @@ const deps = (over: Record<string, unknown> = {}) => {
     loadProject: project('proj-1'),
     mint: async (_a: unknown, _p: string, serviceId: string, _k: string, alias: string) => {
       minted.push({ serviceId, alias })
-      // The REAL mintCert writes the certificate file as part of succeeding.
-      // Reproduced here because that write is precisely what made the ordering
-      // defect destructive rather than merely untidy.
+      // The REAL mintCert STAGES the certificate as part of succeeding, and
+      // leaves committing it to the caller. Reproduced through the real
+      // stageCertificate because that hand-off is precisely what makes the
+      // ordering defects destructive rather than merely untidy.
       mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
-      writeFileSync(instaCertPath(alias), CERT + '\n')
-      return { certificate: CERT, host: 'ssh.us-west-1.compute.example', username: `u-${serviceId}`, expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
+      return {
+        certificate: CERT, host: 'ssh.us-west-1.compute.example', username: `u-${serviceId}`,
+        expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA,
+        staged: stageCertificate(instaCertPath(alias), CERT + '\n'),
+      }
     },
     installCA: () => {},
     installConfig: () => {},
@@ -265,7 +269,7 @@ d('--setup does not report success without the trust anchor it promises', () => 
     // and claimed it was configured.
     const calls: string[] = []
     const { deps: d } = deps({
-      mint: async () => ({ ...noCA }),
+      mint: mintNoCA,
       installCA: () => calls.push('ca'),
       installConfig: () => calls.push('config'),
     })
@@ -274,7 +278,7 @@ d('--setup does not report success without the trust anchor it promises', () => 
   })
 
   it('does not claim the alias when it could not configure it', async () => {
-    const { deps: d } = deps({ mint: async () => ({ ...noCA }) })
+    const { deps: d } = deps({ mint: mintNoCA })
     await expect(computeSSH('api', { setup: true }, d)).rejects.toThrow()
     expect(existsSync(instaAliasStorePath()) ? readAliasStore() : {}).toEqual({})
   })
@@ -282,7 +286,7 @@ d('--setup does not report success without the trust anchor it promises', () => 
   it('still works WITHOUT --setup, which promises no anchor', async () => {
     // The refusal is scoped to the promise --setup makes. A plain issue prints
     // a self-contained command and is unaffected.
-    const { deps: d, lines } = deps({ mint: async () => ({ ...noCA }) })
+    const { deps: d, lines } = deps({ mint: mintNoCA })
     await computeSSH('api', {}, d)
     expect(lines[0]).toContain('-o IdentitiesOnly=yes')
   })
@@ -291,6 +295,10 @@ d('--setup does not report success without the trust anchor it promises', () => 
     certificate: CERT, host: 'ssh.us-west-1.compute.example', username: 'u-svc-1',
     expiresAt: '2026-09-14T22:00:00Z',
   }
+  // Stages the certificate and leaves committing it to computeSSH, as the real
+  // mint does -- so 'nothing was installed' stays an assertion about the
+  // command rather than about this stub.
+  const mintNoCA = async () => ({ ...noCA, staged: stageCertificate(instaCertPath('api.insta'), CERT + '\n') })
 })
 
 d('the printed command is safe to paste', () => {
@@ -719,6 +727,134 @@ d('an automatic renewal replaces the certificate it was issued for', () => {
   })
 })
 
+d('the certificate is committed only once its anchor is', () => {
+  // A renewal changes TWO files -- the certificate and the trust anchor in
+  // known_hosts -- and rename(2) makes each one atomic on its own, which is not
+  // the same as making the pair atomic. Installing the certificate first meant
+  // that a failed anchor write (a permission, a full disk, an unresolvable
+  // symlink) left the alias holding a certificate signed by a CA nothing
+  // trusts, while the outer catch swallowed the error: the login then fails
+  // with no explanation, and precisely in the case the anchor write matters
+  // most -- a CA rotation. The guarantee is that a failed renewal leaves the
+  // existing certificate in place.
+  //
+  // The positive control is the suite above, which renews for real and DOES
+  // replace the certificate.
+  const good = {
+    certificate: CERT, host: 'ssh.us-west-1.compute.example',
+    username: 'u-svc-1', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA,
+  }
+
+  const renew = async () => {
+    const mod = await import('../src/api.js')
+    const fetchImpl = async () => ({ status: 200, text: async () => JSON.stringify(good) })
+    const spy = vi.spyOn(mod.ApiClient, 'load').mockResolvedValue(
+      new mod.ApiClient({ apiUrl: 'https://example.invalid', accessToken: 't' } as never, fetchImpl as never),
+    )
+    try { await ensureCertForAlias('api.insta', 2_000) } finally { spy.mockRestore() }
+  }
+
+  beforeEach(() => {
+    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    // Not a parseable certificate, so certNeedsRenewal reads it as "cannot
+    // confirm" and renewal is actually reached.
+    writeFileSync(instaCertPath('api.insta'), 'the-expiring-certificate\n')
+    writeAliasStore({
+      'api.insta': { projectId: 'proj-1', serviceId: 'svc-1', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1' },
+    })
+  })
+
+  it('keeps the previous certificate when the known_hosts write fails', async () => {
+    // A REAL failure rather than an injected one: ~/.ssh is a file, so the
+    // anchor install fails the way a permission or a full disk would -- after
+    // the response has been validated and the new certificate produced.
+    writeFileSync(join(home, '.ssh'), 'not a directory\n')
+    await renew()
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8'),
+      'the certificate was replaced although its CA was never trusted').toBe('the-expiring-certificate\n')
+    expect(readdirSync(join(home, '.insta', 'ssh')).filter((f) => f.includes('staging')),
+      'a staged certificate was left behind').toEqual([])
+  })
+
+  it('keeps it when another process holds the known_hosts lock', async () => {
+    // Giving up on the shared file is a give-up on the whole renewal: the
+    // alias keeps the certificate it has, whose CA is still the trusted one.
+    writeFileSync(join(home, '.insta', 'ssh', 'known_hosts.lock'), 'someone-else')
+    await renew()
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe('the-expiring-certificate\n')
+    expect(existsSync(join(home, '.ssh', 'known_hosts')),
+      'an anchor was written by a caller that never held the lock').toBe(false)
+  })
+})
+
+// The renewal lock is per ALIAS; known_hosts is ONE file shared by all of them.
+// Two aliases expiring together therefore read the same contents, each edits
+// its own copy and each renames over the other -- the loser's anchor gone, and
+// its certificate already installed against a CA that is no longer trusted.
+//
+// This cannot be observed from a single process: the read-modify-write is
+// synchronous, so an in-process "concurrent" call either serialises itself or
+// deadlocks on the lock. Only real processes interleave, so the test spawns
+// them.
+//
+// The children are TypeScript, so they need the same loader vitest uses.
+// Probed rather than assumed, and only where the rest of the file already has
+// something to run.
+const tsx = keygen && (() => {
+  try {
+    execFileSync(process.execPath, ['--import', 'tsx', '-e', ''], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+})()
+
+const dd = tsx ? describe : describe.skip
+
+dd('separate processes installing anchors at once keep every anchor', () => {
+  const CHILD = `
+const [, , mod, startAt, ca, ...patterns] = process.argv
+const { installCertAuthority } = await import(mod)
+// A common start, so the processes are inside the shared file together rather
+// than one after another.
+await new Promise((r) => setTimeout(r, Number(startAt) - Date.now()))
+for (const pattern of patterns) installCertAuthority(pattern, ca)
+`
+
+  const run = (args: string[]) => new Promise<{ code: number | null; err: string }>((resolve) => {
+    const child = spawn(process.execPath, args, {
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    let err = ''
+    child.stderr!.on('data', (d) => { err += String(d) })
+    child.on('exit', (code) => resolve({ code, err }))
+  })
+
+  it('loses none of them', async () => {
+    // `.mts`, because the script is written into a directory with no
+    // package.json: a plain `.ts` there is transformed as CommonJS, and the
+    // dynamic import below is top-level await.
+    const script = join(home, 'anchor-child.mts')
+    writeFileSync(script, CHILD)
+    const compute = new URL('../src/commands/compute.ts', import.meta.url).href
+    // Distinct EXACT patterns, which upsertCertAuthority keeps side by side:
+    // one line per region is the ordinary state of this file, and every line
+    // is an alias that can still connect.
+    const groups = [0, 1, 2, 3].map((n) => Array.from({ length: 5 }, (_, i) => `ssh.r${n}x${i}.compute.example`))
+    const startAt = Date.now() + 1_000
+    const results = await Promise.all(groups.map((patterns) =>
+      run(['--import', 'tsx', script, compute, String(startAt), CA, ...patterns])))
+    for (const r of results) expect(r.code, `a renewal process failed: ${r.err}`).toBe(0)
+
+    const lines = readFileSync(join(home, '.ssh', 'known_hosts'), 'utf8').split('\n')
+    for (const pattern of groups.flat()) {
+      expect(lines.filter((l) => l.startsWith(`@cert-authority ${pattern} `)),
+        `the anchor for ${pattern} was discarded by a concurrent renewal`).toHaveLength(1)
+    }
+  }, 30_000)
+})
+
 d('a certificate is DECODED, not just shape-checked', () => {
   // The escalation this closes: a textual check accepts
   // `<valid type> <64+ chars of base64>`, which anyone can construct, and the
@@ -791,28 +927,28 @@ d('a certificate OpenSSH cannot parse never replaces a working one', () => {
     // It passes the cheap structural gate -- that is the point of the case.
     expect(isSSHCertificateRecord(shaped.trim()), 'the fixture no longer exercises the gap').toBe(true)
 
-    expect(() => installCertificate(live(), shaped)).toThrow(/cannot parse|left untouched/)
+    expect(() => stageCertificate(live(), shaped)).toThrow(/cannot parse|left untouched/)
     expect(readFileSync(live(), 'utf8'), 'a certificate ssh cannot read replaced the working one').toBe(CERT + '\n')
   })
 
   it('refuses rather than passes when ssh-keygen is missing', () => {
     // Cannot-confirm is not a licence to overwrite a credential that works.
     const enoent = () => { const e: NodeJS.ErrnoException = new Error('spawn ENOENT'); e.code = 'ENOENT'; throw e }
-    expect(() => installCertificate(live(), CERT + '\n', enoent)).toThrow(/not installed/)
+    expect(() => stageCertificate(live(), CERT + '\n', enoent)).toThrow(/not installed/)
     expect(readFileSync(live(), 'utf8')).toBe(CERT + '\n')
   })
 
   it('installs a real certificate, and leaves no staging file behind', () => {
     // The positive control: a gate strict enough to refuse the cases above can
     // refuse every real certificate too, and renewal would silently stop.
-    installCertificate(live(), EXPIRED_CERT + '\n')
+    stageCertificate(live(), EXPIRED_CERT + '\n').commit()
     expect(readFileSync(live(), 'utf8')).toBe(EXPIRED_CERT + '\n')
     expect(readdirSync(join(home, '.insta', 'ssh')).filter((f) => f.includes('staging')),
       'a staging file survived').toEqual([])
   })
 
   it('cleans up the staging file when verification fails', () => {
-    try { installCertificate(live(), 'not a certificate at all\n') } catch { /* expected */ }
+    try { stageCertificate(live(), 'not a certificate at all\n') } catch { /* expected */ }
     expect(readdirSync(join(home, '.insta', 'ssh')).filter((f) => f.includes('staging'))).toEqual([])
   })
 })
@@ -877,7 +1013,7 @@ d('a symlinked certificate is written THROUGH, not replaced', () => {
     mkdirSync(dirname(link), { recursive: true })
     symlinkSync(real, link)
 
-    installCertificate(link, CERT + '\n')
+    stageCertificate(link, CERT + '\n').commit()
 
     expect(lstatSync(link).isSymbolicLink(), 'the symlink was replaced with a regular file').toBe(true)
     expect(readFileSync(real, 'utf8'), 'the dotfiles copy was left stale').toBe(CERT + '\n')

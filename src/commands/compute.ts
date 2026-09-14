@@ -928,7 +928,11 @@ function ensureKeyPair(): string {
 
 type CertResponse = { certificate: string; host: string; username: string; expiresAt: string; caPublicKey?: string }
 
-async function mintCert(api: ApiClient, projectId: string, serviceId: string, publicKey: string, alias: string, signal?: AbortSignal): Promise<CertResponse> {
+/** A validated response plus its certificate, written and verified but NOT yet
+ *  in place. The caller decides when it goes live — see StagedCertificate. */
+type MintedCert = CertResponse & { staged: StagedCertificate }
+
+async function mintCert(api: ApiClient, projectId: string, serviceId: string, publicKey: string, alias: string, signal?: AbortSignal): Promise<MintedCert> {
   const res = await api.rawRequest('POST', `/projects/${projectId}/services/${serviceId}/ssh-cert`, { publicKey }, { signal })
   if (res.status < 200 || res.status >= 300) {
     throw new ApiError(res.status, res.body?.error ?? 'could not issue an ssh certificate')
@@ -939,8 +943,7 @@ async function mintCert(api: ApiClient, projectId: string, serviceId: string, pu
   // left with an error message and a broken alias. Same ordering rule as the
   // collision check: nothing is written until the whole response is known-good.
   const out = validateCertResponse(res.body)
-  installCertificate(instaCertPath(alias), out.certificate.trim() + '\n')
-  return out
+  return { ...out, staged: stageCertificate(instaCertPath(alias), out.certificate.trim() + '\n') }
 }
 
 /** Everything the plane returns that we will write into ~/.ssh or ~/.insta. */
@@ -980,7 +983,26 @@ const sshKeygenVerifyCert: CertVerifier = (certPath) => {
 }
 
 /**
- * Write a certificate into place only once OpenSSH agrees it is one.
+ * A certificate written and verified, waiting for the caller to put it in place.
+ *
+ * A renewal changes TWO files: the certificate, and the trust anchor in
+ * known_hosts. rename(2) makes each one atomic on its own, which is not the
+ * same as making the pair atomic — and the pair is what has to hold, because a
+ * certificate whose CA is not in known_hosts authenticates nothing. Installing
+ * the certificate first meant that a failed anchor write (a permission, a full
+ * disk, an unresolvable symlink) replaced a working credential with one nothing
+ * trusts, silently, on the path that runs unattended — and did so exactly when
+ * the anchor write matters most, a CA rotation.
+ *
+ * So the certificate waits here until the anchor is in place, and the last step
+ * of the renewal is the rename, which is the step that does not fail halfway.
+ * `discard` is idempotent and safe after `commit`, so callers can put it in a
+ * `finally` and let the ordinary path fall through it.
+ */
+export type StagedCertificate = { commit: () => void; discard: () => void }
+
+/**
+ * Write a certificate into staging only once OpenSSH agrees it is one.
  *
  * The structural decode in isSSHCertificateRecord reads the blob's first field
  * and stops. That rejects arbitrary base64, and it still accepts a blob whose
@@ -1002,7 +1024,7 @@ const sshKeygenVerifyCert: CertVerifier = (certPath) => {
  * is lost by it either -- without OpenSSH installed the certificate has no
  * consumer.
  */
-export function installCertificate(certPath: string, contents: string, verify: CertVerifier = sshKeygenVerifyCert): void {
+export function stageCertificate(certPath: string, contents: string, verify: CertVerifier = sshKeygenVerifyCert): StagedCertificate {
   mkdirSync(dirname(certPath), { recursive: true, mode: 0o700 })
   // Followed to its target, for the same reason writeFileAtomicSync does it:
   // rename(2) replaces the LINK, so a certificate someone symlinked into a
@@ -1010,20 +1032,25 @@ export function installCertificate(certPath: string, contents: string, verify: C
   // on the path that runs unattended.
   const target = resolveThroughSymlink(certPath)
   const staging = `${target}.staging-${process.pid}-${randomUUID()}`
+  const discard = () => {
+    try { unlinkSync(staging) } catch { /* committed, or never created */ }
+  }
   try {
     writeFileSync(staging, contents, { mode: 0o644 })
-    try {
-      verify(staging)
-    } catch (e) {
-      const why = (e as NodeJS.ErrnoException)?.code === 'ENOENT'
-        ? 'ssh-keygen is not installed, so the certificate cannot be checked'
-        : 'the platform returned a certificate OpenSSH cannot parse'
-      throw new Error(`${why} — the existing certificate was left untouched`)
-    }
-    renameSync(staging, target)
-  } finally {
-    try { unlinkSync(staging) } catch { /* moved into place, or never created */ }
+  } catch (e) {
+    discard()
+    throw e
   }
+  try {
+    verify(staging)
+  } catch (e) {
+    discard()
+    const why = (e as NodeJS.ErrnoException)?.code === 'ENOENT'
+      ? 'ssh-keygen is not installed, so the certificate cannot be checked'
+      : 'the platform returned a certificate OpenSSH cannot parse'
+    throw new Error(`${why} — the existing certificate was left untouched`)
+  }
+  return { commit: () => renameSync(staging, target), discard }
 }
 
 /** One line covers every node in every region, which is the whole reason for a
@@ -1031,11 +1058,70 @@ export function installCertificate(certPath: string, contents: string, verify: C
  *  IDENTIFICATION HAS CHANGED for a random fraction of reconnects behind a load
  *  balancer. Re-run on every renewal too, so a rotated CA is trusted before the
  *  retired one stops signing rather than at the user's next `--setup`. */
-function installCertAuthority(hostPattern: string, caPublicKey: string): void {
+export function installCertAuthority(hostPattern: string, caPublicKey: string): void {
   const knownHosts = join(homedir(), '.ssh', 'known_hosts')
-  mkdirSync(dirname(knownHosts), { recursive: true, mode: 0o700 })
-  const existing = existsSync(knownHosts) ? readFileSync(knownHosts, 'utf8') : ''
-  writeFileAtomicSync(knownHosts, upsertCertAuthority(existing, hostPattern, caPublicKey), { mode: 0o600 })
+  // The read and the write are ONE operation, and the lock is what makes them
+  // one. Without it two aliases renewing together both read these contents and
+  // each renames its own result over the other's -- see withKnownHostsLock.
+  withKnownHostsLock(() => {
+    mkdirSync(dirname(knownHosts), { recursive: true, mode: 0o700 })
+    const existing = existsSync(knownHosts) ? readFileSync(knownHosts, 'utf8') : ''
+    writeFileAtomicSync(knownHosts, upsertCertAuthority(existing, hostPattern, caPublicKey), { mode: 0o600 })
+  })
+}
+
+/** How long an anchor update waits for another insta process before giving up.
+ *  Short, because this still runs inside OpenSSH's config parse and the section
+ *  it waits for is a read and a rename. */
+const KNOWN_HOSTS_LOCK_WAIT_MS = 1_000
+const KNOWN_HOSTS_LOCK_POLL_MS = 20
+/** Much shorter than the renewal window, for the same reason: a lock older than
+ *  this was left behind by a process that died inside a read and a rename, and
+ *  every anchor update on the machine queues behind it until it is broken. */
+const KNOWN_HOSTS_LOCK_STALE_MS = 10_000
+
+/** Sleep without yielding to the event loop, which is what the callers here
+ *  want: the section being waited for is synchronous. */
+const sleepSync = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * Hold the shared-file lock across a read-modify-write of ~/.ssh/known_hosts.
+ *
+ * The renewal lock is per ALIAS; known_hosts is ONE file every alias writes to.
+ * Two aliases expiring together — the ordinary case for a project with two
+ * compute services — therefore read the same contents, each edits its own copy
+ * and each renames over the other. The loser's anchor is gone, and its
+ * certificate has already been issued against a CA that is no longer trusted:
+ * during a rotation that alias simply stops connecting, with nothing said. The
+ * same window discards unrelated lines the user's own editor had just added.
+ *
+ * It WAITS, unlike the renewal lock, because what is at stake is a lost anchor
+ * rather than a duplicate request. The wait is bounded and short, and a caller
+ * that cannot get in gives the whole renewal up, which leaves the previous
+ * certificate — and the CA that signed it — in place.
+ *
+ * It covers insta processes. `ssh` appends host keys to the same file without
+ * any lock and cannot be made to take one; that window is inherent to
+ * known_hosts and is narrowed here, not closed.
+ */
+export function withKnownHostsLock<T>(
+  fn: () => T,
+  { waitMs = KNOWN_HOSTS_LOCK_WAIT_MS, sleep = sleepSync }: { waitMs?: number; sleep?: (ms: number) => void } = {},
+): T {
+  const path = join(instaSSHDir(), 'known_hosts.lock')
+  const deadline = Date.now() + waitMs
+  for (;;) {
+    const release = acquireLockFile(path, Date.now(), KNOWN_HOSTS_LOCK_STALE_MS)
+    if (release) {
+      try { return fn() } finally { release() }
+    }
+    if (Date.now() >= deadline) {
+      throw new Error('another insta process is updating ~/.ssh/known_hosts, so the trust anchor was left as it was')
+    }
+    sleep(KNOWN_HOSTS_LOCK_POLL_MS)
+  }
 }
 
 function installConfigBlock(store: AliasStore): void {
@@ -1107,7 +1193,17 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
     // AbortSignal rather than a Promise.race: a race returns while leaving the
     // socket open, so the process lingers anyway.
     const out = await mintCert(api, rec.projectId, rec.serviceId, ensureKeyPair(), alias, AbortSignal.timeout(timeoutMs))
-    if (out.caPublicKey) installCertAuthority(hostPatternFor(out.host), out.caPublicKey)
+    try {
+      // The ANCHOR before the certificate. Everything below this line is a
+      // rename; everything that can fail has already happened. Committing the
+      // certificate first left the alias holding a credential signed by a CA
+      // this machine does not trust whenever the anchor write failed -- and
+      // the catch below would have swallowed that too.
+      if (out.caPublicKey) installCertAuthority(hostPatternFor(out.host), out.caPublicKey)
+      out.staged.commit()
+    } finally {
+      out.staged.discard()
+    }
   } catch {
     // Deliberately swallowed. See above.
   } finally {
@@ -1129,7 +1225,13 @@ const RENEWAL_REQUEST_TIMEOUT_MS = 5_000
 /** Take the per-alias renewal lock, or return undefined if someone else holds
  *  a fresh one. Never waits — see the call site. */
 export function acquireRenewalLock(alias: string, now = Date.now()): (() => void) | undefined {
-  const path = join(instaSSHDir(), `${alias}.renew.lock`)
+  return acquireLockFile(join(instaSSHDir(), `${alias}.renew.lock`), now, RENEWAL_LOCK_STALE_MS)
+}
+
+/** Take a lock file, or return undefined when someone else holds a fresh one.
+ *  Never waits: whether waiting is the right answer depends on what is being
+ *  protected, so it belongs to the caller. */
+function acquireLockFile(path: string, now: number, staleMs: number): (() => void) | undefined {
   const take = (): (() => void) | undefined => {
     // A token, not just the pid. A renewal slower than the staleness window
     // has its lock broken by the next caller; without an ownership check the
@@ -1154,7 +1256,7 @@ export function acquireRenewalLock(alias: string, now = Date.now()): (() => void
   const held = take()
   if (held) return held
   try {
-    if (now - statSync(path).mtimeMs < RENEWAL_LOCK_STALE_MS) return undefined
+    if (now - statSync(path).mtimeMs < staleMs) return undefined
     unlinkSync(path)
   } catch {
     return undefined
@@ -1198,27 +1300,35 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
   assertAliasFree(store, alias, { projectId: p.projectId, serviceId: svc.id, branch })
 
   const out = await mint(api, p.projectId, svc.id, ensureKeyPair(), alias)
-  // --setup PROMISES a trust anchor, so a response without one cannot be
-  // reported as configured. Skipping installCA and carrying on left plain
-  // `ssh`/`scp` facing a host-key prompt on every new node behind the load
-  // balancer -- the exact failure the anchor exists to prevent -- while the
-  // command printed the short alias and claimed success. Checked before
-  // anything is installed, so the refusal is clean.
-  if (opts.setup && !out.caPublicKey) {
-    throw new Error(
-      'the platform did not return an ssh certificate authority key, so `--setup` cannot install the trust anchor it promises.\n' +
-      'Retry, and contact support if it persists; the certificate itself was issued and `insta compute ssh ' + svc.name + '` still prints a usable command.',
-    )
-  }
+  try {
+    // --setup PROMISES a trust anchor, so a response without one cannot be
+    // reported as configured. Skipping installCA and carrying on left plain
+    // `ssh`/`scp` facing a host-key prompt on every new node behind the load
+    // balancer -- the exact failure the anchor exists to prevent -- while the
+    // command printed the short alias and claimed success. Checked before
+    // anything is installed, so the refusal is clean.
+    if (opts.setup && !out.caPublicKey) {
+      throw new Error(
+        'the platform did not return an ssh certificate authority key, so `--setup` cannot install the trust anchor it promises.\n' +
+        'Retry, and contact support if it persists; the certificate itself was issued and `insta compute ssh ' + svc.name + '` still prints a usable command.',
+      )
+    }
 
-  store[alias] = { projectId: p.projectId, ...(branch ? { branch } : {}), serviceId: svc.id, host: out.host, username: out.username }
-  writeAliasStore(store)
+    store[alias] = { projectId: p.projectId, ...(branch ? { branch } : {}), serviceId: svc.id, host: out.host, username: out.username }
+    writeAliasStore(store)
 
-  if (opts.setup) {
-    // upsertCertAuthority parses the key and refuses a bad one, so a hostile or
-    // malformed response fails HERE instead of appending lines to known_hosts.
-    if (out.caPublicKey) (deps.installCA ?? installCertAuthority)(hostPatternFor(out.host), out.caPublicKey)
-    ;(deps.installConfig ?? installConfigBlock)(store)
+    if (opts.setup) {
+      // upsertCertAuthority parses the key and refuses a bad one, so a hostile or
+      // malformed response fails HERE instead of appending lines to known_hosts.
+      if (out.caPublicKey) (deps.installCA ?? installCertAuthority)(hostPatternFor(out.host), out.caPublicKey)
+      ;(deps.installConfig ?? installConfigBlock)(store)
+    }
+    // Last, and for the same reason as in the renewal hook: a certificate whose
+    // anchor never landed authenticates nothing, so it does not replace one
+    // that still works.
+    out.staged.commit()
+  } finally {
+    out.staged.discard()
   }
 
   if (opts.json) return printJson({ alias, host: out.host, username: out.username, expiresAt: out.expiresAt, configured: !!opts.setup })
