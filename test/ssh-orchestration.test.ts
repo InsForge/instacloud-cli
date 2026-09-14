@@ -7,11 +7,11 @@
 // single piece -- only from running the steps together and watching what
 // happens, and in what order.
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest'
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
-import { computeSSH, installCertAuthority, instaCertPath, instaAliasStorePath, instaKeyPath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate } from '../src/commands/compute.js'
+import { computeSSH, installCertAuthority, instaCertPath, instaAliasStorePath, instaKeyPath, writeAliasStore, readAliasStore, validateCertResponse, acquireLockFile, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate } from '../src/commands/compute.js'
 import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey } from '../src/commands/ssh-config.js'
 
 // Redirect the whole ~/.insta and ~/.ssh tree into a temp dir.
@@ -153,6 +153,9 @@ const LATE_CERT = !keygen ? '' : signedForOurKey('ca', 'late', '+1h')
 const installTheKeyCertWasIssuedFor = () => {
   mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
   copyFileSync(join(fixtures, 'user'), instaKeyPath())
+  // copyFileSync does not carry the mode, and 0644 is not a private key a
+  // real install ever has: the credential here is the one the feature uses.
+  chmodSync(instaKeyPath(), 0o600)
   copyFileSync(join(fixtures, 'user.pub'), instaKeyPath() + '.pub')
 }
 
@@ -391,7 +394,10 @@ d('the printed command is safe to paste', () => {
   })
 })
 
-d('concurrent renewal hooks do not stampede the mint endpoint', () => {
+// A lock suite: nothing here needs OpenSSH, so it is not behind the ssh-keygen
+// gate -- a lock regression is cheapest to reproduce exactly where OpenSSH is
+// absent.
+describe('concurrent renewal hooks do not stampede the mint endpoint', () => {
   it('lets exactly one caller through', () => {
     // An IDE opens several connections at once and scp adds more, so every one
     // of them observes the same near-expiry certificate simultaneously.
@@ -555,7 +561,7 @@ async function raceRenewal(fetchImpl: (url: string, init: any) => Promise<any>):
   }
 }
 
-d('the renewal lock survives a holder that outlives the staleness window', () => {
+describe('the renewal lock survives a holder that outlives the staleness window', () => {
   it('a superseded holder does not delete the new holder lock', () => {
     // The sequence that defeats a pid-only lock: A takes it, A is slow, B
     // breaks the stale lock and takes its own, then A finishes and releases --
@@ -1576,4 +1582,89 @@ await computeSSH(name, { setup: true }, deps)
     }
     expect(Object.keys(readAliasStore()).sort()).toEqual(names.map((n) => `${n}.insta`).sort())
   }, 60_000)
+})
+
+describe('a lock that guards a file is broken only when its holder is GONE', () => {
+  // The finding. Staleness was an AGE, so a holder that was merely slow was
+  // broken -- while still inside the section, and still able to release. Its
+  // release, landing between the breaker's token check and the breaker's
+  // unlink, let a third process create a fresh lock at the path, which the
+  // breaker then deleted before taking its own: two writers over aliases.json,
+  // ssh_config or known_hosts. The rule for these locks is now that the
+  // holder's PROCESS is gone, which is the one condition under which nothing
+  // can release; and the takeover writes into the lock rather than replacing
+  // it, so the path never changes inode under anybody.
+  const lock = () => join(home, '.insta', 'ssh', 'file.lock')
+  const NEVER_BY_AGE = Infinity
+  /** A holder that died: a real process writes its lock and exits without
+   *  releasing. execFileSync returns only once it has exited. */
+  const aDeadHolder = () => {
+    mkdirSync(dirname(lock()), { recursive: true })
+    execFileSync(process.execPath, [
+      '-e', "require('fs').writeFileSync(process.argv[1], process.pid + ':' + require('crypto').randomUUID(), { flag: 'wx' })", lock(),
+    ])
+    return readFileSync(lock(), 'utf8')
+  }
+
+  it('never breaks a holder that is merely slow, however old its lock', () => {
+    const held = acquireLockFile(lock(), Date.now(), NEVER_BY_AGE)
+    expect(held).toBeTruthy()
+    // Ten minutes "later". Under the age rule this is the moment the lock was
+    // taken from a live holder.
+    expect(acquireLockFile(lock(), Date.now() + 10 * 60_000, NEVER_BY_AGE), 'a live holder was broken on age alone').toBeUndefined()
+    held!()
+    const next = acquireLockFile(lock(), Date.now(), NEVER_BY_AGE)
+    expect(next, 'the lock was not released').toBeTruthy()
+    next!()
+  })
+
+  it('breaks the lock of a process that has exited', () => {
+    // The positive control: without it the case above is satisfied by a lock
+    // that is never broken at all, and one crash wedges every setup for good.
+    const dead = aDeadHolder()
+    expect(dead).toMatch(/^\d+:/)
+    const got = acquireLockFile(lock(), Date.now(), NEVER_BY_AGE)
+    expect(got, 'a dead holder wedged the lock').toBeTruthy()
+    expect(readFileSync(lock(), 'utf8'), 'the lock still carries the dead token').not.toBe(dead)
+    got!()
+    expect(existsSync(lock()), 'the taken-over lock was not released').toBe(false)
+  })
+
+  it('takes over by writing INTO the lock, never by replacing it', () => {
+    // A second name on the same inode sees the breaker's token only if the
+    // takeover wrote into that inode. An unlink-and-recreate leaves the witness
+    // holding the dead token while the path holds a new file.
+    const dead = aDeadHolder()
+    const witness = lock() + '.witness'
+    linkSync(lock(), witness)
+    const got = acquireLockFile(lock(), Date.now(), NEVER_BY_AGE)
+    expect(got).toBeTruthy()
+    expect(readFileSync(witness, 'utf8'), 'the takeover replaced the inode instead of writing into it').toBe(readFileSync(lock(), 'utf8'))
+    expect(readFileSync(witness, 'utf8')).not.toBe(dead)
+    got!()
+    unlinkSync(witness)
+  })
+
+  it('breaks a lock with no readable owner only once it is old', () => {
+    // A process that died between the exclusive create and the write. Nothing
+    // can ever release it, so age is the only rule left -- against a bound no
+    // live creator spends between two consecutive syscalls.
+    mkdirSync(dirname(lock()), { recursive: true })
+    writeFileSync(lock(), '')
+    expect(acquireLockFile(lock(), Date.now(), NEVER_BY_AGE), 'an unreadable lock was broken while still young').toBeUndefined()
+    const got = acquireLockFile(lock(), Date.now() + 61_000, NEVER_BY_AGE)
+    expect(got, 'an unreadable lock wedged the file for good').toBeTruthy()
+    got!()
+  })
+
+  it('still breaks a slow RENEWAL holder by age, because a duplicate mint is harmless', () => {
+    // The contrast, so the two rules are both pinned: the renewal lock guards
+    // a request, not a file, and a wedged one silently stops an alias renewing.
+    const held = acquireRenewalLock('api.insta')
+    expect(held).toBeTruthy()
+    const broke = acquireRenewalLock('api.insta', Date.now() + 61_000)
+    expect(broke, 'the renewal lock no longer breaks by age').toBeTruthy()
+    broke!()
+    held!()
+  })
 })

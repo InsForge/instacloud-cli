@@ -630,6 +630,18 @@ describe('a CA key is held to the shape of its OWN type, not just to being well-
       expect(() => parseCAPublicKey(key), `${what} was accepted`).toThrow(/shape of/)
     })
   }
+
+  // The type is a string from an HTTP response looked up in a table. On a
+  // plain object that lookup finds Object.prototype: `constructor` is a
+  // function that returns its argument, `toString` one that returns a string,
+  // and both read as "a shape this type has" -- so a key typed `constructor`
+  // with a blob whose first field says the same was accepted and written.
+  for (const type of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    it(`refuses a type named ${type} as unsupported, not as anything else`, () => {
+      const key = `${type} ${blob(type, Buffer.alloc(32, 0x44))}`
+      expect(() => parseCAPublicKey(key), `${type} was accepted`).toThrow(/unsupported type/)
+    })
+  }
 })
 
 describe('a certificate is matched to the key it was issued for', () => {

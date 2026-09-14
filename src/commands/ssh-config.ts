@@ -305,15 +305,20 @@ export function isSafeSSHHost(v: unknown): v is string {
  *
  *  Field lengths, not field contents: the check is that the blob has the
  *  structure ssh will parse, not that it is a strong key. */
-const CA_KEY_SHAPES: Record<string, (fields: Buffer[]) => boolean> = {
-  'ssh-ed25519': (f) => f.length === 2 && f[1]!.length === 32,
-  'ssh-rsa': (f) => f.length === 3 && f[1]!.length > 0 && f[2]!.length >= 128,
-  'ecdsa-sha2-nistp256': (f) => f.length === 3 && isEcdsaBody(f[1]!, f[2]!, 'nistp256', 65),
-  'ecdsa-sha2-nistp384': (f) => f.length === 3 && isEcdsaBody(f[1]!, f[2]!, 'nistp384', 97),
-  'ecdsa-sha2-nistp521': (f) => f.length === 3 && isEcdsaBody(f[1]!, f[2]!, 'nistp521', 133),
-  'sk-ssh-ed25519@openssh.com': (f) => f.length === 3 && f[1]!.length === 32 && f[2]!.length > 0,
-  'sk-ecdsa-sha2-nistp256@openssh.com': (f) => f.length === 4 && isEcdsaBody(f[1]!, f[2]!, 'nistp256', 65) && f[3]!.length > 0,
-}
+//
+//  A Map, not an object: the type is a string from an HTTP response, and on a
+//  plain object `shapes['constructor']` is Object -- a function, which called
+//  on the fields returns them, truthy -- so a key typed `constructor` passed as
+//  supported. A Map has no inherited entries to find.
+const CA_KEY_SHAPES = new Map<string, (fields: Buffer[]) => boolean>([
+  ['ssh-ed25519', (f) => f.length === 2 && f[1]!.length === 32],
+  ['ssh-rsa', (f) => f.length === 3 && f[1]!.length > 0 && f[2]!.length >= 128],
+  ['ecdsa-sha2-nistp256', (f) => f.length === 3 && isEcdsaBody(f[1]!, f[2]!, 'nistp256', 65)],
+  ['ecdsa-sha2-nistp384', (f) => f.length === 3 && isEcdsaBody(f[1]!, f[2]!, 'nistp384', 97)],
+  ['ecdsa-sha2-nistp521', (f) => f.length === 3 && isEcdsaBody(f[1]!, f[2]!, 'nistp521', 133)],
+  ['sk-ssh-ed25519@openssh.com', (f) => f.length === 3 && f[1]!.length === 32 && f[2]!.length > 0],
+  ['sk-ecdsa-sha2-nistp256@openssh.com', (f) => f.length === 4 && isEcdsaBody(f[1]!, f[2]!, 'nistp256', 65) && f[3]!.length > 0],
+])
 
 function isEcdsaBody(curve: Buffer, point: Buffer, wantCurve: string, pointLen: number): boolean {
   return curve.toString('utf8') === wantCurve && point.length === pointLen && point[0] === 0x04
@@ -334,7 +339,7 @@ export function parseCAPublicKey(value: unknown): { type: string; blob: string }
   const parts = line.split(/[ \t]+/)
   if (parts.length < 2) throw new Error(`refusing a malformed certificate authority key: ${JSON.stringify(line.slice(0, 64))}`)
   const type = parts[0]!, blob = parts[1]!
-  const shape = CA_KEY_SHAPES[type]
+  const shape = CA_KEY_SHAPES.get(type)
   if (!shape) throw new Error(`refusing a certificate authority key of unsupported type ${JSON.stringify(type.slice(0, 32))}`)
   if (!/^[A-Za-z0-9+/]+={0,3}$/.test(blob) || blob.length < 32) {
     throw new Error('refusing a certificate authority key whose body is not base64')

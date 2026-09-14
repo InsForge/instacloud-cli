@@ -1160,12 +1160,9 @@ function commitWithUndo(steps: Array<() => Undo | void>): void {
  *  already installed, which is strictly better than making `ssh` wait. */
 const KNOWN_HOSTS_LOCK_WAIT_MS = 1_000
 const LOCK_POLL_MS = 20
-/** Much shorter than the renewal window: a lock older than this was left behind
- *  by a process that died mid-transaction, and every anchor update on the
- *  machine queues behind it until it is broken. Generous next to the section it
- *  guards, which is an anchor update and a rename, but it also spans a
- *  certificate commit, so it is not as tight as the wait above. */
-const KNOWN_HOSTS_LOCK_STALE_MS = 10_000
+/** The locks that guard FILES break only when their holder's process is gone,
+ *  never on age -- see isAbandoned for why a slow holder must stay a holder. */
+const FILE_LOCK_STALE_MS = Infinity
 
 /** Sleep without yielding to the event loop, which is what the callers here
  *  want: the section being waited for is synchronous. */
@@ -1208,7 +1205,7 @@ export function withKnownHostsLock<T>(
   }, {
     waitMs,
     sleep,
-    staleMs: KNOWN_HOSTS_LOCK_STALE_MS,
+    staleMs: FILE_LOCK_STALE_MS,
     busy: 'another insta process is updating ~/.ssh/known_hosts, so the trust anchor was left as it was',
   })
 }
@@ -1229,10 +1226,6 @@ let knownHostsLockDepth = 0
 /** How long a setup waits for another setup. Longer than the known_hosts wait
  *  because the section it guards CONTAINS that wait, plus two file writes. */
 const ALIAS_STORE_LOCK_WAIT_MS = 10_000
-/** Generous next to the wait, for the same reason: a holder legitimately takes
- *  as long as an anchor update plus two writes, and breaking a live lock is the
- *  one thing that reintroduces the race this exists to close. */
-const ALIAS_STORE_LOCK_STALE_MS = 60_000
 
 /**
  * Hold a lock across the whole read-modify-write of the alias store AND the
@@ -1258,8 +1251,8 @@ export function withAliasStoreLock<T>(
   return withLockedFile('aliases.lock', fn, {
     waitMs,
     sleep,
-    staleMs: ALIAS_STORE_LOCK_STALE_MS,
-    busy: 'another insta process is setting up an ssh alias, so nothing was changed. Try again in a moment.',
+    staleMs: FILE_LOCK_STALE_MS,
+    busy: 'another insta process is setting up an ssh alias, so nothing was changed. Try again in a moment',
   })
 }
 
@@ -1280,7 +1273,10 @@ function withLockedFile<T>(
     if (release) {
       try { return fn() } finally { release() }
     }
-    if (Date.now() >= deadline) throw new Error(busy)
+    // Named, because a lock whose holder cannot be shown dead (a pid reused by
+    // an unrelated process, a home shared from another machine) stays busy on
+    // purpose, and the way out is the user's to take.
+    if (Date.now() >= deadline) throw new Error(`${busy} (if no other insta is running, remove ${path})`)
     sleep(LOCK_POLL_MS)
   }
 }
@@ -1471,9 +1467,10 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
   }
 }
 
-/** Renewal timeout. A lock older than this belonged to a process that died
- *  holding it; without a staleness rule one crash would disable renewal for
- *  that alias permanently, which is a worse failure than a duplicate mint. */
+/** A renewal lock older than this is broken even if its holder is alive. That
+ *  is safe HERE and nowhere else -- see isAbandoned: what it guards is a
+ *  duplicate request, and a wedged renewal lock would silently stop one alias
+ *  renewing, which is a worse failure than a duplicate mint. */
 const RENEWAL_LOCK_STALE_MS = 60_000
 
 /** How long the renewal request may take before it is abandoned. Sized for the
@@ -1488,31 +1485,37 @@ export function acquireRenewalLock(alias: string, now = Date.now()): (() => void
   return acquireLockFile(join(instaSSHDir(), `${alias}.renew.lock`), now, RENEWAL_LOCK_STALE_MS)
 }
 
-/** Take a lock file, or return undefined when someone else holds a fresh one.
+/** Take a lock file, or return undefined when someone else holds it.
  *  Never waits: whether waiting is the right answer depends on what is being
  *  protected, so it belongs to the caller.
  *
- *  Exported for the concurrency tests, which need a staleness window they can
- *  cross in milliseconds -- the real one is a minute, and a test that waits a
- *  minute per interleaving does not get written. */
+ *  A lock is `${pid}:${uuid}` in a file created with O_EXCL. It is BROKEN --
+ *  taken over from a holder that will never release it -- under isAbandoned's
+ *  rule, and the takeover never unlinks the path: see breakStaleLock.
+ *
+ *  Exported for the concurrency tests. `now` and `staleMs` are the AGE rule:
+ *  the locks that guard files pass Infinity, the renewal lock a minute, and
+ *  the tests whatever window they need to cross. */
 export function acquireLockFile(path: string, now: number, staleMs: number): (() => void) | undefined {
+  // A token, not just the pid. A renewal slower than the staleness window has
+  // its lock broken by the next caller; without an ownership check the
+  // original holder's release would then delete the NEW holder's lock, leaving
+  // the file unlocked while two renewals ran -- the lock defeating itself
+  // precisely when it is under load. The pid is in it so a later caller can
+  // ask whether the holder still exists.
+  const token = `${process.pid}:${randomUUID()}`
+  const release = () => {
+    try {
+      if (readFileSync(path, 'utf8') === token) unlinkSync(path)
+    } catch { /* already gone, or taken over by someone else */ }
+  }
   const take = (): (() => void) | undefined => {
-    // A token, not just the pid. A renewal slower than the staleness window
-    // has its lock broken by the next caller; without an ownership check the
-    // original holder's release would then delete the NEW holder's lock,
-    // leaving the file unlocked while two renewals ran -- the lock defeating
-    // itself precisely when it is under load.
-    const token = `${process.pid}:${randomUUID()}`
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
       // wx is the atomic part: exclusive create fails if the file exists, so
       // exactly one process can win regardless of how many arrive together.
       writeFileSync(path, token, { flag: 'wx', mode: 0o600 })
-      return () => {
-        try {
-          if (readFileSync(path, 'utf8') === token) unlinkSync(path)
-        } catch { /* already gone, or taken over by someone else */ }
-      }
+      return release
     } catch {
       return undefined
     }
@@ -1525,8 +1528,8 @@ export function acquireLockFile(path: string, now: number, staleMs: number): (()
   // and `wx` is the only arbiter that needs to settle it. Nothing is being
   // taken from anybody here, so retrying is safe.
   if (!observed) return take()
-  if (now - observed.mtimeMs < staleMs) return undefined
-  return breakStaleLock(path, observed.token, take)
+  if (!isAbandoned(observed, now, staleMs)) return undefined
+  return breakStaleLock(path, observed.token, token) ? release : undefined
 }
 
 /** The lock as one consistent observation: the token that is in the file and
@@ -1537,7 +1540,7 @@ function observeLock(path: string): { token: string; mtimeMs: number } | undefin
     // the two reads then pairs the OLD token with the NEW mtime, and the
     // staleness test refuses to break it -- the safe way to be wrong. Read the
     // other way round it pairs an old mtime with the new holder's token, and
-    // the takeover proceeds to delete a lock that was taken a moment ago.
+    // the takeover proceeds against a lock that was taken a moment ago.
     const token = readFileSync(path, 'utf8')
     return { token, mtimeMs: statSync(path).mtimeMs }
   } catch {
@@ -1545,57 +1548,122 @@ function observeLock(path: string): { token: string; mtimeMs: number } | undefin
   }
 }
 
-/** Take over the lock `token` names, having judged it abandoned.
+/** Whether a lock may be taken from its holder.
  *
- *  `statSync` then an unconditional `unlinkSync` is not enough, and the gap is
- *  not theoretical: every contender that finds the same dead holder's lock
- *  passes the staleness test together, so the first to unlink takes a fresh
- *  lock and the ones behind it then delete THAT and take their own. The lock
- *  admits everybody precisely when it is contended, which is when it matters --
- *  concurrent writers over aliases.json, ssh_config and known_hosts, i.e. lost
- *  aliases, stanzas and anchors.
+ *  The holder's PROCESS is the first question, and for the locks that guard
+ *  files it is the only one. A holder that is merely SLOW is still a holder:
+ *  judging it by the age of its lock and breaking it admits a second writer to
+ *  aliases.json, ssh_config or known_hosts while the first is still inside the
+ *  section -- and, worse, still able to RELEASE, which is what made the old
+ *  takeover racy: its release between the breaker's check and the breaker's
+ *  act let a third process create a fresh lock there for the breaker to
+ *  destroy. A holder whose process is GONE can do neither, and that is what
+ *  makes breaking its lock safe. Those callers pass `staleMs = Infinity`: they
+ *  never break a live holder, and when a pid cannot be judged -- a lock taken
+ *  from another machine sharing the home, a pid reused by an unrelated process
+ *  -- they stay busy and name the file to remove.
  *
- *  So breaking a lock is itself mutually exclusive, and the right to do it is
- *  claimed with a HARDLINK named after the token being broken:
+ *  The renewal lock ALSO breaks by age, because what it guards is a duplicate
+ *  request rather than a file: two renewals that both get through each commit
+ *  under aliases.lock, where the second finds a fresh certificate and gives
+ *  up. A wedged renewal lock, on the other hand, silently stops one alias
+ *  renewing, so it must not depend on a pid that may be unjudgeable.
  *
- *   - link(2) is atomic and fails with EEXIST, so of all the contenders that
- *     observed this token exactly one may proceed.
- *   - It is non-destructive. A hardlink adds a NAME; it does not move or remove
- *     the lock. There is no window in which the file is missing, so nothing can
- *     slip in through one -- unlike moving it aside to inspect it, which opens
- *     the very gap this exists to close.
- *   - Only after that is the lock re-read and required to still be the exact
- *     one judged stale. Tokens are unique per acquisition, so a takeover in
- *     between shows up as different bytes and the live lock is left alone.
+ *  A lock with no readable pid -- a process that died between the exclusive
+ *  create and the write, or a hand-edited file -- can never be released by
+ *  anyone, and is judged by age against a bound no live creator could spend
+ *  between two consecutive syscalls. */
+function isAbandoned({ token, mtimeMs }: { token: string; mtimeMs: number }, now: number, staleMs: number): boolean {
+  const pid = holderPid(token)
+  if (pid !== undefined && !processAlive(pid)) return true
+  const bound = pid === undefined ? Math.min(staleMs, ORPHAN_LOCK_STALE_MS) : staleMs
+  return now - mtimeMs >= bound
+}
+
+/** How old a lock with no readable owner must be before it is broken. */
+const ORPHAN_LOCK_STALE_MS = 60_000
+
+function holderPid(token: string): number | undefined {
+  const m = /^(\d+):/.exec(token)
+  const pid = m ? Number(m[1]) : NaN
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
+}
+
+/** Whether a process with this pid exists on this machine. EPERM means it
+ *  exists and is not ours; anything but ESRCH is "cannot tell", which reads as
+ *  alive -- cannot-confirm is not a licence to take somebody's lock. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code !== 'ESRCH'
+  }
+}
+
+/** Take over the lock `stale` names, having judged it abandoned, by writing
+ *  `mine` into it. True when `path` now carries `mine`.
  *
- *  Residual, and deliberately not "fixed": a process killed between the link
- *  and the unlink in `finally` leaves the claim behind, and that one lock file
- *  can then no longer be broken (deleting it by hand is the way out). Every
- *  scheme for reaping an abandoned claim needs to decide the claim is dead and
- *  then remove it -- the same check-then-act this function exists to eliminate,
- *  one level up. A wedged lock is recoverable; two writers in the same section
- *  silently lose the user's config. */
-function breakStaleLock(path: string, token: string, take: () => (() => void) | undefined): (() => void) | undefined {
-  const claim = `${path}.stale.${createHash('sha256').update(token).digest('hex').slice(0, 32)}`
+ *  Two things have to hold at once, and the two primitives are chosen for
+ *  exactly them.
+ *
+ *  Breaking a lock is itself mutually exclusive. Every contender that finds
+ *  the same dead holder's lock passes isAbandoned together, and without a
+ *  serialisation point the first to act takes a fresh lock and the ones behind
+ *  it destroy THAT and take their own -- the lock admitting everybody
+ *  precisely when it is contended. So the right to break is claimed with a
+ *  HARDLINK named after the token being broken: link(2) is atomic and fails
+ *  with EEXIST, so of all the contenders that observed this token exactly one
+ *  proceeds; and it is non-destructive -- a hardlink adds a name, it does not
+ *  move or remove the lock, so there is no window in which the file is
+ *  missing for something to slip in through.
+ *
+ *  And the takeover NEVER UNLINKS THE PATH. The first version verified the
+ *  token, unlinked the lock and created its own, and nothing tied that unlink
+ *  to the inode it had verified: a holder releasing in between let a third
+ *  process create a fresh lock at the path, which the breaker then deleted.
+ *  Here the breaker writes its token INTO the inode the two names share.
+ *  `path` keeps its inode throughout, so there is no moment at which the lock
+ *  at `path` can have become somebody else's between the check and the act:
+ *  the holder judged dead cannot release, every other breaker is behind the
+ *  claim, and a release by anyone else checks for its own token first. Should
+ *  the old holder's release ever run, it reads a foreign token and leaves the
+ *  file alone.
+ *
+ *  Residual, and deliberately not "fixed": a breaker killed between the link
+ *  and its write leaves the claim behind, and that one token can then no
+ *  longer be broken (removing the claim by hand is the way out, and the busy
+ *  message names the lock). Every scheme for reaping an abandoned claim needs
+ *  to decide the claim is dead and then remove it -- the same check-then-act
+ *  this function exists to eliminate, one level up. A claim left behind AFTER
+ *  the write is inert: the lock now carries the breaker's token, and the next
+ *  breaker keys its claim on that. A wedged lock is recoverable and says so;
+ *  two writers in the same section silently lose the user's config. */
+function breakStaleLock(path: string, stale: string, mine: string): boolean {
+  const claim = `${path}.stale.${createHash('sha256').update(stale).digest('hex').slice(0, 32)}`
   try {
     linkSync(path, claim)
   } catch {
     // EEXIST: somebody else is already breaking this one. ENOENT: it is gone.
     // Anything else (a filesystem with no hardlinks) means we cannot establish
     // who is entitled to break it -- and cannot-establish is not a licence to
-    // delete somebody's lock. Failing closed costs a renewal that gets skipped
+    // take somebody's lock. Failing closed costs a renewal that gets skipped
     // or a `--setup` that reports the file as busy; failing open costs the
     // user's ssh_config. The caller retries if it waits.
-    return undefined
+    return false
   }
   try {
-    if (readFileSync(path, 'utf8') !== token) return undefined
-    unlinkSync(path)
-    return take()
+    // Still the lock that was judged abandoned: tokens are unique per
+    // acquisition, so a takeover in between shows up as different bytes.
+    if (readFileSync(path, 'utf8') !== stale) return false
+    writeFileSync(claim, mine)
+    // Read back through `path`, the name everybody else uses: the lock is ours
+    // only if that is what they will see.
+    return readFileSync(path, 'utf8') === mine
   } catch {
-    return undefined
+    return false
   } finally {
-    try { unlinkSync(claim) } catch { /* the inode is released with the last name */ }
+    try { unlinkSync(claim) } catch { /* the inode keeps its other name */ }
   }
 }
 
