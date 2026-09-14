@@ -778,10 +778,16 @@ type SSHOpts = LifeOpts & { setup?: boolean; ensureCert?: string; json?: boolean
 
 /** What an alias stands for. The renewal hook is handed nothing but the alias —
  *  no positional argument, no guarantee the cwd is even a linked project — so
- *  everything needed to re-issue THE SAME certificate has to be recorded here.
- *  Without the branch, a renewal silently picks a different branch's service. */
+ *  everything needed to re-issue THE SAME certificate has to be recorded here. */
 export type AliasRecord = {
   projectId: string
+  /** The branch the alias was set up on, when the project had one.
+   *
+   *  Collision identity, NOT addressing: renewal reaches the service through
+   *  projectId + serviceId, which names it outright, so the branch is never
+   *  part of the mint request. It exists for assertAliasFree, where it is the
+   *  only thing telling two same-named services on two branches of one project
+   *  apart -- without it the second `--setup` silently repoints the alias. */
   branch?: string
   serviceId: string
   host: string

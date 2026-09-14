@@ -220,6 +220,68 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
     effective('api.insta', body)
     expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(['api.insta'])
   })
+
+  // Whether the path QUOTING is right is not a question a string assertion can
+  // settle -- only OpenSSH's own parser can, and what it does with an unquoted
+  // spaced path is reject the entire FILE rather than the one directive.
+  const SPACED = '/Users/Jun Wen/.insta/ssh'
+
+  const spacedBlock = () => renderConfigBlock({
+    entries: [{
+      alias: 'api.insta',
+      hostName: 'ssh.us-west-1.compute.example',
+      user: 'svc-abc',
+      certificateFile: `${SPACED}/api.insta-cert.pub`,
+    }],
+    identityFile: `${SPACED}/id_ed25519`,
+  })
+
+  it('keeps a home directory containing a space in one piece', () => {
+    // The paths need not exist: `ssh -G` reports the configured value, which is
+    // the thing at issue -- unquoted, ssh sees `/Users/Jun` and a stray argument.
+    const g = effective('api.insta', spacedBlock())
+    expect(g.get('identityfile'), 'the spaced IdentityFile arrived truncated').toBe(`${SPACED}/id_ed25519`)
+    expect(g.get('certificatefile')).toBe(`${SPACED}/api.insta-cert.pub`)
+    expect(g.get('hostname')).toBe('ssh.us-west-1.compute.example')
+  })
+
+  it("does not take the user's unrelated connections down with it", () => {
+    // Why this is critical rather than cosmetic: the block is inserted into
+    // ~/.ssh/config, and a file OpenSSH refuses is refused for EVERY host --
+    // so a bad path of ours breaks the user's github.com too.
+    const body = upsertConfigBlock('Host *\n  ServerAliveInterval 77\n', spacedBlock())
+    const g = effective('some.unrelated.host', body)
+    expect(g.get('serveraliveinterval'), 'a spaced path in OUR block broke the whole config').toBe('77')
+    expect(g.get('hostname')).toBe('some.unrelated.host')
+  })
+
+  it('is the quoting that saves it, not luck', () => {
+    // The negative control. Without it the two tests above would also pass for
+    // a renderer that quotes nothing, since nothing else here has a space.
+    // Same block, quotes stripped: OpenSSH must refuse it.
+    const cfg = join(dir, 'unquoted')
+    writeFileSync(cfg, spacedBlock().replace(/"/g, ''), { mode: 0o600 })
+    expect(() => execFileSync('ssh', ['-G', '-F', cfg, 'api.insta'], { encoding: 'utf8', stdio: 'pipe' }),
+      'an unquoted spaced path was accepted, so these tests prove nothing').toThrow()
+  })
+
+  it('parses the Windows form of a spaced home directory', () => {
+    // Windows CI cannot run this describe (Match exec wants a POSIX shell, and
+    // ssh.exe ACL-checks a `-F` config), so the shape quoteConfigPath produces
+    // for `C:\Users\Jun Wen\...` is put in front of a real parser here instead.
+    // The forward slashes are what makes it parseable at all: OpenSSH reads a
+    // backslash as an escape introducer, so `\U` would be eaten.
+    const g = effective('api.insta', renderConfigBlock({
+      entries: [{
+        alias: 'api.insta', hostName: 'ssh.us-west-1.compute.example', user: 'svc-abc',
+        certificateFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\api.insta-cert.pub',
+      }],
+      identityFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\id_ed25519',
+      platform: 'win32',
+    }))
+    expect(g.get('identityfile')).toBe('C:/Users/Jun Wen/.insta/ssh/id_ed25519')
+    expect(g.get('certificatefile')).toBe('C:/Users/Jun Wen/.insta/ssh/api.insta-cert.pub')
+  })
 })
 
 describe('known_hosts trust anchor', () => {

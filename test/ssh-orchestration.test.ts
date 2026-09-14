@@ -458,3 +458,210 @@ describe('the renewal lock survives a holder that outlives the staleness window'
     c!()
   })
 })
+
+// Everything above either stubs the two install steps or asserts a REFUSAL.
+// Between them they leave the path the feature actually exists for untested:
+// pick the endpoint, validate the response, write the certificate, record the
+// alias, install the anchor and install the config -- together, against a real
+// filesystem. A suite of refusals is satisfied by a command that refuses
+// everything, so these are the positive control for the whole orchestration.
+//
+// The install steps run for real (installCA/installConfig left undefined so
+// computeSSH falls back to its own), writing into the redirected home.
+describe.skipIf(!keygen)('a successful --setup installs everything the alias needs', () => {
+  const sshDir = () => join(home, '.ssh')
+  const real = { installCA: undefined, installConfig: undefined }
+
+  it('writes the certificate, the anchor and the config block', async () => {
+    const { deps: d, lines } = deps(real)
+    await computeSSH('api', { setup: true }, d)
+
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8'),
+      'the certificate the alias authenticates with was never written').toBe(CERT + '\n')
+
+    // An EXACT anchor: `ssh.us-west-1.compute.example` is not under a suffix we
+    // own, so hostPatternFor refuses to widen the region label.
+    const knownHosts = readFileSync(join(sshDir(), 'known_hosts'), 'utf8')
+    expect(knownHosts).toContain(`@cert-authority ssh.us-west-1.compute.example ${CA}`)
+    expect(knownHosts, 'the anchor was not tagged as ours, so rotation cannot retire it').toContain('# insta compute ssh')
+
+    const cfg = readFileSync(join(sshDir(), 'config'), 'utf8')
+    expect(cfg).toContain('# BEGIN insta compute ssh')
+    expect(cfg).toContain('Host api.insta')
+    expect(cfg).toContain('HostName ssh.us-west-1.compute.example')
+    expect(cfg).toContain('User u-svc-1')
+    expect(cfg).toContain('IdentitiesOnly yes')
+    // Quoted, and from the real instaKeyPath/instaCertPath -- the check that
+    // the rendering is wired to the paths actually written above.
+    expect(cfg).toContain(`IdentityFile "${join(home, '.insta', 'ssh', 'id_ed25519')}"`)
+    expect(cfg).toContain(`CertificateFile "${instaCertPath('api.insta')}"`)
+    // Without this the alias works exactly until the first certificate expires.
+    expect(cfg, 'nothing renews the certificate').toContain('Match originalhost api.insta exec "insta __ssh-ensure-cert api.insta"')
+    expect(cfg.trimEnd().endsWith('# END insta compute ssh')).toBe(true)
+
+    expect(readAliasStore()['api.insta']).toMatchObject({
+      projectId: 'proj-1', serviceId: 'svc-1', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1',
+    })
+    expect(lines[0]).toContain('ssh api.insta')
+  })
+
+  it('keeps the config the user already had, below ours', async () => {
+    // The block is PREPENDED into a file the user owns; losing their settings
+    // is the failure that turns a convenience into an incident.
+    mkdirSync(sshDir(), { recursive: true })
+    writeFileSync(join(sshDir(), 'config'), 'Host bastion\n  User someone\n')
+    const { deps: d } = deps(real)
+    await computeSSH('api', { setup: true }, d)
+    const cfg = readFileSync(join(sshDir(), 'config'), 'utf8')
+    expect(cfg, "the user's own stanza was dropped").toContain('Host bastion')
+    expect(cfg.indexOf('# BEGIN insta compute ssh'),
+      'our block landed below the user config, where first-wins makes it inert').toBeLessThan(cfg.indexOf('Host bastion'))
+    // And the previous contents stay recoverable.
+    expect(readFileSync(join(sshDir(), 'config.insta-bak'), 'utf8')).toBe('Host bastion\n  User someone\n')
+  })
+
+  it('renders every alias set up so far, not just this one', async () => {
+    // The block is replaced wholesale, so a second --setup that rendered only
+    // its own entry would silently delete the first service's stanza.
+    writeAliasStore({
+      'worker.insta': { projectId: 'proj-1', serviceId: 'svc-9', host: 'ssh.eu-west-1.compute.example', username: 'u-svc-9' },
+    })
+    const { deps: d } = deps(real)
+    await computeSSH('api', { setup: true }, d)
+    const cfg = readFileSync(join(sshDir(), 'config'), 'utf8')
+    expect(cfg).toContain('Host api.insta')
+    expect(cfg, 'the previously configured service lost its stanza').toContain('Host worker.insta')
+  })
+
+  it('leaves ~/.ssh untouched without --setup', async () => {
+    const { deps: d } = deps(real)
+    await computeSSH('api', {}, d)
+    expect(existsSync(join(sshDir(), 'config')), 'a plain issue edited the ssh config').toBe(false)
+    expect(existsSync(join(sshDir(), 'known_hosts'))).toBe(false)
+  })
+})
+
+describe.skipIf(!keygen)('the branch the alias was set up on is the one it stays on', () => {
+  // `branch` is stored so assertAliasFree can tell two same-named services
+  // apart. Nothing else read it, and nothing verified it was recorded at all.
+  const recordingApi = (paths: string[]) => async () => ({
+    request: async (_m: string, path: string) => {
+      paths.push(path)
+      return { services: [{ id: 'svc-1', name: 'api', type: 'compute' }] }
+    },
+  } as never)
+
+  it('resolves the service on --branch, not the linked one', async () => {
+    const paths: string[] = []
+    const { deps: d } = deps({ loadApi: recordingApi(paths), loadProject: project('proj-1', 'main') })
+    await computeSSH('api', { branch: 'feature-x' }, d)
+    expect(paths[0], '--branch was ignored, so a different branch\'s service was set up').toBe('/projects/proj-1/services?branch=feature-x')
+    expect(readAliasStore()['api.insta']).toMatchObject({ branch: 'feature-x' })
+  })
+
+  it('falls back to the linked branch', async () => {
+    const paths: string[] = []
+    const { deps: d } = deps({ loadApi: recordingApi(paths), loadProject: project('proj-1', 'main') })
+    await computeSSH('api', {}, d)
+    expect(paths[0]).toBe('/projects/proj-1/services?branch=main')
+    expect(readAliasStore()['api.insta']).toMatchObject({ branch: 'main' })
+  })
+
+  it('omits the branch entirely when the project has none', async () => {
+    // Stored as ABSENT rather than as an empty string: assertAliasFree compares
+    // `held.branch ?? ''` to `want.branch ?? ''`, so the two must not diverge.
+    const paths: string[] = []
+    const { deps: d } = deps({ loadApi: recordingApi(paths), loadProject: project('proj-1') })
+    await computeSSH('api', {}, d)
+    expect(paths[0]).toBe('/projects/proj-1/services')
+    expect(readAliasStore()['api.insta']).not.toHaveProperty('branch')
+  })
+
+  it('refuses the same alias on a different branch of the same project', async () => {
+    // The collision this field exists for, and the one case the branch is the
+    // ONLY thing distinguishing: same project, same service name, two branches.
+    writeAliasStore({
+      'api.insta': { projectId: 'proj-1', branch: 'main', serviceId: 'svc-2', host: 'ssh.us-west-1.compute.example', username: 'u-svc-2' },
+    })
+    const { deps: d, minted } = deps({ loadProject: project('proj-1', 'feature-x') })
+    await expect(computeSSH('api', {}, d)).rejects.toThrow(/already set up for a different service/)
+    expect(minted, 'a certificate was minted for an alias about to be refused').toHaveLength(0)
+  })
+})
+
+describe.skipIf(!keygen)('an automatic renewal replaces the certificate it was issued for', () => {
+  // The hook's SUCCESS path, through the real mintCert and the real anchor
+  // install -- only the transport is faked. Everything previously exercised
+  // here was a give-up path, which a hook that always gave up would satisfy.
+  const renew = async (respond: (url: string) => { status: number; body: unknown }) => {
+    const urls: string[] = []
+    const mod = await import('../src/api.js')
+    const fetchImpl = async (url: string) => {
+      urls.push(url)
+      const r = respond(url)
+      return { status: r.status, text: async () => JSON.stringify(r.body) }
+    }
+    const spy = vi.spyOn(mod.ApiClient, 'load').mockResolvedValue(
+      new mod.ApiClient({ apiUrl: 'https://example.invalid', accessToken: 't' } as never, fetchImpl as never),
+    )
+    try { await ensureCertForAlias('api.insta', 2_000) } finally { spy.mockRestore() }
+    return urls
+  }
+
+  const good = {
+    certificate: CERT, host: 'ssh.us-west-1.compute.example',
+    username: 'u-svc-1', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA,
+  }
+
+  beforeEach(() => {
+    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    // Not a parseable certificate, so `ssh-keygen -L` fails and certNeedsRenewal
+    // reads it as "cannot confirm" -- which is how renewal is actually reached.
+    writeFileSync(instaCertPath('api.insta'), 'the-expiring-certificate\n')
+    writeAliasStore({
+      'api.insta': { projectId: 'proj-1', branch: 'feature-x', serviceId: 'svc-1', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1' },
+    })
+  })
+
+  it('addresses the recorded project and service, and installs the rotated anchor', async () => {
+    const urls = await renew(() => ({ status: 200, body: good }))
+    // The alias is the hook's ONLY input -- there is no cwd to consult and no
+    // guarantee it is a linked project -- so the stored record is what the
+    // request is built from. serviceId identifies the service outright, which
+    // is why the stored branch does not appear here: it is collision identity,
+    // not addressing.
+    expect(urls).toEqual(['https://example.invalid/projects/proj-1/services/svc-1/ssh-cert'])
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8'),
+      'the near-expiry certificate was never replaced').toBe(CERT + '\n')
+    // Re-installed on EVERY renewal, so a rotated CA is trusted before the
+    // retired one stops signing rather than at the user's next --setup.
+    expect(readFileSync(join(home, '.ssh', 'known_hosts'), 'utf8'))
+      .toContain(`@cert-authority ssh.us-west-1.compute.example ${CA}`)
+  })
+
+  it('renews without an anchor when the response carries no CA key', async () => {
+    // Unlike --setup, the hook promises no anchor: refusing here would break
+    // renewal for an already-working alias over something it never guaranteed.
+    const { caPublicKey: _, ...noCA } = good
+    await renew(() => ({ status: 200, body: noCA }))
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe(CERT + '\n')
+    expect(existsSync(join(home, '.ssh', 'known_hosts')),
+      'a response with no CA key still wrote a known_hosts').toBe(false)
+  })
+
+  it('leaves both files alone when the CA key is malformed', async () => {
+    // Validated before anything is written, so a bad key costs the renewal --
+    // the alias keeps working on the certificate it has -- rather than
+    // appending an unusable anchor or replacing a live credential.
+    await renew(() => ({ status: 200, body: { ...good, caPublicKey: `${CA}\n@cert-authority * ${CA}` } }))
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe('the-expiring-certificate\n')
+    expect(existsSync(join(home, '.ssh', 'known_hosts'))).toBe(false)
+  })
+
+  it('does nothing at all for an alias it has no record of', async () => {
+    writeAliasStore({})
+    const urls = await renew(() => ({ status: 200, body: good }))
+    expect(urls, 'the hook called the platform for an alias it knows nothing about').toEqual([])
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe('the-expiring-certificate\n')
+  })
+})
