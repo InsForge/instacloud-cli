@@ -38,7 +38,7 @@ function stdoutLines(fn: () => Promise<unknown>): Promise<string[]> {
   const lines: string[] = []
   const write = process.stdout.write.bind(process.stdout)
   process.stdout.write = ((s: string) => { lines.push(String(s)); return true }) as typeof process.stdout.write
-  return fn().finally(() => { process.stdout.write = write }).then(() => lines, () => lines)
+  return fn().finally(() => { process.stdout.write = write }).then(() => lines)
 }
 
 describe('claimGrant', () => {
@@ -54,6 +54,50 @@ describe('claimGrant', () => {
     const { post, wait, waits } = fakeFlow(['slow_down', 'http:429', 'authorization_pending', 'token:insta_x'])
     await expect(claimGrant('me@example.com', 'unknown', post, wait)).resolves.toBe('insta_x')
     expect(waits).toEqual([5, 10, 15, 15])
+  })
+
+  it('clamps a huge server-supplied interval instead of hot-polling', async () => {
+    const hugeStart = { ...START, claim: { ...START.claim, interval: Number.MAX_VALUE } }
+    const post: ClaimPoster = async (path) => {
+      if (path === '/agent/auth') return hugeStart
+      if (path === '/api/auth/oauth2/token') return { access_token: 'insta_x' }
+      throw new Error(`unexpected path ${path}`)
+    }
+    const waits: number[] = []
+    await expect(claimGrant('me@example.com', 'unknown', post, async (s) => { waits.push(s) })).resolves.toBe('insta_x')
+    expect(waits).toEqual([3600])
+  })
+
+  it('clamps a zero interval up to 1s', async () => {
+    const zeroStart = { ...START, claim: { ...START.claim, interval: 0 } }
+    const post: ClaimPoster = async (path) => {
+      if (path === '/agent/auth') return zeroStart
+      if (path === '/api/auth/oauth2/token') return { access_token: 'insta_x' }
+      throw new Error(`unexpected path ${path}`)
+    }
+    const waits: number[] = []
+    await expect(claimGrant('me@example.com', 'unknown', post, async (s) => { waits.push(s) })).resolves.toBe('insta_x')
+    expect(waits).toEqual([1])
+  })
+
+  it('falls back to 5s when the interval is missing or NaN', async () => {
+    const { user_code, expires_in, verification_uri } = START.claim
+    const noIntervalStart = { ...START, claim: { user_code, expires_in, verification_uri } }
+    const post: ClaimPoster = async (path) => {
+      if (path === '/agent/auth') return noIntervalStart
+      if (path === '/api/auth/oauth2/token') return { access_token: 'insta_x' }
+      throw new Error(`unexpected path ${path}`)
+    }
+    const waits: number[] = []
+    await expect(claimGrant('me@example.com', 'unknown', post, async (s) => { waits.push(s) })).resolves.toBe('insta_x')
+    expect(waits).toEqual([5])
+  })
+
+  it('clamps a negative re-mint interval up to 1s', async () => {
+    const remint = { registration_id: 'reg_1', claim_attempt_id: 'cla_4', status: 'initiated', expires_at: 'x', claim_attempt: { user_code: '404040', expires_in: 600, verification_uri: 'https://console.test/claim?claim_attempt_token=cat_4', interval: -3 } }
+    const { post, wait, waits } = fakeFlow(['expired_token', 'token:insta_new'], remint)
+    await expect(claimGrant('me@example.com', 'unknown', post, wait)).resolves.toBe('insta_new')
+    expect(waits[1]).toBe(1)
   })
 
   it('prints the link and code once, opens the browser only when asked', async () => {

@@ -221,6 +221,12 @@ type ClaimBlock = { user_code: string; expires_in: number; verification_uri: str
 type ClaimStart = { registration_id: string; claim_token: string; claim_token_expires: string; claim: ClaimBlock }
 export type ClaimPoster = (path: string, body: Record<string, unknown>, signal?: AbortSignal) => Promise<any>
 
+// A poll interval is seconds, from the server: clamp it so a silly value cannot become a ~1 ms timer.
+const pollInterval = (value: unknown, fallback: number): number => {
+  const n = Number(value)
+  return Number.isFinite(n) ? Math.min(Math.max(n, 1), 3600) : fallback
+}
+
 export async function claimGrant(email: string, client: string, post: ClaimPoster, wait: (s: number) => Promise<void> = sleepSeconds, open?: (url: string) => boolean, now: () => number = Date.now): Promise<string> {
   const start = (await post('/agent/auth', { type: 'service_auth', login_hint: email, client })) as ClaimStart
   if (!start?.claim_token || !start.claim?.user_code || !start.claim.verification_uri) {
@@ -236,8 +242,7 @@ export async function claimGrant(email: string, client: string, post: ClaimPoste
   }
   show(start.claim, false)
   info(`waiting for ${email} to confirm… (ctrl-c to abort)`)
-  const rawInterval = Number(start.claim.interval)
-  let interval = Number.isFinite(rawInterval) ? Math.max(rawInterval, 1) : 5
+  let interval = pollInterval(start.claim.interval, 5)
   let reminted = false
   const expired = () => new Error(`the request expired before ${email} confirmed it — run \`insta login --claim ${email}\` again`)
   while (now() < deadline) {
@@ -253,7 +258,7 @@ export async function claimGrant(email: string, client: string, post: ClaimPoste
       if (!(e instanceof ApiError)) continue // transport blip — keep polling until the deadline
       const code = e.message
       if (code === 'authorization_pending') continue
-      if (code === 'slow_down' || e.status === 429) { interval += 5; continue }
+      if (code === 'slow_down' || e.status === 429) { interval = Math.min(interval + 5, 3600); continue }
       if (code === 'expired_token') {
         if (reminted) throw expired()
         let again: { claim_attempt?: ClaimBlock }
@@ -266,8 +271,7 @@ export async function claimGrant(email: string, client: string, post: ClaimPoste
         }
         reminted = true
         if (!again?.claim_attempt?.user_code || !again.claim_attempt.verification_uri) throw new Error('malformed claim response (missing claim_attempt)')
-        const fresh = Number(again.claim_attempt.interval)
-        if (Number.isFinite(fresh)) interval = Math.max(fresh, 1)
+        interval = pollInterval(again.claim_attempt.interval, interval)
         show(again.claim_attempt, true)
         continue
       }
