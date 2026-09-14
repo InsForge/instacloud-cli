@@ -1,6 +1,6 @@
 // Thin API client over the platform control-plane. Handles bearer auth + one-shot refresh on 401.
 // 2xx (including 202 approval_required) returns the parsed body; >=400 throws ApiError.
-import { readGlobal, writeGlobal, readProject, writeProject, resolveProjectLink, foreignLinkMessage, type GlobalConfig, type ProjectConfig } from './config.js'
+import { readGlobal, writeGlobal, readProject, persistAutoLink, resolveProjectLink, foreignLinkMessage, type GlobalConfig, type ProjectConfig } from './config.js'
 import { autoResolveProject, promptChoice, type ProjectItem } from './resolve-project.js'
 import { die } from './util.js'
 import { USER_AGENT } from './version.js'
@@ -144,10 +144,15 @@ export async function requireProject(deps: RequireProjectDeps = {}): Promise<Pro
         (await api.request<{ projects: ProjectItem[] }>('GET', `/orgs/${orgId}/projects`)).projects,
       promptChoice,
       save: async (c) => {
-        await writeProject(c)
         // stderr: this is a diagnostic that can precede ANY command's output — under --json,
         // stdout must stay one parseable document.
-        process.stderr.write(`auto-linked project ${c.projectId} → ./.insta/project.json\n`)
+        if (await persistAutoLink(c)) {
+          process.stderr.write(`auto-linked project ${c.projectId} → ./.insta/project.json\n`)
+        } else {
+          // The home directory never holds a link (~/.insta is the global config): use the choice
+          // for this command instead of failing it after the picker has already run.
+          process.stderr.write(`using project ${c.projectId} for this command — not saving a link in the home directory; run inside a project directory to remember it\n`)
+        }
       },
       tty: !!process.stdin.isTTY && !!process.stderr.isTTY,
     })

@@ -1,7 +1,7 @@
 // CLI config: global (~/.insta/config.json: api url + tokens) and per-project (./.insta/project.json).
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { ensureGitignore } from './gitignore.js'
 import { die } from './util.js'
 import { DEFAULT_ENV, ENVS, envForApiUrl, envFromEnvVar, normalizeUrl, type EnvName } from './env.js'
@@ -117,6 +117,19 @@ export async function writeGlobal(c: GlobalConfig): Promise<void> {
  *  dir inherit it, and `insta project link` run anywhere below home silently overwrote it. */
 function isHomeDir(dir: string): boolean {
   return resolve(dir) === resolve(homedir())
+}
+
+export const HOME_LINK_REFUSAL = 'refusing to link the home directory — ~/.insta is the insta CLI\'s global config, not a project. Run this inside a project directory'
+
+/** Where a link written from `cwd` lands: the existing project root, or `cwd` itself. */
+async function linkTarget(cwd: string): Promise<string> {
+  return (await findProjectRoot(cwd)) ?? resolve(cwd)
+}
+
+/** True when a link written from `cwd` would land in the home directory, which never holds one.
+ *  Lets a caller refuse BEFORE it does anything else with side effects. */
+export async function isHomeLinkTarget(cwd = process.cwd()): Promise<boolean> {
+  return isHomeDir(await linkTarget(cwd))
 }
 
 /** Git-style ancestor lookup: the nearest directory at-or-above `cwd` containing
@@ -243,11 +256,26 @@ function safeText(text: string): string {
   return String(text).replace(/[\u0000-\u001f\u007f]/g, '')
 }
 
-/** A control-plane URL safe to persist and to print: control characters removed, then any
- *  userinfo (INSTA_API_URL may carry credentials). The userinfo goes by pattern, not by parsing: a
- *  value URL() rejects — a stray escape character is enough — must not keep its credentials. */
+/** A control-plane URL safe to persist and to print: control characters removed, surrounding
+ *  whitespace trimmed, and any userinfo (INSTA_API_URL may carry credentials) removed.
+ *
+ *  Userinfo is removed with the same WHATWG parser fetch uses, not with a pattern. That parser is
+ *  lenient in ways a pattern keeps missing: it accepts leading whitespace, `\` for `/`, and a
+ *  missing `//` on special schemes, and each of those defeated an anchored pattern while fetch
+ *  would still have sent the credentials. A value the parser rejects is never requested, but it can
+ *  still be stored or printed, so everything up to its last `@` is dropped. */
 export function safeUrl(url: string): string {
-  return safeText(url).replace(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/?#]*@/, '$1')
+  const text = safeText(url).trim()
+  let parsed: URL
+  try {
+    parsed = new URL(text)
+  } catch {
+    return text.includes('@') ? text.slice(text.lastIndexOf('@') + 1) : text
+  }
+  if (!parsed.username && !parsed.password) return text
+  parsed.username = ''
+  parsed.password = ''
+  return parsed.href
 }
 
 /** Writes to the existing project root when inside a linked project (branch switches from a
@@ -255,14 +283,26 @@ export function safeUrl(url: string): string {
  *  Records the control plane in the machine-local sidecar beside it. Never writes into the home
  *  directory: `~/.insta/` is the global config, not a project. */
 export async function writeProject(c: ProjectConfig, cwd = process.cwd()): Promise<void> {
-  const target = (await findProjectRoot(cwd)) ?? resolve(cwd)
-  if (isHomeDir(target)) {
-    die('refusing to link the home directory — ~/.insta is the insta CLI\'s global config, not a project. Run this inside a project directory')
-  }
+  const target = await linkTarget(cwd)
+  if (isHomeDir(target)) die(HOME_LINK_REFUSAL)
   const { apiUrl } = await readGlobal()
   await mkdir(join(target, PROJECT_DIR), { recursive: true })
   ensureGitignore(target, ['.insta/agent-session.json'], '# Local agent credentials')
   ensureGitignore(target, [`.insta/${LINK_PLANE_FILE}`], '# Local: the control plane this machine linked against')
   await writeFile(join(target, PROJECT_DIR, PROJECT_FILE), JSON.stringify(c, null, 2))
-  await writeFile(join(target, PROJECT_DIR, LINK_PLANE_FILE), JSON.stringify({ projectId: c.projectId, apiUrl: safeUrl(apiUrl) }, null, 2))
+  // Owner-only, like agent-session.json: it can name a private self-hosted box. writeFile's mode
+  // applies only when it creates the file, so an existing record is chmod-ed too.
+  const record = join(target, PROJECT_DIR, LINK_PLANE_FILE)
+  await writeFile(record, JSON.stringify({ projectId: c.projectId, apiUrl: safeUrl(apiUrl) }, null, 2), { mode: 0o600 })
+  await chmod(record, 0o600)
+}
+
+/** Save a link that auto-resolution chose. Unlike an explicit `insta project link`, the command it
+ *  was resolved for must still run: in the home directory the choice is used for this command and
+ *  simply not remembered, rather than showing the picker and then failing the command. Returns
+ *  whether the link was saved. */
+export async function persistAutoLink(c: ProjectConfig, cwd = process.cwd()): Promise<boolean> {
+  if (await isHomeLinkTarget(cwd)) return false
+  await writeProject(c, cwd)
+  return true
 }

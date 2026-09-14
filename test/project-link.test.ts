@@ -1,11 +1,12 @@
 // "Link once and it works" requires git-style ancestor lookup: commands run from any
 // subdirectory of a linked project must resolve the SAME link, and updates (branch switch)
 // must rewrite the link at the project root — never mint a nested .insta in the subdir.
-import { test, expect, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { test, expect, afterEach, vi } from 'vitest'
+import { chmodSync, mkdtempSync, mkdirSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { foreignLinkMessage, readProject, resolveProjectLink, writeProject } from '../src/config.js'
+import { foreignLinkMessage, persistAutoLink, readProject, resolveProjectLink, safeUrl, writeProject } from '../src/config.js'
+import { normalizeUrl } from '../src/env.js'
 import { CliExit } from '../src/util.js'
 
 const proj = { projectId: 'p-1', orgId: 'o-1', branch: 'main' }
@@ -211,4 +212,96 @@ test('a record whose URL carries credentials still matches its own control plane
   writeFileSync(planeFile(root), JSON.stringify({ projectId: 'p-1', apiUrl: 'https://user:pw@api.cloud.example' }))
   expect((await resolveProjectLink(root))?.foreign).toBeUndefined()
   expect(await readProject(root)).toMatchObject({ projectId: 'p-1' })
+})
+
+// ---- credentials never survive, in any form fetch would still send them ----------------------
+// safeUrl used to strip userinfo with a pattern anchored at the start of the string. The WHATWG URL
+// parser behind fetch is more lenient than that: each value below is one it accepts WITH the
+// credentials attached (asserted first), and each defeated the pattern.
+
+test.each([
+  ['leading whitespace', ' https://user:token@api.box.example'],
+  ['surrounding whitespace', '  https://user:token@api.box.example  '],
+  ['an uppercase scheme', 'HTTPS://user:token@api.box.example'],
+  ['backslashes for slashes', 'https:\\\\user:token@api.box.example'],
+  ['no slashes after the scheme', 'https:user:token@api.box.example'],
+  ['a password with no username', 'https://:token@api.box.example'],
+])('safeUrl removes credentials given %s', (_label, raw) => {
+  const accepted = new URL(raw.trim())
+  expect(accepted.username || accepted.password).toBeTruthy() // fetch would send these
+  const out = safeUrl(raw)
+  expect(out).not.toContain('token')
+  expect(out).not.toContain('user')
+  expect(normalizeUrl(out)).toBe('https://api.box.example') // still the same control plane
+})
+
+test('a whitespace-padded credentialed INSTA_API_URL is not persisted with its credentials', async () => {
+  process.env.INSTA_API_URL = ' https://user:token@api.box.example '
+  const { root } = linkedProjectWithSubdir()
+  await writeProject(proj, root)
+  expect(readFileSync(planeFile(root), 'utf8')).not.toContain('token')
+  process.env.INSTA_API_URL = BOX
+  expect(await readProject(root)).toMatchObject({ projectId: 'p-1' })
+})
+
+test('a whitespace-padded credentialed record is not printed with its credentials', async () => {
+  const { root } = linkedProjectWithSubdir()
+  process.env.INSTA_API_URL = CLOUD
+  await writeProject(proj, root)
+  writeFileSync(planeFile(root), JSON.stringify({ projectId: 'p-1', apiUrl: ' https://user:token@api.box.example' }))
+  const f = (await resolveProjectLink(root))?.foreign
+  expect(f?.reason).toBe('plane')
+  expect(foreignLinkMessage(f!)).not.toContain('token')
+})
+
+// ---- an auto-resolved choice in the home directory is used, not saved --------------------------
+// Refusing the home directory inside the auto-resolve save made every project command run in ~ show
+// the picker and then fail. An explicit `project link` still refuses; auto-resolution must not.
+
+test('an auto-resolved choice in the home directory is used, not saved, and does not stop the command', async () => {
+  const { home } = fakeHome()
+  await expect(persistAutoLink(proj, home)).resolves.toBe(false)
+  expect(existsSync(linkFile(home))).toBe(false)
+})
+
+test('an auto-resolved choice below the home directory is saved as usual', async () => {
+  const { sub } = fakeHome()
+  await expect(persistAutoLink(proj, sub)).resolves.toBe(true)
+  expect(readJson(linkFile(sub))).toEqual(proj)
+})
+
+// ---- the foreign-link note -------------------------------------------------------------------
+// Under --json, stdout must stay one parseable document, and the note is the only signal some paths
+// give. It goes to stderr, once per link.
+
+test('the foreign-link note goes to stderr, once per link, never to stdout', async () => {
+  const { root } = linkedProjectWithSubdir()
+  process.env.INSTA_API_URL = CLOUD
+  await writeProject(proj, root)
+  process.env.INSTA_API_URL = BOX
+  const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+  try {
+    await readProject(root)
+    await readProject(root)
+    const notes = (calls: unknown[][]) => calls.map((c) => String(c[0])).filter((line) => line.includes('links project p-1'))
+    expect(notes(err.mock.calls)).toHaveLength(1)
+    expect(notes(out.mock.calls)).toHaveLength(0)
+  } finally {
+    err.mockRestore()
+    out.mockRestore()
+  }
+})
+
+// ---- the record is owner-only ------------------------------------------------------------------
+
+test.skipIf(process.platform === 'win32')('the record is readable only by its owner, like agent-session.json, even when it already existed', async () => {
+  process.env.INSTA_API_URL = BOX
+  const { root } = linkedProjectWithSubdir()
+  await writeProject(proj, root)
+  expect(statSync(planeFile(root)).mode & 0o777).toBe(0o600)
+  // An existing record keeps its old mode through writeFile, so the write must tighten it.
+  chmodSync(planeFile(root), 0o644)
+  await writeProject(proj, root)
+  expect(statSync(planeFile(root)).mode & 0o777).toBe(0o600)
 })
