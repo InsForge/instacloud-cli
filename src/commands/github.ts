@@ -1,6 +1,6 @@
 import { ApiClient, ApiError, requireProject } from '../api.js'
 import { agentMode } from '../agent.js'
-import { info, printJson } from '../util.js'
+import { info, printJson, openUrl } from '../util.js'
 import { resolveSoleService, parsePort, q } from './services.js'
 
 export type RepoRef = { owner: string; repo: string }
@@ -91,6 +91,7 @@ export function repoLine(serviceName: string, s: SourceView): string {
 }
 
 type RepoRow = { id: number; owner: string; repo: string; installationId?: number }
+type GitHubView = { linked: boolean; repos: RepoRow[]; installations: { installationId: number; accountLogin: string; accountType: string }[] }
 type GitHubDeviceStart = { state: string; verificationUri: string; userCode: string; interval?: number; expiresAt: string }
 type GitHubDevicePoll = { pending: boolean; slowDownBy?: number; repos?: RepoRow[] }
 
@@ -101,7 +102,7 @@ const pollDelay = (s: number) => Math.min(Math.max(s, 1), 60)
 
 // GitHub shows the person a code to type; the platform holds the device code and finishes the exchange,
 // so nothing secret passes through the CLI.
-export async function authorizeTerminal(api: ApiClient, wait: (s: number) => Promise<void> = sleepSeconds): Promise<RepoRow[]> {
+export async function authorizeTerminal(api: ApiClient, wait: (s: number) => Promise<void> = sleepSeconds, open: typeof openUrl = openUrl): Promise<RepoRow[]> {
   const start = await api.request<GitHubDeviceStart>('POST', '/me/github/device', {})
   const deadline = Date.parse(start.expiresAt)
   // A NaN deadline makes every comparison false, which reads as an instant expiry — or, inverted, as a
@@ -111,6 +112,7 @@ export async function authorizeTerminal(api: ApiClient, wait: (s: number) => Pro
   const say = (line: string) => process.stderr.write(line + '\n')
   say('this terminal is not authorized with GitHub yet — authorize it once:')
   say(`  open ${start.verificationUri} and enter the code ${start.userCode}`)
+  open(start.verificationUri)
   say('waiting for you to confirm… (ctrl-c to abort)')
   const stopAt = Math.min(deadline, Date.now() + 3600_000) // no device code sensibly outlives an hour
   const asked = Number(start.interval)
@@ -143,18 +145,52 @@ export function canAuthorizeHere(opts: { json?: boolean } = {}): boolean {
   return !!agentMode() || !!process.stderr.isTTY
 }
 
-export async function findCallerRepo(api: ApiClient, ref: RepoRef, authorize: typeof authorizeTerminal = authorizeTerminal, canAuthorize = canAuthorizeHere()): Promise<{ installationId: number; repoId: number }> {
-  const mine = await api.request<{ linked: boolean; repos: RepoRow[] }>('GET', '/me/github/repos')
+export async function findCallerRepo(api: ApiClient, ref: RepoRef, authorize: typeof authorizeTerminal = authorizeTerminal, canAuthorize = canAuthorizeHere(), wait: (s: number) => Promise<void> = sleepSeconds, open: typeof openUrl = openUrl): Promise<{ installationId: number; repoId: number }> {
+  let mine = await api.request<GitHubView>('GET', '/me/github/repos')
   if (!mine.linked && !canAuthorize) {
     throw new Error('this GitHub account is not authorized for InstaCloud yet, and nothing here can read the code GitHub shows — run `insta compute connect-repo` from a terminal, connect the repository from the console, or pass --public for a public repository')
   }
-  const repos = mine.linked ? mine.repos : await authorize(api)
-  const whole = (n: unknown) => n !== null && n !== '' && Number.isInteger(Number(n)) && Number(n) > 0
-  const hit = repos.find((r) => r.owner.toLowerCase() === ref.owner.toLowerCase() && r.repo.toLowerCase() === ref.repo.toLowerCase())
-  if (hit && whole(hit.installationId) && whole(hit.id)) return { installationId: Number(hit.installationId), repoId: Number(hit.id) }
-  if (hit) throw new Error(`${ref.owner}/${ref.repo} came back without an installation to build it through — reconnect GitHub in the console, or pass --public for a public repository`)
-  if (repos.length === 0) throw new Error('the InstaCloud GitHub App reaches none of your repositories — install it on the account that owns this one (console → Add Service → GitHub Repo → Connect GitHub), or pass --public for a public repository')
-  throw new Error(`${ref.owner}/${ref.repo} is not one your GitHub account can reach through the App — grant the App access to it on GitHub, or pass --public for a public repository`)
+  const repos = mine.linked ? mine.repos : await authorize(api, wait, open)
+  const lookup = (rows: RepoRow[]) => {
+    const hit = rows.find((r) => r.owner.toLowerCase() === ref.owner.toLowerCase() && r.repo.toLowerCase() === ref.repo.toLowerCase())
+    if (!hit) return
+    const whole = (n: unknown) => n !== null && n !== '' && Number.isInteger(Number(n)) && Number(n) > 0
+    if (!whole(hit.installationId) || !whole(hit.id)) throw new Error(`${ref.owner}/${ref.repo} came back without an installation to build it through — reconnect GitHub in the console, or pass --public for a public repository`)
+    return { installationId: Number(hit.installationId), repoId: Number(hit.id) }
+  }
+  const hit = lookup(repos)
+  if (hit) return hit
+  if (!canAuthorize) throw new Error(`${ref.owner}/${ref.repo} is not one your GitHub account can reach through the App — run \`insta compute connect-repo\` without --json from a terminal to install or configure the App, or pass --public for a public repository`)
+  if (!mine.linked) mine = await api.request<GitHubView>('GET', '/me/github/repos')
+  const installation = mine.installations.find((i) => i.accountLogin.toLowerCase() === ref.owner.toLowerCase())
+  let url: string
+  if (installation) {
+    const settings = installation.accountType === 'Organization' ? `/organizations/${encodeURIComponent(installation.accountLogin)}/settings` : '/settings'
+    url = `https://github.com${settings}/installations/${installation.installationId}`
+  } else {
+    const setup = await api.request<{ installUrl: string }>('POST', '/me/github/setup', {})
+    const install = new URL(setup.installUrl)
+    // The CLI verifies access by polling; this marker only selects the browser's return-to-terminal page.
+    install.searchParams.set('state', 'cli')
+    url = install.toString()
+  }
+  process.stderr.write(`${installation ? 'configure' : 'install'} the InstaCloud GitHub App on ${ref.owner} and grant access to ${ref.owner}/${ref.repo}:\n  ${url}\nIf you cannot change access, ask the account owner or organization admin.\nWaiting for repository access… (ctrl-c to abort)\n`)
+  open(url)
+  const stopAt = Date.now() + 900_000
+  let interval = 5
+  while (Date.now() < stopAt) {
+    await wait(interval)
+    try {
+      mine = await api.request<GitHubView>('GET', '/me/github/repos')
+    } catch (e) {
+      if (e instanceof ApiError && e.status !== 429) throw e
+      interval = pollDelay(interval + 5)
+      continue
+    }
+    const ready = lookup(mine.repos)
+    if (ready) return ready
+  }
+  throw new Error(`timed out waiting for access to ${ref.owner}/${ref.repo} — save the App's repository access on GitHub, then run the command again`)
 }
 
 async function targetService(api: ApiClient, projectId: string, branch: string | undefined, serviceName: string | undefined) {
