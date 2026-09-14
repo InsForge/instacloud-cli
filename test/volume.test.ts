@@ -35,9 +35,9 @@ describe('servicesAddRequestBody --volume', () => {
   it('omits volumeGib when the flag is absent (no volume attached)', () => {
     expect(servicesAddRequestBody('compute', 'api', 'main', {})).not.toHaveProperty('volumeGib')
   })
-  // The free-plan rule: any plan may pass a size up to the free cap (the platform's sizeless default,
-  // 10Gi) — and larger values just forward; the backend enforces paid/cap, so no client-side plan
-  // check exists to test against.
+  // The plan rule: any plan may pass a size up to its own plan cap (the platform's sizeless default
+  // since insta-platform #438; 10Gi free, 50Gi paid) — and larger values just forward; the backend
+  // enforces paid/cap, so no client-side plan check exists to test against.
   it('forwards any whole size unjudged — the backend owns the paid/cap gate', () => {
     expect(servicesAddRequestBody('compute', 'api', 'main', { volume: '100' })).toMatchObject({ volumeGib: 100 })
   })
