@@ -410,11 +410,11 @@ ob.command('sync').description('Upload findings into the project timeline').acti
 // ---- policy ----
 const agentPol = program.command('agent-policy').description('Project agent access policy')
 agentPol.command('get').option('--json').action(guard((o) => agentPolicy.get(o)))
-agentPol.command('set <mode>').description('full-access | read-only | branch-developer')
+agentPol.command('set <mode>').description('full-access | read-only | branch-specific (resets rules; customize comes from `rule set`)')
   .option('--json').action(guard((mode, o) => agentPolicy.set(mode, o)))
 agentPol.command('protect-branch <branch>').option('--json').action(guard((branch, o) => agentPolicy.protect(branch, true, o)))
 agentPol.command('unprotect-branch <branch>').option('--json').action(guard((branch, o) => agentPolicy.protect(branch, false, o)))
-agentPol.command('rule').command('set <action> <decision>').description('Set an unprotected-branch rule: allow | deny | approve')
+agentPol.command('rule').command('set <action> <decision>').description('Set an unprotected-branch rule (allow | deny | approve); moves the policy to customize')
   .option('--json').action(guard((action, decision, o) => agentPolicy.rule(action, decision, o)))
 agentPol.command('revoke-sessions').description('Revoke ALL CLI agent sessions for this project')
   .option('--json').action(guard((o) => agentPolicy.revoke(o)))
