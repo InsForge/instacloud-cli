@@ -757,7 +757,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import {
-  aliasFor, isSafeAlias, renderConfigBlock, upsertCertAuthority, upsertConfigBlock, type HostEntry,
+  aliasFor, isSafeAlias, isSafeConfigValue, renderConfigBlock, upsertCertAuthority, upsertConfigBlock, type HostEntry,
 } from './ssh-config.js'
 
 /** Where this CLI keeps its own SSH material. Deliberately NOT ~/.ssh: we never
@@ -794,10 +794,58 @@ export type AliasStore = Record<string, AliasRecord>
 export function readAliasStore(path = instaAliasStorePath()): AliasStore {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'))
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as AliasStore) : {}
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    // Each RECORD is validated, not just the outer object. A cast here let a
+    // single hand-edited entry through to hostEntries, where a missing host
+    // rendered `HostName undefined` -- and one bad stanza is enough for
+    // OpenSSH to reject the whole file, so every OTHER alias stopped working
+    // too. Dropping the bad entry keeps the blast radius at the entry.
+    const out: AliasStore = {}
+    for (const [alias, r] of Object.entries(parsed as Record<string, unknown>)) {
+      if (isValidAliasRecord(r)) out[alias] = r
+    }
+    return out
   } catch {
     return {}
   }
+}
+
+/** Whether a stored record can still describe a working alias. */
+export function isValidAliasRecord(r: unknown): r is AliasRecord {
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return false
+  const v = r as Record<string, unknown>
+  return typeof v.projectId === 'string' && v.projectId !== ''
+    && typeof v.serviceId === 'string' && v.serviceId !== ''
+    && (v.branch === undefined || typeof v.branch === 'string')
+    && isSafeConfigValue(v.host) && isSafeConfigValue(v.username)
+}
+
+/** Refuse to point an existing alias at a different service.
+ *
+ *  An alias is derived from the SERVICE NAME alone, which is unique only within
+ *  a branch. Two projects that each call a service `api` -- the ordinary case,
+ *  not a contrived one -- would otherwise have the second setup silently
+ *  repoint `api.insta` at the first one's host, and the developer would land a
+ *  shell in the WRONG PROJECT while every visible signal said the command
+ *  worked. Refused by name rather than auto-renamed: picking which `api` they
+ *  meant is the same guess one level up.
+ */
+export function assertAliasFree(
+  store: AliasStore,
+  alias: string,
+  want: { projectId: string; serviceId: string; branch?: string },
+): void {
+  const held = store[alias]
+  if (!held) return
+  const same = held.projectId === want.projectId
+    && held.serviceId === want.serviceId
+    && (held.branch ?? '') === (want.branch ?? '')
+  if (same) return
+  throw new Error(
+    `the alias ${alias} is already set up for a different service ` +
+    `(project ${held.projectId}, service ${held.serviceId}${held.branch ? `, branch ${held.branch}` : ''}).\n` +
+    `Rename one of the services, or remove "${alias}" from ${instaAliasStorePath()} and run --setup again.`,
+  )
 }
 
 export function writeAliasStore(store: AliasStore, path = instaAliasStorePath()): void {
@@ -810,7 +858,10 @@ export function writeAliasStore(store: AliasStore, path = instaAliasStorePath())
  *  so rendering one entry would delete the stanzas of every other service. */
 export function hostEntries(store: AliasStore): HostEntry[] {
   return Object.entries(store)
-    .filter(([alias]) => isSafeAlias(alias))
+    // Both halves, and the second is not redundant with readAliasStore: this
+    // function is also called with a store held in memory, so the check has to
+    // sit where the rendering does.
+    .filter(([alias, r]) => isSafeAlias(alias) && isValidAliasRecord(r))
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([alias, r]) => ({ alias, hostName: r.host, user: r.username, certificateFile: instaCertPath(alias) }))
 }
@@ -947,6 +998,7 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts)
   const out = await mintCert(api, p.projectId, svc.id, ensureKeyPair(), alias)
 
   const store = readAliasStore()
+  assertAliasFree(store, alias, { projectId: p.projectId, serviceId: svc.id, branch })
   store[alias] = { projectId: p.projectId, ...(branch ? { branch } : {}), serviceId: svc.id, host: out.host, username: out.username }
   writeAliasStore(store)
 
@@ -955,9 +1007,30 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts)
     installConfigBlock(store)
   }
 
-  if (opts.json) return printJson({ alias, host: out.host, username: out.username, expiresAt: out.expiresAt })
-  info(`ssh ${alias}  →  ${out.username}@${out.host}`)
-  info(`  certificate valid until ${out.expiresAt}`)
+  if (opts.json) return printJson({ alias, host: out.host, username: out.username, expiresAt: out.expiresAt, configured: !!opts.setup })
+  for (const line of sshAdvice({ alias, host: out.host, username: out.username, expiresAt: out.expiresAt, serviceName: svc.name, configured: !!opts.setup })) info(line)
+}
+
+/** What to tell the user once the certificate is in hand.
+ *
+ *  Split out from computeSSH because the choice is the whole point and the
+ *  orchestration around it is network glue (untested here, as in
+ *  computeStart/computeExec/computeVolume). The rule: only advertise the alias
+ *  when the alias was actually INSTALLED. Without --setup nothing was written
+ *  to ssh_config, so `ssh api.insta` does not resolve -- printing it anyway is
+ *  advice that fails on first use and reads as a broken feature rather than a
+ *  skipped step.
+ */
+export function sshAdvice(r: {
+  alias: string; host: string; username: string; expiresAt: string; serviceName: string; configured: boolean
+}): string[] {
+  const head = r.configured
+    ? [`ssh ${r.alias}  →  ${r.username}@${r.host}`]
+    : [
+        `ssh ${r.username}@${r.host}`,
+        `  run \`insta compute ssh ${r.serviceName} --setup\` once to get the shorter \`ssh ${r.alias}\` and automatic renewal`,
+      ]
+  return [...head, `  certificate valid until ${r.expiresAt}`]
 }
 
 /** `ssh.us-west-1.compute.example` -> `ssh.*.compute.example`.

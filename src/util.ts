@@ -1,7 +1,7 @@
 // Output + small pure helpers (env serialization is unit-tested).
 import { createInterface } from 'node:readline'
 import { spawn } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, lstatSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 
@@ -14,9 +14,18 @@ import { randomBytes } from 'node:crypto'
  * or a crash between the two leaves the user with a half a config and no way to
  * ssh anywhere. rename(2) is atomic, so a reader sees either the old file or
  * the new one. `backup` additionally leaves the previous contents recoverable.
+ *
+ * A SYMLINK is followed to its target first. Keeping a dotfiles repo and
+ * symlinking `~/.ssh/config` at it is a common setup, and rename(2) replaces
+ * the link itself rather than writing through it -- so the naive version
+ * silently severs the link, leaving the repo holding a copy that no longer
+ * matches the file ssh reads and the next dotfiles sync quietly reverting our
+ * block. Resolving first keeps the write atomic (the temp file still lands
+ * beside the real file, on the real file's filesystem) AND keeps the link.
  */
-export function writeFileAtomicSync(path: string, data: string, opts: { mode?: number; backup?: boolean } = {}): void {
+export function writeFileAtomicSync(target: string, data: string, opts: { mode?: number; backup?: boolean } = {}): void {
   const mode = opts.mode ?? 0o600
+  const path = resolveThroughSymlink(target)
   const tmp = join(dirname(path), `.${basename(path)}.insta-${process.pid}-${randomBytes(6).toString('hex')}`)
   try {
     writeFileSync(tmp, data, { mode })
@@ -28,6 +37,18 @@ export function writeFileAtomicSync(path: string, data: string, opts: { mode?: n
   } catch (e) {
     try { unlinkSync(tmp) } catch { /* never created, or already gone */ }
     throw e
+  }
+}
+
+/** The real file `path` names, following symlinks; `path` itself when it is not
+ *  a link, does not exist, or dangles (a dangling link has no target to write
+ *  through, so replacing it with a real file is the only thing left to do). */
+export function resolveThroughSymlink(path: string): string {
+  try {
+    if (!lstatSync(path).isSymbolicLink()) return path
+    return realpathSync(path)
+  } catch {
+    return path
   }
 }
 

@@ -23,6 +23,35 @@ export function isSafeAlias(alias: string): boolean {
   return ALIAS_RE.test(alias)
 }
 
+/** A HostName/User value that cannot break out of its own directive.
+ *
+ *  ssh_config is line-oriented and whitespace-separated, so a value carrying a
+ *  space silently becomes a directive plus arguments, and one carrying a
+ *  newline becomes an ENTIRELY NEW directive under our `Host` stanza. These
+ *  come from an API response and from a store the reader deliberately tolerates
+ *  being hand-edited, so neither is trusted input. */
+export function isSafeConfigValue(v: unknown): v is string {
+  // eslint-disable-next-line no-control-regex
+  return typeof v === 'string' && v.length > 0 && v.length <= 253 && !/[\s\u0000-\u001f\u007f"']/.test(v)
+}
+
+/** ssh_config's own quoting for a path.
+ *
+ *  Paths are the one field a user does not choose and cannot avoid: a home
+ *  directory with a space in it -- ordinary on Windows and not rare on macOS --
+ *  turns `IdentityFile /Users/First Last/.insta/...` into a directive with two
+ *  arguments, and OpenSSH then rejects the WHOLE FILE. Every alias the user has
+ *  stops working, not just ours.
+ *
+ *  A literal double quote is refused rather than escaped, because ssh_config
+ *  has no escape for one inside a quoted argument -- there is no correct string
+ *  to emit, so emitting nothing and saying why is the only honest answer. */
+export function quoteConfigPath(path: string): string {
+  if (path.includes('"')) throw new Error(`cannot write an ssh_config path containing a double quote: ${JSON.stringify(path)}`)
+  if (/[\n\r]/.test(path)) throw new Error(`cannot write an ssh_config path containing a newline: ${JSON.stringify(path)}`)
+  return `"${path}"`
+}
+
 /**
  * The ssh alias for a compute service.
  *
@@ -78,14 +107,18 @@ export function renderConfigBlock(o: ConfigBlockOpts): string {
   const lines = [BLOCK_BEGIN]
   for (const e of o.entries) {
     if (!isSafeAlias(e.alias)) throw new Error(`refusing to write an unsafe ssh alias into ssh_config: ${JSON.stringify(e.alias)}`)
+    // The alias was already checked; these two were not, and they reach this
+    // file verbatim from an API response.
+    if (!isSafeConfigValue(e.hostName)) throw new Error(`refusing to write an unsafe ssh HostName into ssh_config: ${JSON.stringify(e.hostName)}`)
+    if (!isSafeConfigValue(e.user)) throw new Error(`refusing to write an unsafe ssh User into ssh_config: ${JSON.stringify(e.user)}`)
     lines.push(
       `Host ${e.alias}`,
       // Without HostName and User the alias is not routing at all: ssh resolves
       // `api.insta` in DNS and logs in as the local OS username.
       `  HostName ${e.hostName}`,
       `  User ${e.user}`,
-      `  IdentityFile ${o.identityFile}`,
-      `  CertificateFile ${e.certificateFile}`,
+      `  IdentityFile ${quoteConfigPath(o.identityFile)}`,
+      `  CertificateFile ${quoteConfigPath(e.certificateFile)}`,
       // IdentitiesOnly is not tidiness. SSH offers public keys ONE AT A TIME,
       // so a user with several keys is identified non-deterministically -- the
       // server sees whichever key happened to be offered first, which may not be

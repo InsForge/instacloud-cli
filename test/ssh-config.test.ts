@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   renderConfigBlock, renderEnsureCertMatch, upsertConfigBlock, upsertCertAuthority,
-  aliasFor, isSafeAlias, BLOCK_BEGIN, BLOCK_END, CA_MARKER,
+  aliasFor, isSafeAlias, isSafeConfigValue, quoteConfigPath, BLOCK_BEGIN, BLOCK_END, CA_MARKER,
 } from '../src/commands/ssh-config.js'
 
 const entry = (alias = 'api.insta', hostName = 'ssh.us-west-1.compute.example', user = 'svc-abc') => ({
@@ -58,8 +58,8 @@ describe('ssh_config block', () => {
   // make the second service's setup silently overwrite the first one's.
   it('points each alias at its own certificate', () => {
     const b = block([entry('api.insta'), entry('worker.insta', 'ssh.eu-west-1.compute.example', 'svc-def')])
-    expect(b).toContain('  CertificateFile /home/dev/.insta/ssh/api.insta-cert.pub')
-    expect(b).toContain('  CertificateFile /home/dev/.insta/ssh/worker.insta-cert.pub')
+    expect(b).toContain('  CertificateFile "/home/dev/.insta/ssh/api.insta-cert.pub"')
+    expect(b).toContain('  CertificateFile "/home/dev/.insta/ssh/worker.insta-cert.pub"')
   })
 
   it('renders one stanza per service so a second --setup keeps the first', () => {
@@ -76,7 +76,7 @@ describe('ssh_config block', () => {
     // this line the server may never see the key carrying our certificate.
     const b = block()
     expect(b).toContain('IdentitiesOnly yes')
-    expect(b).toContain('IdentityFile /home/dev/.insta/ssh/id_ed25519')
+    expect(b).toContain('IdentityFile "/home/dev/.insta/ssh/id_ed25519"')
   })
 
   it('renews the certificate while OpenSSH parses the config', () => {
@@ -296,8 +296,14 @@ describe('certificate renewal', () => {
     })).toBe(true)
   })
 
+  // `ssh-keygen -L` prints validity in LOCAL time, and certNeedsRenewal parses
+  // it that way, so the test clock has to be local too. Anchoring `now` to UTC
+  // while the certificate dates were local made the margin arithmetic shift by
+  // the offset -- fine at UTC+0, and wrong by up to fourteen hours elsewhere.
+  const localTime = (s: string) => new Date(s).getTime()
+
   it('leaves a certificate with plenty of life alone', () => {
-    const now = Date.parse('2026-09-14T12:00:00Z')
+    const now = localTime('2026-09-14T12:00:00')
     expect(certNeedsRenewal(anyExistingFile, {
       now, read: () => keygenOut('2026-09-14T10:00:00', '2026-09-14T22:00:00'),
     })).toBe(false)
@@ -307,14 +313,14 @@ describe('certificate renewal', () => {
   // technically still valid but expires mid-session must be replaced BEFORE
   // the session starts, not after it drops.
   it('renews inside the margin, even though the certificate is still valid', () => {
-    const now = Date.parse('2026-09-14T12:00:00Z')
+    const now = localTime('2026-09-14T12:00:00')
     const read = () => keygenOut('2026-09-14T10:00:00', '2026-09-14T12:03:00')
     expect(certNeedsRenewal(anyExistingFile, { now, read }), 'a cert expiring in 3 minutes was treated as healthy').toBe(true)
     expect(certNeedsRenewal(anyExistingFile, { now, marginMs: 60_000, read })).toBe(false)
   })
 
   it('renews on an already-expired certificate', () => {
-    const now = Date.parse('2026-09-14T12:00:00Z')
+    const now = localTime('2026-09-14T12:00:00')
     expect(certNeedsRenewal(anyExistingFile, {
       now, read: () => keygenOut('2026-09-13T10:00:00', '2026-09-13T22:00:00'),
     })).toBe(true)
@@ -497,5 +503,72 @@ describe('renewal hook is silent and fail-safe', () => {
 
   it('keeps its state under ~/.insta/ssh', () => {
     expect(instaAliasStorePath().startsWith(join(home, '.insta', 'ssh'))).toBe(true)
+  })
+})
+
+describe('unsafe values never reach ssh_config', () => {
+  // ssh_config is whitespace-separated and has no escape mechanism inside a
+  // bare token, so a host or username carrying a space, a quote or a newline
+  // does not produce a BROKEN alias -- it produces a DIFFERENT directive.
+  // `HostName evil.example\n  ProxyCommand curl ...` is a valid config file,
+  // and our block is written into the user's own ~/.ssh/config.
+  const hostile = [
+    ['a space', 'ssh.example.com extra'],
+    ['a newline', 'ssh.example.com\n  ProxyCommand /bin/sh'],
+    ['a carriage return', 'ssh.example.com\r  ProxyCommand /bin/sh'],
+    ['a tab', 'ssh.example.com\tProxyCommand'],
+    ['a double quote', 'ssh."example".com'],
+    ['a single quote', "ssh.'example'.com"],
+    ['a NUL', 'ssh.example.com' + String.fromCharCode(0)],
+    ['an empty string', ''],
+  ] as const
+
+  for (const [what, value] of hostile) {
+    it(`rejects a hostName containing ${what}`, () => {
+      expect(isSafeConfigValue(value), `${JSON.stringify(value)} was accepted as a config value`).toBe(false)
+      expect(() => block([entry('api.insta', value, 'svc-abc')])).toThrow()
+    })
+    it(`rejects a user containing ${what}`, () => {
+      expect(() => block([entry('api.insta', 'ssh.example.com', value)])).toThrow()
+    })
+  }
+
+  // The POSITIVE control for the table above: a guard tight enough to reject
+  // every hostile value is equally capable of rejecting every REAL one, and
+  // over-rejection is the one failure a table of refusals cannot catch.
+  it('still renders a full block for the ordinary values it exists to pass through', () => {
+    expect(isSafeConfigValue('ssh.us-west-1.compute.example')).toBe(true)
+    expect(isSafeConfigValue('svc-abc123')).toBe(true)
+    const out = block([entry('api.insta'), entry('web.insta', 'ssh.eu-central-1.compute.example', 'svc-def')])
+    expect(out).toContain('HostName ssh.us-west-1.compute.example')
+    expect(out).toContain('Host web.insta')
+    expect(out).toContain('User svc-def')
+  })
+})
+
+describe('paths are quoted, because a home directory may contain a space', () => {
+  it('quotes IdentityFile and CertificateFile', () => {
+    const out = renderConfigBlock({
+      entries: [{
+        alias: 'api.insta',
+        hostName: 'ssh.example.com',
+        user: 'svc-abc',
+        certificateFile: '/Users/Jun Wen/.insta/ssh/api.insta-cert.pub',
+      }],
+      identityFile: '/Users/Jun Wen/.insta/ssh/id_ed25519',
+    })
+    // Unquoted, ssh reads the argument as `/Users/Jun` and every connection
+    // fails with a misleading "no such identity" on a perfectly valid home.
+    expect(out).toContain('IdentityFile "/Users/Jun Wen/.insta/ssh/id_ed25519"')
+    expect(out).toContain('CertificateFile "/Users/Jun Wen/.insta/ssh/api.insta-cert.pub"')
+  })
+
+  it('refuses a path that would break out of the quoting', () => {
+    // A quoted ssh_config argument has NO escape for `"`, so the only correct
+    // answer is to refuse -- emitting it would close the quote early and turn
+    // the tail into directives.
+    expect(() => quoteConfigPath('/home/dev/a"b')).toThrow()
+    expect(() => quoteConfigPath('/home/dev/a\nProxyCommand sh')).toThrow()
+    expect(quoteConfigPath('/home/dev/ssh/id')).toBe('"/home/dev/ssh/id"')
   })
 })
