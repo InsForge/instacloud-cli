@@ -240,6 +240,7 @@ build never reaches a production installer.
 |---|---|
 | `~/.insta/config.json` | API URL, access and refresh tokens, user, auto-update preference |
 | `./.insta/project.json` | Project id, org id, current branch |
+| `./.insta/link-plane.json` | The control-plane URL this machine linked against. Gitignored and per machine; a link made against a different control plane is refused rather than reused. The home directory is never a project |
 
 | Variable | Effect |
 |---|---|

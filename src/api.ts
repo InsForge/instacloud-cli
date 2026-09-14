@@ -1,6 +1,6 @@
 // Thin API client over the platform control-plane. Handles bearer auth + one-shot refresh on 401.
 // 2xx (including 202 approval_required) returns the parsed body; >=400 throws ApiError.
-import { readGlobal, writeGlobal, readProject, writeProject, type GlobalConfig, type ProjectConfig } from './config.js'
+import { readGlobal, writeGlobal, readProject, writeProject, resolveProjectLink, foreignLinkMessage, type GlobalConfig, type ProjectConfig } from './config.js'
 import { autoResolveProject, promptChoice, type ProjectItem } from './resolve-project.js'
 import { die } from './util.js'
 import { USER_AGENT } from './version.js'
@@ -118,11 +118,21 @@ export class ApiClient {
 // Resolve the linked project (./.insta/project.json), or null.
 export async function linkedProject(): Promise<ProjectConfig | null> { return readProject() }
 
+// Injected for tests (the convention in CONTRIBUTING): `cwd` to resolve from, and `autoResolve` to
+// stand in for the interactive/API resolution below.
+export type RequireProjectDeps = { cwd?: string; autoResolve?: () => Promise<ProjectConfig> }
+
 // Resolve the linked project or exit with guidance.
-export async function requireProject(): Promise<ProjectConfig> {
-  const p = await readProject()
-  if (p) return p
+export async function requireProject(deps: RequireProjectDeps = {}): Promise<ProjectConfig> {
+  const r = await resolveProjectLink(deps.cwd)
+  // Fail CLOSED on a link made against another control plane. Treating it as "unlinked" sent this
+  // into auto-resolve, which with exactly one project on the new plane picks it without a prompt
+  // and SAVES — so a read-only command replaced the committed team binding, and pointing back
+  // flipped it again. Only an explicit `insta project link` may replace a link.
+  if (r?.foreign) die(foreignLinkMessage(r.foreign))
+  if (r) return r.link
   if (agentMode()) die('agent mode requires a linked project — run `insta setup agent --project <id>`')
+  if (deps.autoResolve) return deps.autoResolve()
   // One command, just works: unlinked ≠ error. Resolve the project (auto when there's one,
   // one-keystroke picker when several) and persist the choice so this happens once per dir.
   const api = await ApiClient.load()
