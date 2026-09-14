@@ -1,5 +1,5 @@
 import { ApiClient, ApiError, requireProject } from '../api.js'
-import { info, printJson, handleApproval, relayExitCode, writeFileAtomicSync } from '../util.js'
+import { info, printJson, handleApproval, relayExitCode, writeFileAtomicSync, resolveThroughSymlink } from '../util.js'
 import { resolveComputeServiceId, resolveSoleService, q, parseVolumeGib } from './services.js'
 
 type Opts = { branch?: string; group?: string; json?: boolean }
@@ -1004,7 +1004,12 @@ const sshKeygenVerifyCert: CertVerifier = (certPath) => {
  */
 export function installCertificate(certPath: string, contents: string, verify: CertVerifier = sshKeygenVerifyCert): void {
   mkdirSync(dirname(certPath), { recursive: true, mode: 0o700 })
-  const staging = `${certPath}.staging-${process.pid}-${randomUUID()}`
+  // Followed to its target, for the same reason writeFileAtomicSync does it:
+  // rename(2) replaces the LINK, so a certificate someone symlinked into a
+  // dotfiles repo would be severed on the first renewal -- quietly, and only
+  // on the path that runs unattended.
+  const target = resolveThroughSymlink(certPath)
+  const staging = `${target}.staging-${process.pid}-${randomUUID()}`
   try {
     writeFileSync(staging, contents, { mode: 0o644 })
     try {
@@ -1015,7 +1020,7 @@ export function installCertificate(certPath: string, contents: string, verify: C
         : 'the platform returned a certificate OpenSSH cannot parse'
       throw new Error(`${why} — the existing certificate was left untouched`)
     }
-    renameSync(staging, certPath)
+    renameSync(staging, target)
   } finally {
     try { unlinkSync(staging) } catch { /* moved into place, or never created */ }
   }

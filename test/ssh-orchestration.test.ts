@@ -7,9 +7,9 @@
 // single piece -- only from running the steps together and watching what
 // happens, and in what order.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { computeSSH, instaCertPath, instaAliasStorePath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias, hostPatternFor, installCertificate } from '../src/commands/compute.js'
 import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey } from '../src/commands/ssh-config.js'
@@ -55,23 +55,43 @@ afterEach(() => {
 // would reject cannot detect the live-credential corruption these tests exist
 // to prevent -- it passes for a validator that checks nothing beyond the first
 // field.
+// Presence only, with NO side effect -- the first version of this probe ran
+// `ssh-keygen -A`, which GENERATES HOST KEYS in /etc/ssh. It sits ABOVE the
+// fixtures because they depend on it: generating certificates at module scope
+// threw ENOENT at import on a machine without ssh-keygen and took the whole
+// file down with it, defeating the very skip guards below.
+const keygen = (() => {
+  const probe = process.platform === 'win32' ? ['where', 'ssh-keygen'] : ['command', '-v', 'ssh-keygen']
+  try {
+    execFileSync(probe[0]!, probe.slice(1), { stdio: 'ignore', shell: process.platform !== 'win32' })
+    return true
+  } catch {
+    return false
+  }
+})()
+
+// Every test in this file is about SSH certificates, so without ssh-keygen
+// there is nothing here to run -- `d` skips the file wholesale rather than
+// failing it.
+const d = keygen ? describe : describe.skip
+
 const CERT_TYPE = 'ssh-ed25519-cert-v01@openssh.com'
-const fixtures = mkdtempSync(join(tmpdir(), 'insta-ssh-fixtures-'))
-const CERT = (() => {
+const fixtures = keygen ? mkdtempSync(join(tmpdir(), 'insta-ssh-fixtures-')) : ''
+const CERT = !keygen ? '' : (() => {
   const ca = join(fixtures, 'ca'), user = join(fixtures, 'user')
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', ca, '-C', 'ca@insta'])
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', user, '-C', 'user@insta'])
   execFileSync('ssh-keygen', ['-q', '-s', ca, '-I', 'test-id', '-n', 'u-svc-1', '-V', '+1h', `${user}.pub`])
   return readFileSync(`${user}-cert.pub`, 'utf8').trim()
 })()
-const CA = readFileSync(join(fixtures, 'ca.pub'), 'utf8').trim()
+const CA = !keygen ? '' : readFileSync(join(fixtures, 'ca.pub'), 'utf8').trim()
 // Signed in the past, so certNeedsRenewal genuinely wants it replaced. The
 // tests that exercise renewal need a real certificate that is real-and-stale,
 // not one that merely fails to parse -- an unparseable file renews for the
 // wrong reason and would pass even if the expiry logic were gone.
 /** The `<type> <blob>` pair renderCertAuthority writes, comment stripped. */
 const caRecord = (key: string) => key.split(/\s+/).slice(0, 2).join(' ')
-const EXPIRED_CERT = (() => {
+const EXPIRED_CERT = !keygen ? '' : (() => {
   const old = join(fixtures, 'old')
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', old, '-C', 'old@insta'])
   execFileSync('ssh-keygen', ['-q', '-s', join(fixtures, 'ca'), '-I', 'stale', '-n', 'u-svc-1', '-V', '-2h:-1h', `${old}.pub`])
@@ -107,7 +127,7 @@ const deps = (over: Record<string, unknown> = {}) => {
   return { deps: base as never, lines, minted }
 }
 
-describe('a collision is refused before anything is written', () => {
+d('a collision is refused before anything is written', () => {
   beforeEach(() => {
     mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
     // `api.insta` already belongs to a DIFFERENT project's service.
@@ -144,7 +164,7 @@ describe('a collision is refused before anything is written', () => {
   })
 })
 
-describe('what it prints is what will actually work', () => {
+d('what it prints is what will actually work', () => {
   it('without --setup, offers the key and certificate it just issued', async () => {
     const { deps: d, lines } = deps()
     await computeSSH('api', {}, d)
@@ -178,7 +198,7 @@ describe('what it prints is what will actually work', () => {
   })
 })
 
-describe('what the plane returns is checked before anything is written', () => {
+d('what the plane returns is checked before anything is written', () => {
   // The check now lives in mintCert, BEFORE it writes `<alias>-cert.pub` --
   // the certificate file is the live credential for an alias that may already
   // be working, so a response we go on to reject must not have replaced it on
@@ -237,7 +257,7 @@ describe('what the plane returns is checked before anything is written', () => {
   })
 })
 
-describe('--setup does not report success without the trust anchor it promises', () => {
+d('--setup does not report success without the trust anchor it promises', () => {
   it('refuses a response with no CA key', async () => {
     // Skipping installCA and carrying on left plain ssh/scp facing a host-key
     // prompt on every new node behind the load balancer -- the exact failure
@@ -273,7 +293,7 @@ describe('--setup does not report success without the trust anchor it promises',
   }
 })
 
-describe('the printed command is safe to paste', () => {
+d('the printed command is safe to paste', () => {
   it('never reaches the printed line with shell syntax or a leading dash', () => {
     // Two layers, and the FIRST is the one that matters. Shell quoting does not
     // stop `ssh` parsing its own argv: a destination of `-oProxyCommand=id`
@@ -305,7 +325,7 @@ describe('the printed command is safe to paste', () => {
   })
 })
 
-describe('concurrent renewal hooks do not stampede the mint endpoint', () => {
+d('concurrent renewal hooks do not stampede the mint endpoint', () => {
   it('lets exactly one caller through', () => {
     // An IDE opens several connections at once and scp adds more, so every one
     // of them observes the same near-expiry certificate simultaneously.
@@ -367,17 +387,8 @@ describe('concurrent renewal hooks do not stampede the mint endpoint', () => {
 // time, on every run of this file, even when the describe below is skipped.
 // ENOENT is the only signal wanted, so ask the OS where the binary is instead
 // of running it.
-const keygen = (() => {
-  const probe = process.platform === 'win32' ? ['where', 'ssh-keygen'] : ['command', '-v', 'ssh-keygen']
-  try {
-    execFileSync(probe[0]!, probe.slice(1), { stdio: 'ignore', shell: process.platform !== 'win32' })
-    return true
-  } catch {
-    return false
-  }
-})()
 
-describe.skipIf(!keygen)('a rejected response never replaces the working certificate', () => {
+d('a rejected response never replaces the working certificate', () => {
   const apiReturning = (certBody: Record<string, unknown>) => async () => ({
     request: async () => ({ services: [{ id: 'svc-1', name: 'api', type: 'compute' }] }),
     rawRequest: async () => ({ status: 200, body: certBody }),
@@ -418,7 +429,7 @@ describe.skipIf(!keygen)('a rejected response never replaces the working certifi
   })
 })
 
-describe('renewal never blocks the ssh it runs inside', () => {
+d('renewal never blocks the ssh it runs inside', () => {
   it('gives up on a server that accepts and then says nothing', async () => {
     // OpenSSH runs this hook while PARSING its config, so an unbounded request
     // blocks ssh, scp, `ssh -G` and every IDE connection for as long as the
@@ -468,7 +479,7 @@ async function raceRenewal(fetchImpl: (url: string, init: any) => Promise<any>):
   }
 }
 
-describe('the renewal lock survives a holder that outlives the staleness window', () => {
+d('the renewal lock survives a holder that outlives the staleness window', () => {
   it('a superseded holder does not delete the new holder lock', () => {
     // The sequence that defeats a pid-only lock: A takes it, A is slow, B
     // breaks the stale lock and takes its own, then A finishes and releases --
@@ -498,7 +509,7 @@ describe('the renewal lock survives a holder that outlives the staleness window'
 //
 // The install steps run for real (installCA/installConfig left undefined so
 // computeSSH falls back to its own), writing into the redirected home.
-describe.skipIf(!keygen)('a successful --setup installs everything the alias needs', () => {
+d('a successful --setup installs everything the alias needs', () => {
   const sshDir = () => join(home, '.ssh')
   const real = { installCA: undefined, installConfig: undefined }
 
@@ -583,7 +594,7 @@ describe.skipIf(!keygen)('a successful --setup installs everything the alias nee
   })
 })
 
-describe.skipIf(!keygen)('the branch the alias was set up on is the one it stays on', () => {
+d('the branch the alias was set up on is the one it stays on', () => {
   // `branch` is stored so assertAliasFree can tell two same-named services
   // apart. Nothing else read it, and nothing verified it was recorded at all.
   const recordingApi = (paths: string[]) => async () => ({
@@ -631,7 +642,7 @@ describe.skipIf(!keygen)('the branch the alias was set up on is the one it stays
   })
 })
 
-describe.skipIf(!keygen)('an automatic renewal replaces the certificate it was issued for', () => {
+d('an automatic renewal replaces the certificate it was issued for', () => {
   // The hook's SUCCESS path, through the real mintCert and the real anchor
   // install -- only the transport is faked. Everything previously exercised
   // here was a give-up path, which a hook that always gave up would satisfy.
@@ -708,7 +719,7 @@ describe.skipIf(!keygen)('an automatic renewal replaces the certificate it was i
   })
 })
 
-describe('a certificate is DECODED, not just shape-checked', () => {
+d('a certificate is DECODED, not just shape-checked', () => {
   // The escalation this closes: a textual check accepts
   // `<valid type> <64+ chars of base64>`, which anyone can construct, and the
   // cost of accepting it is that a working alias's live credential has already
@@ -735,7 +746,7 @@ describe('a certificate is DECODED, not just shape-checked', () => {
   })
 })
 
-describe('the CA wildcard stays on the ssh gateway name', () => {
+d('the CA wildcard stays on the ssh gateway name', () => {
   const S = ['compute.example'] as const
 
   it('widens the gateway name', () => {
@@ -759,7 +770,7 @@ describe('the CA wildcard stays on the ssh gateway name', () => {
   })
 })
 
-describe('a certificate OpenSSH cannot parse never replaces a working one', () => {
+d('a certificate OpenSSH cannot parse never replaces a working one', () => {
   // The structural decode reads the blob's first field and stops, so a blob
   // with the right type name and noise behind it -- no nonce, public key,
   // serial, principals, validity window or signature -- still passes it. The
@@ -806,7 +817,7 @@ describe('a certificate OpenSSH cannot parse never replaces a working one', () =
   })
 })
 
-describe('a CA key is decoded too, not just base64-checked', () => {
+d('a CA key is decoded too, not just base64-checked', () => {
   it('refuses a blob whose declared type disagrees with its body', () => {
     // Same class as the certificate gap: an anchor built from a mislabelled
     // blob installs silently and fails at connect time, where the message
@@ -818,5 +829,57 @@ describe('a CA key is decoded too, not just base64-checked', () => {
   it('accepts the real CA key ssh-keygen produced', () => {
     expect(parseCAPublicKey(CA).type).toBe('ssh-ed25519')
     expect(parseCAPublicKey(CA).blob).toBe(CA.split(/\s+/)[1])
+  })
+})
+
+d('a CA key is validated whole, not by its first field', () => {
+  const field = (b: Buffer) => { const n = Buffer.alloc(4); n.writeUInt32BE(b.length, 0); return Buffer.concat([n, b]) }
+
+  it('refuses a blob with the right type name and noise behind it', () => {
+    // The escalation the first-field check missed. The type string is correct,
+    // so a prefix check passes; there is no 32-byte key behind it, so the
+    // anchor is installed and then fails at connect time -- where the message
+    // points at known_hosts rather than at the response that produced it.
+    const noise = `ssh-ed25519 ${Buffer.concat([field(Buffer.from('ssh-ed25519')), Buffer.alloc(200, 0x41)]).toString('base64')}`
+    expect(() => parseCAPublicKey(noise), 'a blob with a correct type name and noise was accepted').toThrow()
+  })
+
+  it('refuses an ed25519 key whose key field is the wrong size', () => {
+    const short = `ssh-ed25519 ${Buffer.concat([field(Buffer.from('ssh-ed25519')), field(Buffer.alloc(16, 0x41))]).toString('base64')}`
+    expect(() => parseCAPublicKey(short)).toThrow(/32-byte/)
+  })
+
+  it('refuses a blob with trailing bytes after its last field', () => {
+    // The walk must land EXACTLY on the end: trailing bytes mean the blob is
+    // not the structure it claims to be.
+    const trailing = `ssh-ed25519 ${Buffer.concat([
+      field(Buffer.from('ssh-ed25519')), field(Buffer.alloc(32, 0x41)), Buffer.from([0x41, 0x42]),
+    ]).toString('base64')}`
+    expect(() => parseCAPublicKey(trailing)).toThrow()
+  })
+
+  it('accepts the real CA key ssh-keygen produced', () => {
+    // Positive control for the three above.
+    expect(parseCAPublicKey(CA).type).toBe('ssh-ed25519')
+  })
+})
+
+d('a symlinked certificate is written THROUGH, not replaced', () => {
+  it('keeps the link and updates its target', () => {
+    // Same reason writeFileAtomicSync resolves: rename(2) replaces the LINK,
+    // so a certificate someone symlinked into a dotfiles repo would be severed
+    // on the first renewal -- quietly, and only on the path that runs
+    // unattended.
+    const store = join(home, 'dotfiles'); mkdirSync(store, { recursive: true })
+    const real = join(store, 'api-cert.pub')
+    writeFileSync(real, EXPIRED_CERT + '\n')
+    const link = join(home, '.insta', 'ssh', 'api.insta-cert.pub')
+    mkdirSync(dirname(link), { recursive: true })
+    symlinkSync(real, link)
+
+    installCertificate(link, CERT + '\n')
+
+    expect(lstatSync(link).isSymbolicLink(), 'the symlink was replaced with a regular file').toBe(true)
+    expect(readFileSync(real, 'utf8'), 'the dotfiles copy was left stale').toBe(CERT + '\n')
   })
 })

@@ -263,8 +263,18 @@ export function parseCAPublicKey(value: unknown): { type: string; blob: string }
   // the same as "is a key": an anchor built from a mislabelled or arbitrary
   // blob installs silently and then fails at connect time, where the message
   // points at known_hosts rather than at the response that produced it.
-  if (sshBlobTypeName(blob) !== type) {
+  // The WHOLE blob, not just its first field. A first-field check rejects
+  // arbitrary base64 and still accepts a correct type name followed by noise --
+  // and an anchor built from that installs silently, then fails at connect
+  // time, where the message points at known_hosts rather than at the response
+  // that produced it.
+  const fields = sshBlobFields(blob)
+  if (!fields || fields.length < 2 || fields[0]!.toString('utf8') !== type) {
     throw new Error(`refusing a certificate authority key whose body does not match its type ${JSON.stringify(type.slice(0, 32))}`)
+  }
+  // ed25519 is the one we issue, and its key field has exactly one legal size.
+  if (type === 'ssh-ed25519' && (fields.length !== 2 || fields[1]!.length !== 32)) {
+    throw new Error('refusing an ed25519 certificate authority key whose body is not a 32-byte key')
   }
   return { type, blob }
 }
@@ -314,17 +324,44 @@ export function isSSHCertificateRecord(v: unknown): v is string {
  *  a blob that is at least the kind of thing it claims to be. Returns undefined
  *  when the blob does not even carry a well-formed first field. */
 export function sshBlobTypeName(blob: string): string | undefined {
+  const fields = sshBlobFields(blob, 1)
+  return fields?.[0]?.toString('utf8')
+}
+
+/** Every SSH `string` field in a blob, or undefined if it is not well-formed.
+ *
+ *  The wire format is a sequence of 4-byte big-endian lengths each followed by
+ *  that many bytes. Requiring the walk to land EXACTLY on the end is what makes
+ *  this a structural check rather than a prefix check: trailing noise, a length
+ *  that overruns the buffer, and a truncated final field are all rejected.
+ *
+ *  `limit` stops after that many fields, for callers that only need the head. */
+export function sshBlobFields(blob: string, limit = Infinity): Buffer[] | undefined {
   let raw: Buffer
   try {
     raw = Buffer.from(blob, 'base64')
   } catch {
     return undefined
   }
-  if (raw.length < 4) return undefined
-  const nameLen = raw.readUInt32BE(0)
-  // A sane field length, checked BEFORE it is used as an offset.
-  if (nameLen === 0 || nameLen > 128 || raw.length < 4 + nameLen) return undefined
-  return raw.subarray(4, 4 + nameLen).toString('utf8')
+  const out: Buffer[] = []
+  let at = 0
+  while (at < raw.length && out.length < limit) {
+    if (raw.length - at < 4) return undefined
+    const len = raw.readUInt32BE(at)
+    // Bounds-checked BEFORE being used as an offset, and capped so a hostile
+    // length cannot drive a huge allocation.
+    if (len > 65_536 || raw.length - at - 4 < len) return undefined
+    out.push(raw.subarray(at + 4, at + 4 + len))
+    at += 4 + len
+  }
+  if (out.length === 0) return undefined
+  // No trailing-bytes check here on purpose: `at` only ever advances by a whole
+  // consumed field, and the two guards inside the loop reject every partial
+  // tail, so on a full walk the loop can only exit with at === raw.length. A
+  // final `at === raw.length ? ... : undefined` reads like a safety net and is
+  // a condition that can never be false -- worse than no check, because the
+  // next reader trusts it.
+  return out
 }
 
 /** An SSH principal safe to place in a command line.

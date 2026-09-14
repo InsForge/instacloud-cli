@@ -258,11 +258,22 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
   it('is the quoting that saves it, not luck', () => {
     // The negative control. Without it the two tests above would also pass for
     // a renderer that quotes nothing, since nothing else here has a space.
-    // Same block, quotes stripped: OpenSSH must refuse it.
-    const cfg = join(dir, 'unquoted')
-    writeFileSync(cfg, spacedBlock().replace(/"/g, ''), { mode: 0o600 })
-    expect(() => execFileSync('ssh', ['-G', '-F', cfg, 'api.insta'], { encoding: 'utf8', stdio: 'pipe' }),
-      'an unquoted spaced path was accepted, so these tests prove nothing').toThrow()
+    //
+    // Asserted on the PARSED VALUE, not on ssh's exit code. Whether OpenSSH
+    // refuses the file or logs-and-continues on an unquoted spaced argument
+    // differs by version, so an exit-code assertion fails on a perfectly good
+    // build for a reason that has nothing to do with our writer. What is true
+    // of every version is that the value it ends up with is NOT the path we
+    // meant -- which is the thing the quoting exists to guarantee.
+    let parsed: string | undefined
+    try {
+      parsed = effective('api.insta', spacedBlock().replace(/"/g, '')).get('identityfile')
+    } catch {
+      // Refused outright: also a pass, and the stricter of the two behaviours.
+      parsed = undefined
+    }
+    expect(parsed, 'an unquoted spaced path still resolved correctly, so these tests prove nothing')
+      .not.toBe(`${SPACED}/id_ed25519`)
   })
 
   it('parses the Windows form of a spaced home directory', () => {
@@ -284,8 +295,12 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
   })
 })
 
+const USER_ANCHOR = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhI'
+const RETIRED_CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVF'
+const ROTATED_CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEdHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dH'
+
 describe('known_hosts trust anchor', () => {
-  const CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICAcaFakeCAKeyForTestsOnlyAAAAAAAAAAAAAAAAAAAA'
+  const CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIERERERERERERERERERERERERERERERERERERERERERE'
 
   it('adds the @cert-authority line, tagged as ours', () => {
     const out = upsertCertAuthority('', 'ssh.*.compute.example', CA)
@@ -304,28 +319,29 @@ describe('known_hosts trust anchor', () => {
   // key. Filtering on the NEW key's text cannot find the retired one, so the
   // old CA would stay trusted for that pattern indefinitely.
   it('retires the previous CA when the platform rotates for the same host pattern', () => {
-    const first = upsertCertAuthority('', 'ssh.*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOldOldOldFakeRetiredCAKeyForTestsAAAAAAAAAAAA')
-    const rotated = upsertCertAuthority(first, 'ssh.*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINewNewNewFakeRotatedCAKeyForTestsAAAAAAAAAAAA')
+    const first = upsertCertAuthority('', 'ssh.*.compute.example', RETIRED_CA)
+    const rotated = upsertCertAuthority(first, 'ssh.*.compute.example', ROTATED_CA)
     const lines = rotated.trim().split('\n').filter((l) => l.startsWith('@cert-authority'))
     expect(lines, 'the retired CA is still trusted for this host pattern').toHaveLength(1)
-    expect(lines[0]).toContain('AAAAC3NzaC1lZDI1NTE5AAAAINewNewNewFakeRotatedCAKeyForTestsAAAAAAAAAAAA')
-    expect(rotated).not.toContain('AAAAC3NzaC1lZDI1NTE5AAAAIOldOldOldFakeRetiredCAKeyForTestsAAAAAAAAAAAA')
+    expect(lines[0]).toContain(ROTATED_CA.split(' ')[1]!)
+    expect(rotated).not.toContain(RETIRED_CA.split(' ')[1]!)
   })
 
   it("keeps the user's other known_hosts entries, including their own anchors", () => {
     const existing = [
-      'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISomethingUnrelatedGithubHostKeyAAAAAAAAAAAAAA',
-      '@cert-authority ssh.*.compute.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIUserAddedTheirOwnAnchorHereAAAAAAAAAAAAAAAAAA',
+      'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIENDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0ND',
+      `@cert-authority ssh.*.compute.example ${USER_ANCHOR}`,
       '',
     ].join('\n')
     const out = upsertCertAuthority(existing, 'ssh.*.compute.example', CA)
-    expect(out).toContain('github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISomethingUnrelatedGithubHostKeyAAAAAAAAAAAAAA')
-    expect(out, 'we deleted an anchor the user added by hand').toContain('AAAAC3NzaC1lZDI1NTE5AAAAIUserAddedTheirOwnAnchorHereAAAAAAAAAAAAAAAAAA')
+    expect(out).toContain('github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIENDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0ND')
+    // The user's OWN anchor -- no CA_MARKER, so rotation must never touch it.
+    expect(out, 'we deleted an anchor the user added by hand').toContain(USER_ANCHOR)
     expect(out).toContain(`@cert-authority ssh.*.compute.example ${CA} ${CA_MARKER}`)
   })
 
   it('does not need a trailing newline in the existing file to stay well-formed', () => {
-    const out = upsertCertAuthority('github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGithubHostKeyNotOursAAAAAAAAAAAAA', 'ssh.*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBareCAForTheUnmarkedLineTestAAAAAAAAA')
+    const out = upsertCertAuthority('github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpK', 'ssh.*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIElJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJ')
     expect(out.split('\n').filter(Boolean)).toHaveLength(2)
   })
 })
@@ -692,29 +708,29 @@ describe('our block is relocated to the top, not replaced where it sits', () => 
 })
 
 describe('a trust anchor is matched field by field, never by substring', () => {
-  const CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyKeyKeyFakeCAKeyForTestsAAAAAAAAAAAAAAAAAAA'
+  const CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZG'
 
   it('keeps an anchor whose key merely EXTENDS ours', () => {
     // A base64 blob is an unanchored substring of any longer blob sharing its
     // prefix. Deleting that line is not a visible failure -- it is a host-key
     // prompt on every connection to a region that used to be trusted.
-    const other = `@cert-authority ssh.*.other.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyKeyKeyFakeCAKeyForTestsAAAAAAAAAAAAAAAAAAALONGER ${CA_MARKER}\n`
+    const other = `@cert-authority ssh.*.other.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB ${CA_MARKER}\n`
     const out = upsertCertAuthority(other, 'ssh.*.compute.example', CA)
     expect(out, 'an unrelated anchor was deleted by a substring match').toContain('ssh.*.other.example')
     expect(out).toContain('ssh.*.compute.example')
   })
 
   it('keeps an anchor whose HOST PATTERN merely extends ours', () => {
-    const other = `@cert-authority ssh.*.compute.example.net ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherOtherFakeCAKeyForTestsAAAAAAAAAAAAAAAAAA ${CA_MARKER}\n`
+    const other = `@cert-authority ssh.*.compute.example.net ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC ${CA_MARKER}\n`
     const out = upsertCertAuthority(other, 'ssh.*.compute.example', CA)
     expect(out).toContain('ssh.*.compute.example.net')
   })
 
   it('still replaces the anchor for the SAME host pattern (rotation)', () => {
-    const first = upsertCertAuthority('', 'ssh.*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOldOldOldFakeRetiredCAKeyForTestsAAAAAAAAAAAA')
-    const rotated = upsertCertAuthority(first, 'ssh.*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINewNewNewFakeRotatedCAKeyForTestsAAAAAAAAAAAA')
-    expect(rotated, 'the retired CA stayed trusted').not.toContain('AAAAC3NzaC1lZDI1NTE5AAAAIOldOldOldFakeRetiredCAKeyForTestsAAAAAAAAAAAA')
-    expect(rotated).toContain('AAAAC3NzaC1lZDI1NTE5AAAAINewNewNewFakeRotatedCAKeyForTestsAAAAAAAAAAAA')
+    const first = upsertCertAuthority('', 'ssh.*.compute.example', RETIRED_CA)
+    const rotated = upsertCertAuthority(first, 'ssh.*.compute.example', ROTATED_CA)
+    expect(rotated, 'the retired CA stayed trusted').not.toContain(RETIRED_CA.split(' ')[1]!)
+    expect(rotated).toContain(ROTATED_CA.split(' ')[1]!)
     expect(rotated.split('@cert-authority').length - 1).toBe(1)
   })
 
@@ -726,7 +742,7 @@ describe('a trust anchor is matched field by field, never by substring', () => {
   })
 
   it('never touches an anchor the user added themselves', () => {
-    const mine = '@cert-authority ssh.*.compute.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyKeyKeyFakeCAKeyForTestsAAAAAAAAAAAAAAAAAAA\n'
+    const mine = '@cert-authority ssh.*.compute.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZG\n'
     const out = upsertCertAuthority(mine, 'ssh.*.compute.example', CA)
     expect(out, 'an unmarked anchor the user owns was deleted').toContain(mine.trim())
   })

@@ -10,7 +10,7 @@ import {
 } from '../src/commands/ssh-config.js'
 import { hostPatternFor } from '../src/commands/compute.js'
 
-const CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICAcaFakeCAKeyForTestsOnlyAAAAAAAAAAAAAAAAAAAA'
+const CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB'
 const PATTERN = 'ssh.*.compute.example'
 
 describe('a certificate authority value is parsed, not interpolated', () => {
@@ -30,8 +30,8 @@ describe('a certificate authority value is parsed, not interpolated', () => {
   })
 
   const hostile: Array<[string, string]> = [
-    ['a second known_hosts line', `${CA}\n@cert-authority * ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEvilKeyTrustedForEverythingAAAAAAAAAA`],
-    ['a carriage-return smuggled line', `${CA}\r@cert-authority * ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEvilKeyAAAAAAAAAAAAAAAAAAAAAAAAA`],
+    ['a second known_hosts line', `${CA}\n@cert-authority * ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC`],
+    ['a carriage-return smuggled line', `${CA}\r@cert-authority * ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIENDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0ND`],
     ['an unsupported key type', 'ssh-dss AAAAC3NzaC1lZDI1NTE5AAAAIWeakAlgorithmNobodyShouldTrustAAAAAAAAAAA'],
     ['a type with no body', 'ssh-ed25519'],
     ['a non-base64 body', 'ssh-ed25519 not-base64!!$$%%^^&&**(())____++++====----~~~~````'],
@@ -53,7 +53,7 @@ describe('a certificate authority value is parsed, not interpolated', () => {
   it('never appends a smuggled line to an existing known_hosts', () => {
     // The end-to-end property: the file is the thing being protected, so assert
     // on the file rather than only on the parser.
-    const existing = 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGithubHostKeyAAAAAAAAAAAAAAAAAAA\n'
+    const existing = 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIERERERERERERERERERERERERERERERERERERERERERE\n'
     expect(() => upsertCertAuthority(existing, PATTERN, `${CA}\n@cert-authority * ${CA}`)).toThrow()
   })
 })
