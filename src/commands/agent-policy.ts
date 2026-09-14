@@ -4,16 +4,24 @@ import { handleApproval, info, printJson } from '../util.js'
 const PRESETS = ['full_access', 'read_only', 'branch_specific']
 const DECISIONS = ['allow', 'deny', 'approve']
 
-async function current() {
-  const api = await ApiClient.load()
-  const project = await requireProject()
+// The API surface + project these commands need, injectable so the request flow — what a GET turns
+// into on the way back out as a PUT — is testable without a network mock (the repo's deps
+// convention). Production loads a real ApiClient + requireProject().
+export type AgentPolicyDeps = { api: Pick<ApiClient, 'request' | 'rawRequest'>; project: { projectId: string } }
+
+async function current(deps?: AgentPolicyDeps) {
+  const api = deps?.api ?? await ApiClient.load()
+  const project = deps?.project ?? await requireProject()
   const path = `/projects/${project.projectId}/agent-policy`
   const out = await api.request('GET', path)
   // `branchDeveloperRules` is a deprecated mirror of `rules`, kept in the response so that a CLI
   // predating the rename can still edit it in place. Platform takes the legacy field over `rules`
   // when a body carries both -- exactly so that old CLI's edit is not dropped -- so echoing the
-  // mirror back from here would silently discard everything this version writes.
-  if (out.policy) delete out.policy.branchDeveloperRules
+  // mirror back would silently discard everything this version writes. Only where Platform speaks
+  // the new contract, though: `actionCatalog` is how it announces that, and without one the mirror
+  // is the only rule set that exists, so dropping it would erase the project's overrides on the
+  // next PUT -- from `rule set`, but also from a `protect-branch` that never mentions rules.
+  if (out.policy && out.actionCatalog) delete out.policy.branchDeveloperRules
   return { api, project, path, policy: out.policy, out }
 }
 export function displayPolicy(out: Record<string, any>, opts: { json?: boolean }, output = { info, printJson }) {
@@ -86,8 +94,8 @@ export function applyRule(policy: Record<string, any>, out: Record<string, any>,
 /** `change` either mutates the policy in place or returns the replacement. */
 // `asked` opts into the side-effect report and names the actions the caller chose. Only `rule set`
 // passes it: a mode change is expected to move everything, so listing the whole table is noise.
-async function update(change: (policy: any, state: Awaited<ReturnType<typeof current>>) => Promise<any> | any, opts: { json?: boolean }, asked?: string[]) {
-  const state = await current()
+async function update(change: (policy: any, state: Awaited<ReturnType<typeof current>>) => Promise<any> | any, opts: { json?: boolean }, asked?: string[], deps?: AgentPolicyDeps) {
+  const state = await current(deps)
   const next = (await change(state.policy, state)) ?? state.policy
   const result = await state.api.rawRequest('PUT', state.path, next)
   if (handleApproval(result, opts.json)) return
@@ -109,18 +117,18 @@ export async function set(mode: string, opts: { json?: boolean }) {
   return update(policy => { policy.mode = resolved; policy.rules = {} }, opts)
 }
 
-export async function protect(branch: string, enabled: boolean, opts: { json?: boolean }) {
+export async function protect(branch: string, enabled: boolean, opts: { json?: boolean }, deps?: AgentPolicyDeps) {
   return update(async (policy, { api, project }) => {
     const { branches } = await api.request('GET', `/projects/${project.projectId}/branches`)
     const found = branches.find((b: any) => b.id === branch || b.name === branch)
     if (!found) throw new Error('branch not found')
     policy.protectedBranchIds = enabled ? [...new Set([...policy.protectedBranchIds, found.id])] : policy.protectedBranchIds.filter((id: string) => id !== found.id)
-  }, opts)
+  }, opts, undefined, deps)
 }
 
-export async function rule(action: string, decision: string, opts: { json?: boolean }) {
+export async function rule(action: string, decision: string, opts: { json?: boolean }, deps?: AgentPolicyDeps) {
   if (!DECISIONS.includes(decision)) throw new Error('decision must be allow, deny, or approve')
-  return update((policy, { out }) => applyRule(policy, out, action, decision), opts, [action])
+  return update((policy, { out }) => applyRule(policy, out, action, decision), opts, [action], deps)
 }
 
 export async function revoke(opts: { json?: boolean }) {
