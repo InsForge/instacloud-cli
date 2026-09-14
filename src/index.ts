@@ -371,7 +371,6 @@ dom.command('search <keyword>').description('Search purchasable names with price
   .action(guard((keyword, o) => domainCmd.domainSearch(keyword, o)))
 dom.command('buy <name>').description('Buy a domain and attach it to a branch compute service — pay at the printed Stripe Checkout link (gated: domain.purchase)')
   .option('--years <n>', 'registration term in years (default 1)').option('--branch <b>').option('--group <g>', "compute service (default: the branch's sole compute service)")
-  .option('--contact-file <path>', 'registrant contact as JSON (default: the org contact from `insta domain contact set`)')
   .option('--no-open', 'print the checkout URL instead of opening a browser').option('--json')
   .action(guard((name, o) => domainCmd.domainBuy(name, o)))
 dom.command('attach <name>').description('Attach a bought domain whose service was deleted (or whose attach failed) to a compute service (gated: deploy)')
@@ -381,15 +380,6 @@ dom.command('list').description('Domains bought through InstaCloud in this proje
   .action(guard((o) => domainCmd.domainList(o)))
 dom.command('status <name>').description("A bought domain's order and attach state").option('--json')
   .action(guard((name, o) => domainCmd.domainStatus(name, o)))
-const domContact = dom.command('contact').description("Show the org's default registrant contact (the legal registrant of every domain bought with it)")
-  .option('--org <id>').option('--json').action(guard((o) => domainCmd.domainContactShow(o)))
-domContact.command('set').description('Set the org default registrant contact (admin) from flags or --contact-file <path>; --company-name makes that organization the legal registrant')
-  .option('--first-name <s>').option('--last-name <s>').option('--company-name <s>').option('--address1 <s>').option('--address2 <s>').option('--city <s>').option('--state <s>').option('--zip <s>')
-  .option('--country <cc>', 'ISO 3166-1 alpha-2, e.g. US').option('--email <s>').option('--phone <e164>', 'E.164, e.g. +14155550100')
-  .option('--contact-file <path>', 'JSON file with the contact fields').option('--org <id>').option('--json')
-  // `contact --org X set` parks --org on the GROUP (enablePositionalOptions); without this merge the
-  // wrong org's registrant contact is written, and that field is legal ownership.
-  .action(guard((o) => domainCmd.domainContactSet({ ...domContact.opts(), ...o })))
 
 const bill = program.command('billing').description('Current billing cycle overview (tier / used / included / overage / credits / forecast + per-dimension & per-project breakdown)')
   .option('--org <id>', 'target org (default: linked project\'s org)').option('--json')
