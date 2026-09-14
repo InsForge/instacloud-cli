@@ -45,11 +45,18 @@ export function isSafeConfigValue(v: unknown): v is string {
  *
  *  A literal double quote is refused rather than escaped, because ssh_config
  *  has no escape for one inside a quoted argument -- there is no correct string
- *  to emit, so emitting nothing and saying why is the only honest answer. */
+ *  to emit, so emitting nothing and saying why is the only honest answer.
+ *
+ *  BACKSLASHES are normalised to forward slashes, which is not cosmetic. A
+ *  Windows path reaches us as `C:\Users\...`, and OpenSSH treats a backslash in
+ *  a config argument as an escape introducer -- so `\U` is consumed and the
+ *  path silently becomes a different one. Windows OpenSSH accepts forward
+ *  slashes everywhere, so rewriting is both safe and the only unambiguous
+ *  form. */
 export function quoteConfigPath(path: string): string {
   if (path.includes('"')) throw new Error(`cannot write an ssh_config path containing a double quote: ${JSON.stringify(path)}`)
   if (/[\n\r]/.test(path)) throw new Error(`cannot write an ssh_config path containing a newline: ${JSON.stringify(path)}`)
-  return `"${path}"`
+  return `"${path.replace(/\\/g, '/')}"`
 }
 
 /**
@@ -161,22 +168,35 @@ export function renderConfigBlock(o: ConfigBlockOpts): string {
  * Idempotent: an existing block is replaced in place rather than duplicated.
  */
 export function upsertConfigBlock(existing: string, block: string): string {
+  // The old block is CUT from wherever it sits and the new one is PREPENDED --
+  // it is never replaced where it stands. Replacing in place looks equivalent
+  // and is not: a block that ended up below an earlier `Host *` (an older
+  // version of this CLI appended it, or the user moved it) would keep that
+  // offset forever, and first-wins means every keyword in it is ignored. The
+  // symptom is the worst kind: ssh connects, silently using the wrong identity,
+  // with no error to search for. Re-running --setup has to be able to FIX that
+  // file, which means the position is part of what we upsert.
+  // Leading blank lines are stripped from what remains: cutting the block out
+  // of the top of a file leaves the separator behind, and re-prepending would
+  // then add one MORE every run, growing the user's config forever.
+  const rest = removeOwnedBlock(existing).replace(/^\n+/, '')
+  if (rest.trim() === '') return block
+  return block + '\n' + rest
+}
+
+/** `existing` with our fenced block cut out, wherever it was. */
+function removeOwnedBlock(existing: string): string {
   const begin = existing.indexOf(BLOCK_BEGIN)
-  if (begin !== -1) {
-    const end = existing.indexOf(BLOCK_END, begin)
-    if (end !== -1) {
-      const after = end + BLOCK_END.length
-      // Swallow the newline that followed the end marker, so repeated runs do
-      // not accumulate blank lines.
-      const tail = existing.slice(after).replace(/^\n/, '')
-      return existing.slice(0, begin) + block + tail
-    }
-    // A begin marker with no end is a file someone edited by hand. Leave it
-    // alone rather than guessing where our block stopped, and put a fresh one
-    // on top -- first-wins means the new one takes effect either way.
-  }
-  if (existing === '') return block
-  return block + '\n' + existing
+  if (begin === -1) return existing
+  const end = existing.indexOf(BLOCK_END, begin)
+  // A begin marker with no end is a file someone edited by hand. Leave it
+  // alone rather than guessing where our block stopped; the fresh block goes
+  // on top, and first-wins means it takes effect either way.
+  if (end === -1) return existing
+  const after = end + BLOCK_END.length
+  // Swallow the newline that followed the end marker, so repeated runs do not
+  // accumulate blank lines.
+  return existing.slice(0, begin) + existing.slice(after).replace(/^\n/, '')
 }
 
 /** The trust anchor line for known_hosts, tagged as ours. */
@@ -210,5 +230,12 @@ export function upsertCertAuthority(existing: string, hostPattern: string, caKey
 
 function isSupersededAnchor(line: string, hostPattern: string, key: string): boolean {
   if (!line.startsWith('@cert-authority') || !line.includes(CA_MARKER)) return false
-  return line.split(/\s+/)[1] === hostPattern || line.includes(key)
+  // Compared FIELD BY FIELD, never with `includes`. A base64 key is an
+  // unanchored substring of any longer key sharing its prefix, so a substring
+  // test would delete a DIFFERENT region's anchor that happened to extend ours
+  // -- and a deleted anchor is not a visible failure, it is a host-key prompt
+  // on every connection to a region that used to be trusted.
+  const [, pattern, keyType, keyBlob] = line.split(/\s+/)
+  const [wantType, wantBlob] = key.split(/\s+/)
+  return pattern === hostPattern || (keyType === wantType && keyBlob === wantBlob)
 }

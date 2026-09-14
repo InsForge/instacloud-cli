@@ -572,3 +572,119 @@ describe('paths are quoted, because a home directory may contain a space', () =>
     expect(quoteConfigPath('/home/dev/ssh/id')).toBe('"/home/dev/ssh/id"')
   })
 })
+
+
+describe('our block is relocated to the top, not replaced where it sits', () => {
+  const blk = (host: string) => `${BLOCK_BEGIN}\nHost api.insta\n  HostName ${host}\n${BLOCK_END}\n`
+
+  it('lifts a block that is already BELOW an earlier Host *', () => {
+    // The regression: `ssh` takes the FIRST obtained value for each keyword, so
+    // a block under a `Host *` has every setting ignored -- and the symptom is
+    // a connection that silently uses the wrong identity, not an error. An
+    // older CLI appended the block; re-running --setup has to be able to fix
+    // that file, which makes POSITION part of what we upsert.
+    const existing = `Host *\n  IdentityFile ~/.ssh/id_rsa\n\n${blk('old')}`
+    const out = upsertConfigBlock(existing, blk('NEW'))
+    expect(out.indexOf(BLOCK_BEGIN), 'the block stayed below Host * and is still ignored').toBeLessThan(out.indexOf('Host *'))
+    expect(out).toContain('HostName NEW')
+    expect(out, 'the old stanza was left behind').not.toContain('HostName old')
+  })
+
+  it('keeps the user config that was above it, just below us now', () => {
+    const existing = `Host *\n  IdentityFile ~/.ssh/id_rsa\n\n${blk('old')}`
+    const out = upsertConfigBlock(existing, blk('NEW'))
+    expect(out, 'the user\'s own config was dropped').toContain('IdentityFile ~/.ssh/id_rsa')
+    expect(out).toContain('Host *')
+  })
+
+  it('does not duplicate the block across repeated runs', () => {
+    let cfg = ''
+    for (const h of ['a', 'b', 'c']) cfg = upsertConfigBlock(cfg, blk(h))
+    expect(cfg.split(BLOCK_BEGIN).length - 1, 'the block accumulated').toBe(1)
+    expect(cfg).toContain('HostName c')
+  })
+
+  it('still prepends when there is no block yet', () => {
+    const out = upsertConfigBlock('Host *\n  Port 22\n', blk('x'))
+    expect(out.startsWith(BLOCK_BEGIN)).toBe(true)
+    expect(out).toContain('Port 22')
+  })
+
+  it('leaves a hand-truncated block alone and puts a fresh one on top', () => {
+    // A begin marker with no end means someone edited by hand; guessing where
+    // ours stopped could eat their config.
+    const existing = `${BLOCK_BEGIN}\nHost api.insta\n  HostName orphaned\n`
+    const out = upsertConfigBlock(existing, blk('NEW'))
+    expect(out.startsWith(BLOCK_BEGIN)).toBe(true)
+    expect(out).toContain('HostName NEW')
+    expect(out, 'the hand-edited remnant was destroyed').toContain('HostName orphaned')
+  })
+})
+
+describe('a trust anchor is matched field by field, never by substring', () => {
+  const CA = 'ssh-ed25519 AAAAKEY'
+
+  it('keeps an anchor whose key merely EXTENDS ours', () => {
+    // A base64 blob is an unanchored substring of any longer blob sharing its
+    // prefix. Deleting that line is not a visible failure -- it is a host-key
+    // prompt on every connection to a region that used to be trusted.
+    const other = `@cert-authority *.other.example ssh-ed25519 AAAAKEYLONGER ${CA_MARKER}\n`
+    const out = upsertCertAuthority(other, '*.compute.example', CA)
+    expect(out, 'an unrelated anchor was deleted by a substring match').toContain('*.other.example')
+    expect(out).toContain('*.compute.example')
+  })
+
+  it('keeps an anchor whose HOST PATTERN merely extends ours', () => {
+    const other = `@cert-authority *.compute.example.net ssh-ed25519 AAAAOTHER ${CA_MARKER}\n`
+    const out = upsertCertAuthority(other, '*.compute.example', CA)
+    expect(out).toContain('*.compute.example.net')
+  })
+
+  it('still replaces the anchor for the SAME host pattern (rotation)', () => {
+    const first = upsertCertAuthority('', '*.compute.example', 'ssh-ed25519 AAAAOLD')
+    const rotated = upsertCertAuthority(first, '*.compute.example', 'ssh-ed25519 AAAANEW')
+    expect(rotated, 'the retired CA stayed trusted').not.toContain('AAAAOLD')
+    expect(rotated).toContain('AAAANEW')
+    expect(rotated.split('@cert-authority').length - 1).toBe(1)
+  })
+
+  it('still moves the anchor when the SAME key changes host pattern', () => {
+    const first = upsertCertAuthority('', 'ssh.*.old.example', CA)
+    const moved = upsertCertAuthority(first, 'ssh.*.new.example', CA)
+    expect(moved).not.toContain('old.example')
+    expect(moved.split('@cert-authority').length - 1).toBe(1)
+  })
+
+  it('never touches an anchor the user added themselves', () => {
+    const mine = '@cert-authority *.compute.example ssh-ed25519 AAAAKEY\n'
+    const out = upsertCertAuthority(mine, '*.compute.example', CA)
+    expect(out, 'an unmarked anchor the user owns was deleted').toContain(mine.trim())
+  })
+})
+
+describe('a Windows path is normalised, not escaped away', () => {
+  it('rewrites backslashes to forward slashes', () => {
+    // OpenSSH treats `\` in a config argument as an escape introducer, so
+    // `C:\Users\...` silently resolves to a DIFFERENT path. Windows OpenSSH
+    // accepts forward slashes everywhere, so rewriting is the unambiguous form.
+    expect(quoteConfigPath('C:\\Users\\Jun Wen\\.insta\\ssh\\id_ed25519'))
+      .toBe('"C:/Users/Jun Wen/.insta/ssh/id_ed25519"')
+  })
+
+  it('emits a Windows IdentityFile ssh can actually load', () => {
+    const out = renderConfigBlock({
+      entries: [{
+        alias: 'api.insta', hostName: 'ssh.example.com', user: 'svc-abc',
+        certificateFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\api.insta-cert.pub',
+      }],
+      identityFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\id_ed25519',
+    })
+    expect(out).toContain('IdentityFile "C:/Users/Jun Wen/.insta/ssh/id_ed25519"')
+    expect(out).toContain('CertificateFile "C:/Users/Jun Wen/.insta/ssh/api.insta-cert.pub"')
+    expect(out, 'a raw backslash survived into the config').not.toContain('\\')
+  })
+
+  it('leaves a POSIX path exactly as it was', () => {
+    expect(quoteConfigPath('/home/dev/.insta/ssh/id')).toBe('"/home/dev/.insta/ssh/id"')
+  })
+})
