@@ -923,15 +923,37 @@ export function certNeedsRenewal(
   }
 }
 
+/** The key pair every certificate is issued for, generated on first use.
+ *
+ *  Generation is SERIALISED on the setup lock. Two first-ever setups on a
+ *  fresh machine -- a script setting up `api` and `worker` side by side is the
+ *  ordinary way to get there -- both found no key and both ran ssh-keygen at
+ *  the same path. The second hit "already exists, overwrite?" on a closed
+ *  stdin and failed; or one read a private key the other had just written
+ *  whose `.pub` did not exist yet; or their writes interleaved and left one
+ *  process's private key beside the other's public key, with a certificate
+ *  then issued for a key no longer on disk. It is the same lock the setup
+ *  transaction takes, which is safe only because every caller runs this
+ *  BEFORE taking that lock itself: the lock is not re-entrant.
+ *
+ *  The steady state -- both files present -- takes no lock, so the renewal
+ *  hook stays lock-free on the path it runs on every ssh. */
 function ensureKeyPair(): string {
-  const dir = instaSSHDir()
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
   const key = instaKeyPath()
-  if (!existsSync(key)) {
-    execFileSync('ssh-keygen', ['-t', 'ed25519', '-N', '', '-C', 'insta compute ssh', '-f', key], { stdio: 'pipe' })
+  const read = () => {
+    chmodSync(key, 0o600)
+    return readFileSync(key + '.pub', 'utf8').trim()
   }
-  chmodSync(key, 0o600)
-  return readFileSync(key + '.pub', 'utf8').trim()
+  if (existsSync(key) && existsSync(key + '.pub')) return read()
+  return withAliasStoreLock(() => {
+    mkdirSync(instaSSHDir(), { recursive: true, mode: 0o700 })
+    // Re-checked under the lock: the process this one queued behind may have
+    // been the one generating it.
+    if (!existsSync(key)) {
+      execFileSync('ssh-keygen', ['-t', 'ed25519', '-N', '', '-C', 'insta compute ssh', '-f', key], { stdio: 'pipe' })
+    }
+    return read()
+  })
 }
 
 type CertResponse = { certificate: string; host: string; username: string; expiresAt: string; caPublicKey?: string }
@@ -1109,6 +1131,27 @@ export type Undo = () => void
  *  is checked here rather than trusted. */
 function record(undo: Undo[], back: unknown): void {
   if (typeof back === 'function') undo.push(back as Undo)
+}
+
+/** Run `steps` in order; when one throws, take back the ones before it in
+ *  reverse and rethrow. Every step that can be taken back returns how, because
+ *  the steps AFTER an anchor rotation can still fail and the rotation is what
+ *  retires the CA vouching for the certificate already installed. Undone in
+ *  reverse so each step sees the world its own undo expects.
+ *
+ *  Undo failures are swallowed on purpose: the error that got us here is the
+ *  one worth reporting, and an undo that cannot run leaves exactly the state
+ *  we would have had without one. */
+function commitWithUndo(steps: Array<() => Undo | void>): void {
+  const undo: Undo[] = []
+  try {
+    for (const step of steps) record(undo, step())
+  } catch (e) {
+    for (const back of undo.reverse()) {
+      try { back() } catch { /* nothing better to do on the way out */ }
+    }
+    throw e
+  }
 }
 
 /** How long an anchor update waits for another insta process before giving up.
@@ -1359,32 +1402,65 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
     // socket open, so the process lingers anyway.
     const out = await mintCert(api, rec.projectId, rec.serviceId, ensureKeyPair(), alias, AbortSignal.timeout(timeoutMs))
     try {
-      // The ANCHOR before the certificate. Committing the certificate first
-      // left the alias holding a credential signed by a CA this machine does
-      // not trust whenever the anchor write failed -- and the catch below
-      // would have swallowed that too.
+      // The commit is a setup transaction in miniature, under the SAME lock a
+      // setup holds -- aliases.lock -- and for two reasons.
       //
-      // The rename that follows is the step that does not fail halfway, but it
-      // can still fail outright, and on a ROTATION that leaves the retired CA
-      // gone and the certificate it signed still installed. So the anchor
-      // update is taken back when the rename does not happen.
+      // A renewal can MOVE the alias. The response names the host and the
+      // principal this certificate was issued for, and the installed stanza
+      // routes on the ones recorded at setup. Committing the certificate alone
+      // left `ssh <alias>` connecting to yesterday's host as yesterday's user
+      // carrying a certificate that names today's -- while anchoring today's
+      // host, since the anchor below is derived from the response. So the
+      // store and, where the block is installed, the config move with the
+      // certificate, exactly as a plain re-issue does in computeSSH.
       //
-      // ONE section from reading the anchor to committing the certificate that
-      // depends on it, rollback included -- see the note in computeSSH. This is
-      // the side of that race that gets let in mid-transaction: a renewal takes
-      // the per-alias lock and never aliases.lock, so nothing else was keeping
-      // it out.
-      const ca = out.caPublicKey
-      if (ca === undefined) out.staged.commit()
-      else withKnownHostsLock(() => {
-        const back = installCertAuthority(hostPatternFor(out.host), ca)
-        try {
-          out.staged.commit()
-        } catch (e) {
-          try { back() } catch { /* nothing better to do on the way out */ }
-          throw e
-        }
-      })
+      // And the mint ran OUTSIDE any lock (no network under a lock), so the
+      // world is re-read in here. A `--setup` that finished meanwhile may have
+      // replaced the certificate with a newer one, and a stale mint must not
+      // undo that; a record removed or re-pointed meanwhile is one this
+      // certificate was not issued for.
+      //
+      // Lock order stays acyclic: the per-alias renewal lock is only ever
+      // taken first, and only by renewals; then aliases.lock; then
+      // known_hosts.lock inside it. The wait is the SHORT one, because this
+      // still runs inside OpenSSH's config parse: a renewal that cannot get in
+      // gives up whole, leaving the certificate and the anchor it found.
+      withAliasStoreLock(() => {
+        const before = readAliasStore()
+        const held = before[alias]
+        if (!held || held.projectId !== rec.projectId || held.serviceId !== rec.serviceId) return
+        if (!certNeedsRenewal(instaCertPath(alias))) return
+        const moved = held.host !== out.host || held.username !== out.username
+        const store: AliasStore = moved
+          ? { ...before, [alias]: { ...held, host: out.host, username: out.username } }
+          : before
+        const installed = configBlockInstalled()
+        const ca = out.caPublicKey
+
+        // The ANCHOR before the certificate. Committing the certificate first
+        // left the alias holding a credential signed by a CA this machine does
+        // not trust whenever the anchor write failed -- and the catch below
+        // would have swallowed that too. The rename that ends it is the step
+        // that does not fail halfway, but it can still fail outright, and on a
+        // ROTATION that leaves the retired CA gone with the certificate it
+        // signed still installed -- so every step before it is taken back.
+        //
+        // The config is re-rendered only when something in it CHANGES. OpenSSH
+        // is reading that very file right now; POSIX lets a rename replace an
+        // open file, Windows does not, and there the undo chain turns a moved
+        // host into a renewal that gives up -- one failed renewal and a
+        // `--setup` to repair it, never a half-moved alias.
+        const steps: Array<() => Undo | void> = []
+        if (moved) steps.push(() => { writeAliasStore(store); return () => writeAliasStore(before) })
+        if (ca !== undefined) steps.push(() => installCertAuthority(hostPatternFor(out.host), ca))
+        if (moved && installed) steps.push(() => installConfigBlock(store))
+        steps.push(() => out.staged.commit())
+
+        // ONE section from reading the anchor to committing the certificate
+        // that depends on it, rollback included -- see the note in computeSSH.
+        if (ca !== undefined) withKnownHostsLock(() => commitWithUndo(steps))
+        else commitWithUndo(steps)
+      }, { waitMs: KNOWN_HOSTS_LOCK_WAIT_MS })
     } finally {
       out.staged.discard()
     }
@@ -1604,38 +1680,23 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
       // under the one lock, with the same undo chain as a setup.
       installed = opts.setup || (deps.configInstalled ?? configBlockInstalled)()
 
-      // Every step that can be taken back registers how, because the steps
-      // AFTER an anchor rotation can still fail and the rotation is what
-      // retires the CA vouching for the certificate already installed. Undone
-      // in reverse, so each step sees the world its own undo expects.
-      const commitAll = () => {
-        const undo: Undo[] = []
-        try {
-          writeAliasStore(store)
-          undo.push(() => writeAliasStore(before))
-          if (installed) {
-            // planCertAuthority parses the key and refuses a bad one, so a hostile
-            // or malformed response fails HERE instead of appending lines to
-            // known_hosts.
-            if (out.caPublicKey) {
-              record(undo, (deps.installCA ?? installCertAuthority)(hostPatternFor(out.host), out.caPublicKey))
-            }
-            record(undo, (deps.installConfig ?? installConfigBlock)(store))
-          }
-          // Last, and for the same reason as in the renewal hook: a certificate
-          // whose anchor never landed authenticates nothing, so it does not
-          // replace one that still works.
-          out.staged.commit()
-        } catch (e) {
-          // Best-effort, and failures here are swallowed on purpose: the error
-          // that got us here is the one worth reporting, and an undo that cannot
-          // run leaves exactly the state we would have had without one.
-          for (const back of undo.reverse()) {
-            try { back() } catch { /* nothing better to do on the way out */ }
-          }
-          throw e
-        }
+      // Every step that can be taken back registers how -- see commitWithUndo.
+      const ca = out.caPublicKey
+      const steps: Array<() => Undo | void> = [
+        () => { writeAliasStore(store); return () => writeAliasStore(before) },
+      ]
+      if (installed) {
+        // planCertAuthority parses the key and refuses a bad one, so a hostile
+        // or malformed response fails HERE instead of appending lines to
+        // known_hosts.
+        if (ca) steps.push(() => (deps.installCA ?? installCertAuthority)(hostPatternFor(out.host), ca))
+        steps.push(() => (deps.installConfig ?? installConfigBlock)(store))
       }
+      // Last, and for the same reason as in the renewal hook: a certificate
+      // whose anchor never landed authenticates nothing, so it does not
+      // replace one that still works.
+      steps.push(() => out.staged.commit())
+      const commitAll = () => commitWithUndo(steps)
 
       // The ROLLBACK is inside the anchor's lock too, not just the write it
       // takes back. Holding the lock per edit and dropping it before the
@@ -1645,7 +1706,10 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
       // sees CA already anchored, is handed a do-nothing undo for it, and
       // commits a certificate signed by CA; this command then fails, its undo
       // retires CA -- and the renewal's certificate, minted and committed
-      // perfectly correctly, now authenticates nothing.
+      // perfectly correctly, now authenticates nothing. The renewal hook now
+      // queues on aliases.lock for its own commit too, so that interleaving is
+      // excluded twice over; this lock stays because it guards the FILE,
+      // whoever the writer turns out to be.
       //
       // Held only when there is an anchor to rotate. A re-issue that writes no
       // anchor has nothing for a rollback to strand, and taking the lock anyway

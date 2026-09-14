@@ -80,8 +80,13 @@ export function resolveThroughSymlink(path: string): string {
     }
     // Link text is resolved against the directory holding the LINK, as the
     // kernel does it -- not against the process cwd, which would scatter files
-    // into wherever the CLI happened to be run from.
-    path = resolve(dirname(path), link)
+    // into wherever the CLI happened to be run from. The REAL directory, too:
+    // the kernel resolves a relative target from where the link actually
+    // lives, so when `~/.ssh` is itself a link into a dotfiles repo, a
+    // `../x` inside it names a sibling of the repo directory, not of `~/.ssh`.
+    // The directory exists (the link was just lstat'ed inside it), and any
+    // failure resolving it propagates like every other one above.
+    path = resolve(realpathSync(dirname(path)), link)
   }
   throw new Error(`too many levels of symbolic links resolving ${JSON.stringify(path)}`)
 }

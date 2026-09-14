@@ -132,6 +132,31 @@ describe('a symlinked config is written THROUGH, not replaced', () => {
     writeFileAtomicSync(link, 'new\n', { backup: true })
     expect(lstatSync(link).isSymbolicLink()).toBe(true)
     expect(readFileSync(target, 'utf8')).toBe('new\n')
+    // NO backup of anything: not of the link, and not of a target that did not
+    // exist. Without this line the case could not tell a stray `link.insta-bak`
+    // from a clean run.
+    expect(readdirSync(dir).sort(), 'a backup was written for something that had nothing to back up').toEqual(['link', 'target'])
+  })
+
+  it('resolves a RELATIVE dangling link from the directory the link REALLY lives in', () => {
+    // `~/.ssh` is itself a link into a dotfiles repo -- stow and friends do
+    // exactly this -- and inside the repo a config is a relative dangling link
+    // to a sibling of the REPO directory. The kernel resolves link text
+    // against the directory the link is actually in, after following the
+    // directories above it; resolving against the lexical path instead put
+    // the file beside `~/.ssh`, one directory over from where the user wired
+    // it, and the dotfiles copy never saw the block.
+    const repo = join(dir, 'dotfiles', 'ssh'); mkdirSync(repo, { recursive: true })
+    symlinkSync('../ssh_config', join(repo, 'config'))       // -> dir/dotfiles/ssh_config
+    const sshDir = join(dir, 'dot-ssh'); symlinkSync(repo, sshDir) // ~/.ssh -> the repo
+
+    writeFileAtomicSync(join(sshDir, 'config'), 'body\n')
+
+    expect(readFileSync(join(dir, 'dotfiles', 'ssh_config'), 'utf8'),
+      'the target the link names, resolved from its real directory, was not written').toBe('body\n')
+    expect(readdirSync(dir).sort(), 'a stray file landed beside the lexical parent instead')
+      .toEqual(['dot-ssh', 'dotfiles'])
+    expect(lstatSync(join(repo, 'config')).isSymbolicLink()).toBe(true)
   })
 
   it('leaves no temporary file behind on success', () => {

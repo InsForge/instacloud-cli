@@ -6,7 +6,7 @@
 // credential that had just been issued. Neither is visible from a test of any
 // single piece -- only from running the steps together and watching what
 // happens, and in what order.
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest'
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -77,6 +77,10 @@ const d = keygen ? describe : describe.skip
 
 const CERT_TYPE = 'ssh-ed25519-cert-v01@openssh.com'
 const fixtures = keygen ? mkdtempSync(join(tmpdir(), 'insta-ssh-fixtures-')) : ''
+// Module scope, so cleaned up at module scope: the per-test `home` is removed
+// in afterEach, and this directory was leaking a CA, a user key and every
+// generated certificate into the OS temp area on every run.
+afterAll(() => { if (fixtures) rmSync(fixtures, { recursive: true, force: true }) })
 const CERT = !keygen ? '' : (() => {
   const ca = join(fixtures, 'ca'), user = join(fixtures, 'user')
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', ca, '-C', 'ca@insta'])
@@ -133,6 +137,11 @@ const signedForOurKey = (caName: string, id: string, window: string) => {
  *  at all. */
 const WORKER_STALE_CERT = !keygen ? '' : signedForOurKey('ca-prev', 'worker-stale', '-2h:-1h')
 const WORKER_FRESH_CERT = !keygen ? '' : signedForOurKey('ca', 'worker-fresh', '+1h')
+/** In-date certificates for our key, distinguishable from CERT by their id:
+ *  what a renewal hands back once the alias has moved, and what a late mint
+ *  hands back after somebody else already renewed. */
+const MOVED_CERT = !keygen ? '' : signedForOurKey('ca', 'moved', '+1h')
+const LATE_CERT = !keygen ? '' : signedForOurKey('ca', 'late', '+1h')
 
 /** Install the key CERT was issued for where ensureKeyPair looks for it.
  *
@@ -521,11 +530,16 @@ d('renewal never blocks the ssh it runs inside', () => {
 
   it('leaves the existing certificate in place when it gives up', async () => {
     mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
-    writeFileSync(instaCertPath('api.insta'), CERT + '\n')
+    // EXPIRED, so the give-up path is actually reached. With a certificate
+    // still in date, certNeedsRenewal returns before the first network call and
+    // this case passed for a hook that overwrote the file on every failure.
+    writeFileSync(instaCertPath('api.insta'), EXPIRED_CERT + '\n')
     writeAliasStore({ 'api.insta': { projectId: 'proj-1', serviceId: 'svc-1', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1' } })
-    await raceRenewal(() => Promise.reject(new Error('network down')))
+    let asked = false
+    await raceRenewal(() => { asked = true; return Promise.reject(new Error('network down')) })
+    expect(asked, 'renewal never reached the platform, so nothing below was exercised').toBe(true)
     // Silent and fail-safe: the login then proceeds on the certificate it has.
-    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe(CERT + '\n')
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe(EXPIRED_CERT + '\n')
   })
 })
 
@@ -872,21 +886,32 @@ d('the certificate is committed only once its anchor is', () => {
 // deadlocks on the lock. Only real processes interleave, so the test spawns
 // them.
 //
-// The children are TypeScript, so they need the same loader vitest uses.
-// Probed rather than assumed, and only where the rest of the file already has
-// something to run.
-const hasTsx = (() => {
+// The children are TypeScript, so they need a loader. tsx is a devDependency
+// of this repo, so failing to load it is a BROKEN environment rather than a
+// legitimate one the way a missing ssh-keygen is -- and a broken environment
+// FAILS these suites rather than skipping them. A lock or ordering regression
+// guarded only by a suite that silently skipped is not guarded at all, which
+// is the argument ssh-setup-transaction.test.ts makes against skipping on
+// OpenSSH; it has to hold for the loader too. Probed once so the failure names
+// the cause instead of surfacing as four spawn errors.
+const tsxUnavailable = (() => {
   try {
-    execFileSync(process.execPath, ['--import', 'tsx', '-e', ''], { stdio: 'ignore' })
-    return true
-  } catch {
-    return false
+    execFileSync(process.execPath, ['--import', 'tsx', '-e', ''], { stdio: 'pipe' })
+    return undefined
+  } catch (e) {
+    return e as Error
   }
 })()
+const requireTsx = () => {
+  if (tsxUnavailable) {
+    throw new Error(`the multi-process suites need \`node --import tsx\` (Node >= 18.19 with the tsx devDependency installed): ${tsxUnavailable.message}`)
+  }
+}
 
-const dd = keygen && hasTsx ? describe : describe.skip
+const dd = keygen ? describe : describe.skip
 
 dd('separate processes installing anchors at once keep every anchor', () => {
+  beforeAll(requireTsx)
   const CHILD = `
 const [, , mod, startAt, ca, ...patterns] = process.argv
 const { installCertAuthority } = await import(mod)
@@ -931,6 +956,7 @@ for (const pattern of patterns) installCertAuthority(pattern, ca)
 })
 
 dd('a setup that fails cannot strand a renewal that succeeded', () => {
+  beforeAll(requireTsx)
   // The finding. The known_hosts lock covered each individual EDIT and was
   // released before the transaction that edit belonged to had committed. So:
   // setup A rotates the anchor from CA_PREV to CA and keeps an undo that would
@@ -1056,13 +1082,12 @@ writeFileSync(join(dir, 'b-done'), 'x')
   }, 40_000)
 })
 
-// The lock itself has nothing to do with OpenSSH, so this is gated on the
-// loader ALONE: gating it on ssh-keygen as well would silently skip the
-// regression wherever OpenSSH is absent, which is most of the places a lock bug
-// is cheap to reproduce.
-const ddl = hasTsx ? describe : describe.skip
-
-ddl('simultaneous stale-lock recovery still admits one holder', () => {
+// The lock itself has nothing to do with OpenSSH, so this is NOT behind the
+// ssh-keygen gate: gating it there would silently skip the regression wherever
+// OpenSSH is absent, which is most of the places a lock bug is cheap to
+// reproduce.
+describe('simultaneous stale-lock recovery still admits one holder', () => {
+  beforeAll(requireTsx)
   // The finding. Stale takeover was `statSync` followed by an unconditional
   // `unlinkSync`, and nothing tied the file removed to the file judged stale.
   // Two contenders both see the dead holder's lock; the first removes it and
@@ -1295,7 +1320,7 @@ d('a CA key is validated whole, not by its first field', () => {
 
   it('refuses an ed25519 key whose key field is the wrong size', () => {
     const short = `ssh-ed25519 ${Buffer.concat([field(Buffer.from('ssh-ed25519')), field(Buffer.alloc(16, 0x41))]).toString('base64')}`
-    expect(() => parseCAPublicKey(short)).toThrow(/32-byte/)
+    expect(() => parseCAPublicKey(short)).toThrow(/shape of "ssh-ed25519"/)
   })
 
   it('refuses a blob with trailing bytes after its last field', () => {
@@ -1331,4 +1356,202 @@ d('a symlinked certificate is written THROUGH, not replaced', () => {
     expect(lstatSync(link).isSymbolicLink(), 'the symlink was replaced with a regular file').toBe(true)
     expect(readFileSync(real, 'utf8'), 'the dotfiles copy was left stale').toBe(CERT + '\n')
   })
+})
+
+d('an automatic renewal moves the alias with the certificate', () => {
+  // The finding. The response names the host and the principal the
+  // certificate was issued for, and the installed stanza routes on the ones
+  // recorded at setup. Committing the certificate alone left `ssh <alias>`
+  // connecting to yesterday's host as yesterday's user carrying a certificate
+  // that names today's -- while anchoring today's host, since the anchor is
+  // derived from the response. A plain re-issue already moved all four
+  // artifacts together (ssh-setup-transaction.test.ts); the hook, the one
+  // writer that runs unattended, did not.
+  const HOST = 'ssh.us-west-1.compute.example'
+  const MOVED = 'ssh.eu-central-1.compute.example'
+  const configPath = () => join(home, '.ssh', 'config')
+  const knownHosts = () => readFileSync(join(home, '.ssh', 'known_hosts'), 'utf8')
+
+  const renew = async (respond: () => unknown) => {
+    const mod = await import('../src/api.js')
+    const fetchImpl = async () => ({ status: 200, text: async () => JSON.stringify(respond()) })
+    const spy = vi.spyOn(mod.ApiClient, 'load').mockResolvedValue(
+      new mod.ApiClient({ apiUrl: 'https://example.invalid', accessToken: 't' } as never, fetchImpl as never),
+    )
+    try { await ensureCertForAlias('api.insta', 2_000) } finally { spy.mockRestore() }
+  }
+  const movedResponse = { certificate: MOVED_CERT, host: MOVED, username: 'u-moved', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
+  const sameResponse = { certificate: MOVED_CERT, host: HOST, username: 'u-svc-1', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
+
+  /** The alias as a real --setup leaves it -- certificate, anchor, store and
+   *  stanza all agreeing on HOST / u-svc-1 -- then aged, so renewal is reached. */
+  const anInstalledAlias = async () => {
+    installTheKeyCertWasIssuedFor()
+    const { deps: d } = deps({ installCA: undefined, installConfig: undefined })
+    await computeSSH('api', { setup: true }, d)
+    writeFileSync(instaCertPath('api.insta'), EXPIRED_CERT + '\n')
+  }
+
+  it('routes the alias to the host and principal the new certificate names', async () => {
+    await anInstalledAlias()
+    await renew(() => movedResponse)
+
+    const cfg = readFileSync(configPath(), 'utf8')
+    expect(cfg, 'the alias kept routing to the host the service left').not.toContain(`HostName ${HOST}`)
+    expect(cfg).toContain(`HostName ${MOVED}`)
+    expect(cfg, 'the alias kept logging in as a principal the certificate no longer names').toContain('User u-moved')
+    expect(readAliasStore()['api.insta']).toMatchObject({ host: MOVED, username: 'u-moved' })
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe(MOVED_CERT + '\n')
+    expect(knownHosts(), 'the new host was not anchored').toContain(`@cert-authority ${MOVED} ${caRecord(CA)}`)
+  })
+
+  it('does not touch the config when nothing in it changed', async () => {
+    // OpenSSH is reading that file while the hook runs, and on Windows a
+    // rename over an open file fails -- so a renewal that re-rendered the
+    // block unconditionally would fail there on every expiry. The
+    // config.insta-bak the writer leaves is the tell: a first setup makes none
+    // (there was no file to back up), so its presence means a rewrite.
+    await anInstalledAlias()
+    const before = readFileSync(configPath(), 'utf8')
+    await renew(() => sameResponse)
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8'), 'the renewal itself did not happen').toBe(MOVED_CERT + '\n')
+    expect(readFileSync(configPath(), 'utf8')).toBe(before)
+    expect(existsSync(configPath() + '.insta-bak'), 'the config was rewritten although nothing in it changed').toBe(false)
+  })
+
+  it('puts the stanza, the store and the anchor back when the move cannot be committed', async () => {
+    await anInstalledAlias()
+    const before = readFileSync(configPath(), 'utf8')
+    // The last step is the certificate rename, and a directory in its place
+    // makes it fail the way a real filesystem would -- after the store, the
+    // anchor and the config have all been written.
+    rmSync(instaCertPath('api.insta'))
+    mkdirSync(instaCertPath('api.insta'))
+    writeFileSync(join(instaCertPath('api.insta'), 'x'), '')
+    await renew(() => movedResponse)
+
+    expect(readFileSync(configPath(), 'utf8'), 'a failed renewal left the stanza describing a move that never happened').toBe(before)
+    expect(readAliasStore()['api.insta'], 'the store recorded a move that never happened').toMatchObject({ host: HOST, username: 'u-svc-1' })
+    expect(knownHosts(), 'the anchor for a host the alias never moved to was left behind').not.toContain(`@cert-authority ${MOVED} `)
+    expect(knownHosts(), 'the anchor the alias still depends on was retired').toContain(`@cert-authority ${HOST} ${caRecord(CA)}`)
+  })
+
+  it('does not replace a certificate somebody else renewed while its own mint was in flight', async () => {
+    // The mint runs outside every lock. A --setup that finishes in that window
+    // commits a newer certificate; the renewal's answer is then the OLDER
+    // credential, and committing it over the newer one is a step backwards
+    // that also re-anchors whatever CA the older answer carried.
+    await anInstalledAlias()
+    await renew(() => {
+      // Stands in for the concurrent setup: it lands while this request is open.
+      writeFileSync(instaCertPath('api.insta'), CERT + '\n')
+      return { ...sameResponse, certificate: LATE_CERT }
+    })
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8'),
+      'a stale mint replaced the certificate a concurrent setup had just committed').toBe(CERT + '\n')
+    expect(readdirSync(join(home, '.insta', 'ssh')).filter((f) => f.includes('staging')), 'a staged certificate was left behind').toEqual([])
+  })
+
+  it('does not commit a certificate for a record that was re-pointed while its mint was in flight', async () => {
+    await anInstalledAlias()
+    await renew(() => {
+      writeAliasStore({ 'api.insta': { projectId: 'proj-1', serviceId: 'svc-other', host: HOST, username: 'u-svc-1' } })
+      return sameResponse
+    })
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8'),
+      'a certificate issued for one service was installed for an alias now naming another').toBe(EXPIRED_CERT + '\n')
+  })
+})
+
+// C2: the key pair is generated once, however many first-ever setups arrive together.
+const ddPosix = keygen && process.platform !== 'win32' ? describe : describe.skip
+
+ddPosix('first-ever setups running at once generate ONE key pair', () => {
+  beforeAll(requireTsx)
+  // The finding. ensureKeyPair ran before the setup lock, so two setups on a
+  // fresh machine both saw no key and both ran ssh-keygen at the same path.
+  // The second failed on "already exists, overwrite?" against a closed stdin
+  // (exit 1, observed); or read a private key whose .pub was not written yet;
+  // or the two interleaved and left one process's private key beside the
+  // other's public key, with a certificate then issued for a key no longer on
+  // disk. The steady-state suite in ssh-setup-transaction.test.ts pre-creates
+  // the pair and so never saw it.
+  //
+  // ssh-keygen makes an ed25519 key in about three milliseconds, so four
+  // co-started processes would collide only by luck. The children run it
+  // through a shim that SLEEPS first, which makes the window wide enough that
+  // an unserialised generation collides every time. A shim on PATH is a shell
+  // script, hence not on Windows.
+  const CHILD = `
+const [, , mod, dir, name, certFile, caFile] = process.argv
+const { existsSync, readFileSync, writeFileSync } = await import('node:fs')
+const { join } = await import('node:path')
+const { computeSSH, instaCertPath, stageCertificate } = await import(mod)
+const CERT = readFileSync(certFile, 'utf8').trim()
+const CA = readFileSync(caFile, 'utf8').trim()
+const deps = {
+  loadApi: async () => ({ request: async () => ({ services: [{ id: 'svc-' + name, name, type: 'compute' }] }) }),
+  loadProject: async () => ({ projectId: 'proj-1' }),
+  mint: async (_a, _p, serviceId, publicKey, alias) => {
+    // The key this setup had its certificate issued for.
+    writeFileSync(join(dir, 'pub-' + name), publicKey)
+    return {
+      certificate: CERT, host: 'ssh.us-west-1.compute.example', username: 'u-' + serviceId,
+      expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA,
+      staged: stageCertificate(instaCertPath(alias), CERT + '\\n', { verify: () => {} }),
+    }
+  },
+  emit: () => {},
+}
+writeFileSync(join(dir, 'ready-' + name), 'x')
+while (!existsSync(join(dir, 'go'))) await new Promise((r) => setTimeout(r, 5))
+await computeSSH(name, { setup: true }, deps)
+`
+
+  const run = (args: string[], env: NodeJS.ProcessEnv) => new Promise<{ code: number | null; err: string }>((resolve) => {
+    const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'ignore', 'pipe'] })
+    let err = ''
+    child.stderr!.on('data', (x) => { err += String(x) })
+    child.on('exit', (code) => resolve({ code, err }))
+  })
+  const waitFor = async (paths: string[]) => {
+    const deadline = Date.now() + 20_000
+    while (!paths.every((p) => existsSync(p))) {
+      if (Date.now() > deadline) throw new Error(`children never became ready: ${paths.filter((p) => !existsSync(p)).join(', ')}`)
+      await new Promise((r) => setTimeout(r, 10))
+    }
+  }
+
+  it('leaves every setup holding the same key, and every certificate issued for it', async () => {
+    const script = join(home, 'keygen-child.mts')
+    writeFileSync(script, CHILD)
+    const certFile = join(home, 'cert.txt'); writeFileSync(certFile, CERT)
+    const caFile = join(home, 'ca.txt'); writeFileSync(caFile, CA)
+    const compute = new URL('../src/commands/compute.ts', import.meta.url).href
+
+    // The slow ssh-keygen. Real, apart from the half-second in front.
+    const realKeygen = execFileSync('sh', ['-c', 'command -v ssh-keygen'], { encoding: 'utf8' }).trim()
+    const bin = join(home, 'bin'); mkdirSync(bin)
+    writeFileSync(join(bin, 'ssh-keygen'), `#!/bin/sh\nsleep 0.5\nexec ${realKeygen} "$@"\n`, { mode: 0o755 })
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, USERPROFILE: home }
+
+    const names = ['api', 'worker', 'web', 'cron']
+    const results = names.map((name) => run(['--import', 'tsx', script, compute, home, name, certFile, caFile], env))
+    await waitFor(names.map((n) => join(home, `ready-${n}`)))
+    writeFileSync(join(home, 'go'), 'x')
+    for (const r of await Promise.all(results)) expect(r.code, `a first-ever setup failed: ${r.err}`).toBe(0)
+
+    // ONE pair, and a matching one: the private key on disk derives the public
+    // key beside it.
+    const derived = execFileSync(realKeygen, ['-y', '-f', instaKeyPath()], { encoding: 'utf8' }).trim().split(/\s+/).slice(0, 2).join(' ')
+    const onDisk = readFileSync(instaKeyPath() + '.pub', 'utf8').trim().split(/\s+/).slice(0, 2).join(' ')
+    expect(onDisk, 'the public key on disk is not the private key\'s').toBe(derived)
+    // And every certificate was issued for THAT key, not for one a sibling
+    // setup generated and then lost.
+    for (const name of names) {
+      expect(readFileSync(join(home, `pub-${name}`), 'utf8').trim().split(/\s+/).slice(0, 2).join(' '),
+        `${name} had its certificate issued for a key that is not the one on disk`).toBe(onDisk)
+    }
+    expect(Object.keys(readAliasStore()).sort()).toEqual(names.map((n) => `${n}.insta`).sort())
+  }, 60_000)
 })

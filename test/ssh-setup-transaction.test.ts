@@ -12,7 +12,7 @@
 // under test is the ORDER and ATOMICITY of the writes, not whether OpenSSH can
 // read the bytes, and a suite that skips wholesale on a machine without
 // OpenSSH is a suite that does not defend these two cases at all.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, beforeAll } from 'vitest'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -348,33 +348,55 @@ describe('a plain issuance keeps an ALREADY INSTALLED alias coherent', () => {
   })
 })
 
-// Two `--setup` runs for DIFFERENT services -- a project with an `api` and a
-// `worker` is the ordinary case, not a contrived one -- both read the same
-// aliases.json, each adds only its own entry, and each writes both the store
-// and the ssh_config block rendered from it. Whichever finished second wins
-// outright: the other alias is gone from both files, and BOTH commands printed
-// the alias they had configured.
+// Two `insta compute ssh` runs for DIFFERENT services -- a project with an
+// `api` and a `worker` is the ordinary case, not a contrived one -- both read
+// the same aliases.json, each adds only its own entry, and each writes both
+// the store and the ssh_config block rendered from it. Whichever finished
+// second wins outright: the other alias is gone from both files, and BOTH
+// commands printed the alias they had configured.
 //
 // This cannot be observed from one process: the read-modify-write is
 // synchronous, so an in-process "concurrent" call serialises itself. Only real
 // processes interleave, so the test spawns them.
 //
-// The children are TypeScript, so they need the same loader vitest uses.
-const tsx = (() => {
+// The children are TypeScript, so they need a loader. tsx is a devDependency
+// of this repo, so failing to load it is a BROKEN environment rather than a
+// legitimate one the way a missing ssh-keygen is -- and a broken environment
+// FAILS this suite rather than skipping it, for the reason the preamble gives
+// about OpenSSH: a regression guarded only by a suite that silently skipped is
+// not guarded at all. Probed once so the failure names the cause.
+const tsxUnavailable = (() => {
   try {
-    execFileSync(process.execPath, ['--import', 'tsx', '-e', ''], { stdio: 'ignore' })
-    return true
-  } catch {
-    return false
+    execFileSync(process.execPath, ['--import', 'tsx', '-e', ''], { stdio: 'pipe' })
+    return undefined
+  } catch (e) {
+    return e as Error
   }
 })()
 
-const dd = tsx ? describe : describe.skip
+describe('separate issuances running at once keep every alias', () => {
+  beforeAll(() => {
+    if (tsxUnavailable) {
+      throw new Error(`this suite needs \`node --import tsx\` (Node >= 18.19 with the tsx devDependency installed): ${tsxUnavailable.message}`)
+    }
+  })
 
-dd('separate setups running at once keep every alias', () => {
+  // FORCED to interleave, not hoped to. Co-starting four processes leaves the
+  // read-modify-write wherever the scheduler puts it, and four children each
+  // doing a few synchronous file operations can serialise themselves by
+  // accident -- the first draft of this test passed with the lock removed.
+  //
+  // The `configInstalled` seam sits between the store READ and the store WRITE
+  // inside the locked section, and it is consulted only WITHOUT --setup. So
+  // these are plain issuances over an installed block: the identical section a
+  // setup runs, entered through the one door with a seam in it. Every child
+  // holds there for half a second. Without the lock all four read an empty
+  // store before any of them writes, and three aliases are lost every time;
+  // with it they queue, and each read sees the writes before it.
   const CHILD = `
-const [, , mod, startAt, name, certFile, caFile] = process.argv
-const { readFileSync } = await import('node:fs')
+const [, , mod, dir, name, certFile, caFile] = process.argv
+const { existsSync, readFileSync, writeFileSync } = await import('node:fs')
+const { join } = await import('node:path')
 const { computeSSH, instaCertPath, stageCertificate } = await import(mod)
 const CERT = readFileSync(certFile, 'utf8').trim()
 const CA = readFileSync(caFile, 'utf8').trim()
@@ -386,12 +408,16 @@ const deps = {
     expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA,
     staged: stageCertificate(instaCertPath(alias), CERT + '\\n', { verify: () => {} }),
   }),
+  // Between the read and the write of the store. Synchronous, because it
+  // stands in for a step of a synchronous transaction: yielding to the event
+  // loop here would make this process's hold on the world looser than the
+  // real one.
+  configInstalled: () => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500); return true },
   emit: () => {},
 }
-// A common start, so the processes are inside the shared files together rather
-// than one after another.
-await new Promise((r) => setTimeout(r, Number(startAt) - Date.now()))
-await computeSSH(name, { setup: true }, deps)
+writeFileSync(join(dir, 'ready-' + name), 'x')
+while (!existsSync(join(dir, 'go'))) await new Promise((r) => setTimeout(r, 5))
+await computeSSH(name, {}, deps)
 `
 
   const run = (args: string[]) => new Promise<{ code: number | null; err: string }>((resolve) => {
@@ -403,11 +429,18 @@ await computeSSH(name, { setup: true }, deps)
     child.stderr!.on('data', (d) => { err += String(d) })
     child.on('exit', (code) => resolve({ code, err }))
   })
+  const waitFor = async (paths: string[]) => {
+    const deadline = Date.now() + 20_000
+    while (!paths.every((p) => existsSync(p))) {
+      if (Date.now() > deadline) throw new Error(`children never became ready: ${paths.filter((p) => !existsSync(p)).join(', ')}`)
+      await new Promise((r) => setTimeout(r, 10))
+    }
+  }
 
   it('records every one of them, in the store and in the config', async () => {
     // `.mts`, because the script is written into a directory with no
     // package.json: a plain `.ts` there is transformed as CommonJS, and the
-    // dynamic import below is top-level await.
+    // dynamic import above is top-level await.
     const script = join(home, 'setup-child.mts')
     writeFileSync(script, CHILD)
     const certFile = join(home, 'cert.txt'); writeFileSync(certFile, NEW_CERT)
@@ -415,10 +448,14 @@ await computeSSH(name, { setup: true }, deps)
     const compute = new URL('../src/commands/compute.ts', import.meta.url).href
 
     const names = ['api', 'worker', 'web', 'cron']
-    const startAt = Date.now() + 1_000
-    const results = await Promise.all(names.map((name) =>
-      run(['--import', 'tsx', script, compute, String(startAt), name, certFile, caFile])))
-    for (const r of results) expect(r.code, `a setup process failed: ${r.err}`).toBe(0)
+    // Released together by a file the parent writes once every child has
+    // finished importing: a timer barrier lets a slow import start one child
+    // after the others have already written, and a late reader sees their
+    // entries even without the lock.
+    const results = names.map((name) => run(['--import', 'tsx', script, compute, home, name, certFile, caFile]))
+    await waitFor(names.map((n) => join(home, `ready-${n}`)))
+    writeFileSync(join(home, 'go'), 'x')
+    for (const r of await Promise.all(results)) expect(r.code, `a setup process failed: ${r.err}`).toBe(0)
 
     const store = readAliasStore()
     const config = readFileSync(sshConfig(), 'utf8')

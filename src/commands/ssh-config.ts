@@ -285,6 +285,40 @@ export function isSafeSSHHost(v: unknown): v is string {
   return typeof v === 'string' && v.length > 0 && v.length <= 253 && SSH_HOSTNAME_RE.test(v)
 }
 
+/** The wire shape of each supported key type's public blob, after the type
+ *  name that opens every blob. Walking the fields proves the blob is a
+ *  sequence of well-formed fields; it does not prove they are the fields of
+ *  the type on the label, and a correct type name followed by the wrong
+ *  number of fields, a curve that disagrees with the name or a point of the
+ *  wrong size installs an anchor ssh then refuses at connect time -- where the
+ *  message points at known_hosts rather than at the response that produced it.
+ *  ed25519 is the type we issue; the rest are what OpenSSH accepts as a CA,
+ *  each held to what its own format requires:
+ *
+ *   - ssh-ed25519: one 32-byte key.
+ *   - ssh-rsa: mpint e, mpint n; OpenSSH refuses a modulus under 1024 bits.
+ *   - ecdsa-sha2-nistpN: the curve name, which must be the one in the type,
+ *     then an uncompressed point (0x04, then two coordinates of the curve's
+ *     size).
+ *   - sk-*@openssh.com (FIDO): the same key material as the plain type, then
+ *     the application string.
+ *
+ *  Field lengths, not field contents: the check is that the blob has the
+ *  structure ssh will parse, not that it is a strong key. */
+const CA_KEY_SHAPES: Record<string, (fields: Buffer[]) => boolean> = {
+  'ssh-ed25519': (f) => f.length === 2 && f[1]!.length === 32,
+  'ssh-rsa': (f) => f.length === 3 && f[1]!.length > 0 && f[2]!.length >= 128,
+  'ecdsa-sha2-nistp256': (f) => f.length === 3 && isEcdsaBody(f[1]!, f[2]!, 'nistp256', 65),
+  'ecdsa-sha2-nistp384': (f) => f.length === 3 && isEcdsaBody(f[1]!, f[2]!, 'nistp384', 97),
+  'ecdsa-sha2-nistp521': (f) => f.length === 3 && isEcdsaBody(f[1]!, f[2]!, 'nistp521', 133),
+  'sk-ssh-ed25519@openssh.com': (f) => f.length === 3 && f[1]!.length === 32 && f[2]!.length > 0,
+  'sk-ecdsa-sha2-nistp256@openssh.com': (f) => f.length === 4 && isEcdsaBody(f[1]!, f[2]!, 'nistp256', 65) && f[3]!.length > 0,
+}
+
+function isEcdsaBody(curve: Buffer, point: Buffer, wantCurve: string, pointLen: number): boolean {
+  return curve.toString('utf8') === wantCurve && point.length === pointLen && point[0] === 0x04
+}
+
 /** Exactly ONE OpenSSH public-key record: `<type> <base64>` with an optional
  *  comment, and nothing else -- no second line, no leading directive.
  *
@@ -293,11 +327,6 @@ export function isSafeSSHHost(v: unknown): v is string {
  *  we will actually write, and rebuilding the line from THOSE, means a value
  *  either is one key record or is refused; there is no third outcome where
  *  part of it is honoured. */
-const CA_KEY_TYPES = new Set([
-  'ssh-ed25519', 'ssh-rsa', 'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521',
-  'sk-ssh-ed25519@openssh.com', 'sk-ecdsa-sha2-nistp256@openssh.com',
-])
-
 export function parseCAPublicKey(value: unknown): { type: string; blob: string } {
   if (typeof value !== 'string') throw new Error('the platform returned no ssh certificate authority key')
   const line = value.trim()
@@ -305,7 +334,8 @@ export function parseCAPublicKey(value: unknown): { type: string; blob: string }
   const parts = line.split(/[ \t]+/)
   if (parts.length < 2) throw new Error(`refusing a malformed certificate authority key: ${JSON.stringify(line.slice(0, 64))}`)
   const type = parts[0]!, blob = parts[1]!
-  if (!CA_KEY_TYPES.has(type)) throw new Error(`refusing a certificate authority key of unsupported type ${JSON.stringify(type.slice(0, 32))}`)
+  const shape = CA_KEY_SHAPES[type]
+  if (!shape) throw new Error(`refusing a certificate authority key of unsupported type ${JSON.stringify(type.slice(0, 32))}`)
   if (!/^[A-Za-z0-9+/]+={0,3}$/.test(blob) || blob.length < 32) {
     throw new Error('refusing a certificate authority key whose body is not base64')
   }
@@ -322,9 +352,11 @@ export function parseCAPublicKey(value: unknown): { type: string; blob: string }
   if (!fields || fields.length < 2 || fields[0]!.toString('utf8') !== type) {
     throw new Error(`refusing a certificate authority key whose body does not match its type ${JSON.stringify(type.slice(0, 32))}`)
   }
-  // ed25519 is the one we issue, and its key field has exactly one legal size.
-  if (type === 'ssh-ed25519' && (fields.length !== 2 || fields[1]!.length !== 32)) {
-    throw new Error('refusing an ed25519 certificate authority key whose body is not a 32-byte key')
+  // And the fields must be the ones THIS type has. ed25519 was the only type
+  // held to its shape at first, so a correct RSA or ECDSA type name followed by
+  // any well-formed fields passed -- see CA_KEY_SHAPES.
+  if (!shape(fields)) {
+    throw new Error(`refusing a certificate authority key whose body is not the shape of ${JSON.stringify(type.slice(0, 32))}`)
   }
   return { type, blob }
 }
@@ -615,9 +647,10 @@ export type CertAuthorityPlan = {
  */
 export function revertCertAuthority(current: string, plan: CertAuthorityPlan): string {
   const kept = current.split('\n').filter((l) => l.trimEnd() !== plan.line)
-  // Only the trailing blank the split leaves; an interior blank line is the
-  // user's and stays where it is.
-  while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop()
+  // Only the ONE trailing blank the split leaves behind a final newline. A
+  // blank line before that is the user's -- trailing blanks included, which a
+  // loop popping every empty tail line was deleting on the failure path.
+  if (kept.length > 0 && kept[kept.length - 1] === '') kept.pop()
   // Only the anchors that are genuinely gone: a concurrent install may already
   // have re-added one, and a duplicate anchor is not a failure mode.
   const back = plan.removed.filter((l) => !kept.some((k) => k.trimEnd() === l.trimEnd()))

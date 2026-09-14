@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   renderConfigBlock, renderEnsureCertMatch, upsertConfigBlock, upsertCertAuthority,
-  planCertAuthority, revertCertAuthority, certifiesPublicKey,
+  planCertAuthority, revertCertAuthority, certifiesPublicKey, parseCAPublicKey,
   aliasFor, isSafeAlias, isSafeConfigValue, quoteConfigPath, BLOCK_BEGIN, BLOCK_END, CA_MARKER,
 } from '../src/commands/ssh-config.js'
 
@@ -559,12 +559,79 @@ describe('an anchor rotation can be taken back', () => {
     const plan = planCertAuthority(existing, PATTERN, ROTATED_CA)
     expect(revertCertAuthority(plan.next, plan)).toBe(existing)
   })
+
+  it("keeps the user's TRAILING blank lines too", () => {
+    // A loop popping every empty tail line trimmed the user's own blank lines
+    // off the end of the file, on the failure path, where nothing else was
+    // being reported. Only the ONE blank the split leaves behind a final
+    // newline is ours to drop.
+    const theirs = 'github.com ssh-ed25519 AAAAuser\n\n\n'
+    const plan = planCertAuthority(theirs, 'ssh.*.compute.example', ROTATED_CA)
+    expect(plan.next.startsWith(theirs), 'the anchor was not appended after the user\'s blank lines').toBe(true)
+    expect(revertCertAuthority(plan.next, plan), 'trailing blank lines were deleted by the revert').toBe(theirs)
+  })
 })
 
 // `ssh-keygen -L` proves a response is a parseable certificate. It does not
 // prove it is a certificate for OUR key -- and one issued for another key
 // passes every other gate, replaces the live credential, and fails at
 // authentication time with a message pointing at the file.
+describe('a CA key is held to the shape of its OWN type, not just to being well-formed fields', () => {
+  // Walking the fields proves the blob is a sequence of length-prefixed
+  // fields. It does not prove they are the fields of the type on the label:
+  // a correct RSA or ECDSA type name followed by any well-formed fields
+  // installed an anchor ssh then refused at connect time, where the message
+  // points at known_hosts rather than at the response that produced it. Only
+  // ed25519 was held to its shape at first.
+  const field = (b: Buffer | string) => {
+    const body = typeof b === 'string' ? Buffer.from(b) : b
+    const n = Buffer.alloc(4); n.writeUInt32BE(body.length, 0)
+    return Buffer.concat([n, body])
+  }
+  const blob = (...fields: Array<Buffer | string>) => Buffer.concat(fields.map(field)).toString('base64')
+  const point = (coord: number) => Buffer.concat([Buffer.from([0x04]), Buffer.alloc(coord * 2, 0x22)])
+  const modulus = Buffer.concat([Buffer.from([0x00, 0x80]), Buffer.alloc(255, 0x33)])
+
+  const wellFormed: Array<[string, string]> = [
+    ['rsa', `ssh-rsa ${blob('ssh-rsa', Buffer.from([1, 0, 1]), modulus)}`],
+    ['ecdsa p256', `ecdsa-sha2-nistp256 ${blob('ecdsa-sha2-nistp256', 'nistp256', point(32))}`],
+    ['ecdsa p384', `ecdsa-sha2-nistp384 ${blob('ecdsa-sha2-nistp384', 'nistp384', point(48))}`],
+    ['ecdsa p521', `ecdsa-sha2-nistp521 ${blob('ecdsa-sha2-nistp521', 'nistp521', point(66))}`],
+    // The FIDO types carry the plain type's key material followed by the
+    // application string -- every field is an SSH string, so the same walk
+    // reads them (a reviewer thought the walk would refuse them; it does not).
+    ['sk ed25519', `sk-ssh-ed25519@openssh.com ${blob('sk-ssh-ed25519@openssh.com', Buffer.alloc(32, 0x44), 'ssh:')}`],
+    ['sk ecdsa', `sk-ecdsa-sha2-nistp256@openssh.com ${blob('sk-ecdsa-sha2-nistp256@openssh.com', 'nistp256', point(32), 'ssh:')}`],
+  ]
+  for (const [what, key] of wellFormed) {
+    it(`accepts a ${what} key of the shape OpenSSH writes`, () => {
+      // The positive control for every refusal below: a rule tight enough to
+      // refuse them can refuse every real key too, and setup would then fail
+      // against a platform that rotated to a type it has every right to use.
+      expect(parseCAPublicKey(key).type).toBe(key.split(' ')[0])
+    })
+  }
+
+  const malformed: Array<[string, string]> = [
+    ['an RSA key with one field where e and n should be', `ssh-rsa ${blob('ssh-rsa', Buffer.alloc(40, 0x33))}`],
+    ['an RSA key with a modulus below OpenSSH\'s 1024-bit floor', `ssh-rsa ${blob('ssh-rsa', Buffer.from([1, 0, 1]), Buffer.alloc(64, 0x33))}`],
+    ['an RSA key with a fourth field', `ssh-rsa ${blob('ssh-rsa', Buffer.from([1, 0, 1]), modulus, 'extra')}`],
+    ['an ECDSA key whose curve disagrees with its type', `ecdsa-sha2-nistp256 ${blob('ecdsa-sha2-nistp256', 'nistp384', point(32))}`],
+    ['an ECDSA key whose point is the wrong size for its curve', `ecdsa-sha2-nistp256 ${blob('ecdsa-sha2-nistp256', 'nistp256', point(48))}`],
+    ['an ECDSA key whose point is compressed', `ecdsa-sha2-nistp256 ${blob('ecdsa-sha2-nistp256', 'nistp256', Buffer.concat([Buffer.from([0x02]), Buffer.alloc(64, 0x22)]))}`],
+    ['an ECDSA key missing its point', `ecdsa-sha2-nistp256 ${blob('ecdsa-sha2-nistp256', 'nistp256')}`],
+    ['a FIDO ed25519 key without its application', `sk-ssh-ed25519@openssh.com ${blob('sk-ssh-ed25519@openssh.com', Buffer.alloc(32, 0x44))}`],
+    ['a FIDO ed25519 key with a 16-byte key', `sk-ssh-ed25519@openssh.com ${blob('sk-ssh-ed25519@openssh.com', Buffer.alloc(16, 0x44), 'ssh:')}`],
+    ['a FIDO ECDSA key without its application', `sk-ecdsa-sha2-nistp256@openssh.com ${blob('sk-ecdsa-sha2-nistp256@openssh.com', 'nistp256', point(32))}`],
+    ['an ed25519 key with an application field it does not have', `ssh-ed25519 ${blob('ssh-ed25519', Buffer.alloc(32, 0x44), 'ssh:')}`],
+  ]
+  for (const [what, key] of malformed) {
+    it(`refuses ${what}`, () => {
+      expect(() => parseCAPublicKey(key), `${what} was accepted`).toThrow(/shape of/)
+    })
+  }
+})
+
 describe('a certificate is matched to the key it was issued for', () => {
   const field = (b: Buffer) => { const n = Buffer.alloc(4); n.writeUInt32BE(b.length, 0); return Buffer.concat([n, b]) }
   const pub = (raw: Buffer) =>
@@ -1005,7 +1072,11 @@ describe('a trust anchor is matched field by field, never by substring', () => {
     // A base64 blob is an unanchored substring of any longer blob sharing its
     // prefix. Deleting that line is not a visible failure -- it is a host-key
     // prompt on every connection to a region that used to be trusted.
-    const other = `@cert-authority ssh.*.other.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB ${CA_MARKER}\n`
+    // Built FROM our blob, so the relationship the test is named for holds by
+    // construction: a same-length unrelated blob is not a substring of ours
+    // and passes an `includes` regression straight through.
+    const other = `@cert-authority ssh.*.other.example ssh-ed25519 ${CA.split(' ')[1]}QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB ${CA_MARKER}\n`
+    expect(other, 'the fixture no longer extends our blob').toContain(CA.split(' ')[1]!)
     const out = upsertCertAuthority(other, 'ssh.*.compute.example', CA)
     expect(out, 'an unrelated anchor was deleted by a substring match').toContain('ssh.*.other.example')
     expect(out).toContain('ssh.*.compute.example')
