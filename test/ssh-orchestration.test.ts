@@ -7,11 +7,11 @@
 // single piece -- only from running the steps together and watching what
 // happens, and in what order.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
-import { computeSSH, instaCertPath, instaAliasStorePath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate } from '../src/commands/compute.js'
+import { computeSSH, instaCertPath, instaAliasStorePath, instaKeyPath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate } from '../src/commands/compute.js'
 import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey } from '../src/commands/ssh-config.js'
 
 // Redirect the whole ~/.insta and ~/.ssh tree into a temp dir.
@@ -97,6 +97,28 @@ const EXPIRED_CERT = !keygen ? '' : (() => {
   execFileSync('ssh-keygen', ['-q', '-s', join(fixtures, 'ca'), '-I', 'stale', '-n', 'u-svc-1', '-V', '-2h:-1h', `${old}.pub`])
   return readFileSync(`${old}-cert.pub`, 'utf8').trim()
 })()
+/** A REAL certificate, in date, signed by the same CA -- for a key that is not
+ *  ours. `ssh-keygen -L` is perfectly happy with it, and it authenticates
+ *  nothing on this machine. */
+const OTHER_KEY_CERT = !keygen ? '' : (() => {
+  const other = join(fixtures, 'other')
+  execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', other, '-C', 'other@insta'])
+  execFileSync('ssh-keygen', ['-q', '-s', join(fixtures, 'ca'), '-I', 'other', '-n', 'u-svc-1', '-V', '+1h', `${other}.pub`])
+  return readFileSync(`${other}-cert.pub`, 'utf8').trim()
+})()
+
+/** Install the key CERT was issued for where ensureKeyPair looks for it.
+ *
+ *  The renewal path sends the public key at ~/.insta/ssh/id_ed25519.pub and the
+ *  response is checked against it, so a suite that let ensureKeyPair generate a
+ *  fresh key would be minting for one key and handed a certificate for another
+ *  -- a refusal, by design. This is also the steady state on a real machine:
+ *  the key is generated once and every certificate is issued for it. */
+const installTheKeyCertWasIssuedFor = () => {
+  mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+  copyFileSync(join(fixtures, 'user'), instaKeyPath())
+  copyFileSync(join(fixtures, 'user.pub'), instaKeyPath() + '.pub')
+}
 
 // A project whose service list holds one compute service named `api`.
 const project = (projectId: string, branch?: string) => async () => ({ projectId, branch } as never)
@@ -403,7 +425,9 @@ d('a rejected response never replaces the working certificate', () => {
   } as never)
 
   beforeEach(() => {
-    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    // The real mintCert runs here, and it checks the response against the key
+    // it sent -- so the key CERT was issued for has to be the one on disk.
+    installTheKeyCertWasIssuedFor()
     writeFileSync(instaCertPath('api.insta'), 'the-working-certificate\n')
   })
 
@@ -412,6 +436,9 @@ d('a rejected response never replaces the working certificate', () => {
     ['a single-label host', { host: 'localhost' }],
     ['a username with a space', { username: 'u root' }],
     ['a CA key spanning two lines', { caPublicKey: `${CA}\n@cert-authority * ${CA}` }],
+    // Real, in date and signed by the trusted CA -- for a key that is not ours.
+    // Every other gate in the pipeline accepts it.
+    ['a certificate issued for another key', { certificate: OTHER_KEY_CERT }],
   ]
 
   for (const [what, over] of hostile) {
@@ -675,7 +702,7 @@ d('an automatic renewal replaces the certificate it was issued for', () => {
   }
 
   beforeEach(() => {
-    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    installTheKeyCertWasIssuedFor()
     // Not a parseable certificate, so `ssh-keygen -L` fails and certNeedsRenewal
     // reads it as "cannot confirm" -- which is how renewal is actually reached.
     writeFileSync(instaCertPath('api.insta'), 'the-expiring-certificate\n')
@@ -719,6 +746,19 @@ d('an automatic renewal replaces the certificate it was issued for', () => {
     expect(existsSync(join(home, '.ssh', 'known_hosts'))).toBe(false)
   })
 
+  it('refuses a valid certificate that was issued for a DIFFERENT key', async () => {
+    // `ssh-keygen -L` proves the response is a certificate; it does not prove
+    // it is a certificate for the key we sent. This one is real, in date and
+    // signed by the trusted CA -- and it authenticates nothing here, so
+    // installing it would replace a working credential with a dead one and
+    // fail later, inside ssh, pointing at the file rather than the response.
+    await renew(() => ({ status: 200, body: { ...good, certificate: OTHER_KEY_CERT } }))
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8'),
+      "a certificate for somebody else's key replaced the live credential").toBe('the-expiring-certificate\n')
+    expect(readdirSync(join(home, '.insta', 'ssh')).filter((f) => f.includes('staging')),
+      'a staged certificate was left behind').toEqual([])
+  })
+
   it('does nothing at all for an alias it has no record of', async () => {
     writeAliasStore({})
     const urls = await renew(() => ({ status: 200, body: good }))
@@ -755,7 +795,7 @@ d('the certificate is committed only once its anchor is', () => {
   }
 
   beforeEach(() => {
-    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    installTheKeyCertWasIssuedFor()
     // Not a parseable certificate, so certNeedsRenewal reads it as "cannot
     // confirm" and renewal is actually reached.
     writeFileSync(instaCertPath('api.insta'), 'the-expiring-certificate\n')
@@ -934,7 +974,7 @@ d('a certificate OpenSSH cannot parse never replaces a working one', () => {
   it('refuses rather than passes when ssh-keygen is missing', () => {
     // Cannot-confirm is not a licence to overwrite a credential that works.
     const enoent = () => { const e: NodeJS.ErrnoException = new Error('spawn ENOENT'); e.code = 'ENOENT'; throw e }
-    expect(() => stageCertificate(live(), CERT + '\n', enoent)).toThrow(/not installed/)
+    expect(() => stageCertificate(live(), CERT + '\n', { verify: enoent })).toThrow(/not installed/)
     expect(readFileSync(live(), 'utf8')).toBe(CERT + '\n')
   })
 

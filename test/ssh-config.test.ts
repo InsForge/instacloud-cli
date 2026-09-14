@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   renderConfigBlock, renderEnsureCertMatch, upsertConfigBlock, upsertCertAuthority,
+  planCertAuthority, revertCertAuthority, certifiesPublicKey,
   aliasFor, isSafeAlias, isSafeConfigValue, quoteConfigPath, BLOCK_BEGIN, BLOCK_END, CA_MARKER,
 } from '../src/commands/ssh-config.js'
 
@@ -421,6 +422,120 @@ describe('known_hosts trust anchor', () => {
   it('does not need a trailing newline in the existing file to stay well-formed', () => {
     const out = upsertCertAuthority('github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpK', 'ssh.*.compute.example', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIElJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJ')
     expect(out.split('\n').filter(Boolean)).toHaveLength(2)
+  })
+})
+
+// A rotation is only half of a change: the certificate the NEW CA signed still
+// has to be committed, and that can fail. Retiring the old anchor is the step
+// that breaks an alias which worked a moment ago, so it has to be reversible.
+describe('an anchor rotation can be taken back', () => {
+  const PATTERN = 'ssh.*.compute.example'
+
+  it('reports the anchor it retired, so the caller can put it back', () => {
+    const first = upsertCertAuthority('', PATTERN, RETIRED_CA)
+    const plan = planCertAuthority(first, PATTERN, ROTATED_CA)
+    expect(plan.removed, 'the retired anchor was dropped without being reported').toHaveLength(1)
+    expect(plan.removed[0]).toContain(RETIRED_CA.split(' ')[1]!)
+    expect(plan.line).toBe(`@cert-authority ${PATTERN} ${ROTATED_CA} ${CA_MARKER}`)
+  })
+
+  it('puts the retired anchor back and removes the one it installed', () => {
+    const first = upsertCertAuthority('', PATTERN, RETIRED_CA)
+    const plan = planCertAuthority(first, PATTERN, ROTATED_CA)
+    // The whole point: after the undo the file trusts what it trusted before,
+    // so the certificate still installed for this alias still authenticates.
+    expect(revertCertAuthority(plan.next, plan)).toBe(first)
+  })
+
+  it('reverts against the file as it stands, not against a snapshot', () => {
+    // `ssh` appends host keys here without any lock and cannot be made to take
+    // one, so restoring the bytes we read would discard whatever landed in
+    // between -- turning a tidy-up into a second, larger loss.
+    const first = upsertCertAuthority('', PATTERN, RETIRED_CA)
+    const plan = planCertAuthority(first, PATTERN, ROTATED_CA)
+    const meanwhile = plan.next + 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tL\n'
+    const out = revertCertAuthority(meanwhile, plan)
+    expect(out, "a host key ssh appended during the command was discarded").toContain('github.com ssh-ed25519')
+    expect(out).toContain(RETIRED_CA.split(' ')[1]!)
+    expect(out, 'the anchor the failed command installed is still trusted').not.toContain(ROTATED_CA.split(' ')[1]!)
+  })
+
+  it('leaves nothing behind when there was no file to begin with', () => {
+    const plan = planCertAuthority('', PATTERN, ROTATED_CA)
+    expect(plan.removed).toEqual([])
+    expect(revertCertAuthority(plan.next, plan)).toBe('')
+  })
+
+  it("never puts back an anchor the user's own file no longer wants twice", () => {
+    // A concurrent install may already have re-added the retired anchor; a
+    // second copy is untidy rather than dangerous, but the undo should not
+    // create one.
+    const first = upsertCertAuthority('', PATTERN, RETIRED_CA)
+    const plan = planCertAuthority(first, PATTERN, ROTATED_CA)
+    const out = revertCertAuthority(plan.next + plan.removed[0] + '\n', plan)
+    expect(out.split('\n').filter((l) => l.includes(RETIRED_CA.split(' ')[1]!))).toHaveLength(1)
+  })
+
+  it('keeps an interior blank line the user put there', () => {
+    const existing = 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpK\n\nother.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExM\n'
+    const plan = planCertAuthority(existing, PATTERN, ROTATED_CA)
+    expect(revertCertAuthority(plan.next, plan)).toBe(existing)
+  })
+})
+
+// `ssh-keygen -L` proves a response is a parseable certificate. It does not
+// prove it is a certificate for OUR key -- and one issued for another key
+// passes every other gate, replaces the live credential, and fails at
+// authentication time with a message pointing at the file.
+describe('a certificate is matched to the key it was issued for', () => {
+  const field = (b: Buffer) => { const n = Buffer.alloc(4); n.writeUInt32BE(b.length, 0); return Buffer.concat([n, b]) }
+  const pub = (raw: Buffer) =>
+    `ssh-ed25519 ${Buffer.concat([field(Buffer.from('ssh-ed25519')), field(raw)]).toString('base64')}`
+  // `string type, string nonce, string pk, ...`. Everything after pk is a
+  // uint64 serial and beyond, which is not an SSH `string` -- so only the first
+  // three fields may be walked, and the tail here stands for the rest.
+  const cert = (raw: Buffer, type = 'ssh-ed25519-cert-v01@openssh.com') =>
+    `${type} ${Buffer.concat([
+      field(Buffer.from(type)), field(Buffer.alloc(32, 0x5a)), field(raw), Buffer.alloc(96, 0x7f),
+    ]).toString('base64')}`
+
+  const ours = Buffer.alloc(32, 0x11)
+  const theirs = Buffer.alloc(32, 0x22)
+
+  it('accepts the certificate issued for the key we sent', () => {
+    // The positive control: a check strict enough to refuse everything below
+    // can refuse every real certificate too, and renewal would silently stop.
+    expect(certifiesPublicKey(cert(ours), pub(ours))).toBe(true)
+    expect(certifiesPublicKey(`${cert(ours)} comment`, `${pub(ours)} user@host`),
+      'a trailing comment was rejected').toBe(true)
+  })
+
+  it('refuses a perfectly valid certificate for somebody ELSE\'s key', () => {
+    // The finding. Nothing else in the pipeline can tell these two apart.
+    expect(certifiesPublicKey(cert(theirs), pub(ours))).toBe(false)
+  })
+
+  it('refuses a certificate whose key field is the wrong size', () => {
+    expect(certifiesPublicKey(cert(Buffer.alloc(16, 0x11)), pub(ours))).toBe(false)
+  })
+
+  it('refuses when the blob disagrees with the type it is labelled with', () => {
+    const mislabelled = `ssh-ed25519-cert-v01@openssh.com ${cert(ours, 'ssh-rsa-cert-v01@openssh.com').split(' ')[1]}`
+    expect(certifiesPublicKey(mislabelled, pub(ours))).toBe(false)
+  })
+
+  it('refuses anything that is not an ed25519 certificate and key', () => {
+    // ensureKeyPair generates ed25519 and nothing else, so a certificate of
+    // another type cannot be a certificate for our key.
+    expect(certifiesPublicKey(cert(ours, 'ssh-rsa-cert-v01@openssh.com'), pub(ours))).toBe(false)
+    expect(certifiesPublicKey(pub(ours), pub(ours)), 'a plain key passed as a certificate').toBe(false)
+    expect(certifiesPublicKey(cert(ours), 'ssh-rsa AAAAB3NzaC1yc2E')).toBe(false)
+  })
+
+  it('refuses junk rather than throwing', () => {
+    for (const bad of ['', 'not a certificate', undefined, null, 42, `ssh-ed25519-cert-v01@openssh.com ${'A'.repeat(200)}`]) {
+      expect(certifiesPublicKey(bad, pub(ours)), `${String(bad)} was accepted`).toBe(false)
+    }
   })
 })
 

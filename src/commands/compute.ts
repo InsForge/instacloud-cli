@@ -758,7 +758,7 @@ import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
-  aliasFor, isSafeAlias, isSafeConfigValue, isSafeSSHHost, isSafeSSHUsername, isSafeTimestamp, isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, renderConfigBlock, upsertCertAuthority, upsertConfigBlock, type HostEntry,
+  aliasFor, certifiesPublicKey, isSafeAlias, isSafeConfigValue, isSafeSSHHost, isSafeSSHUsername, isSafeTimestamp, isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, planCertAuthority, renderConfigBlock, revertCertAuthority, upsertConfigBlock, type HostEntry,
 } from './ssh-config.js'
 
 /** Where this CLI keeps its own SSH material. Deliberately NOT ~/.ssh: we never
@@ -943,7 +943,7 @@ async function mintCert(api: ApiClient, projectId: string, serviceId: string, pu
   // left with an error message and a broken alias. Same ordering rule as the
   // collision check: nothing is written until the whole response is known-good.
   const out = validateCertResponse(res.body)
-  return { ...out, staged: stageCertificate(instaCertPath(alias), out.certificate.trim() + '\n') }
+  return { ...out, staged: stageCertificate(instaCertPath(alias), out.certificate.trim() + '\n', { publicKey }) }
 }
 
 /** Everything the plane returns that we will write into ~/.ssh or ~/.insta. */
@@ -1024,7 +1024,19 @@ export type StagedCertificate = { commit: () => void; discard: () => void }
  * is lost by it either -- without OpenSSH installed the certificate has no
  * consumer.
  */
-export function stageCertificate(certPath: string, contents: string, verify: CertVerifier = sshKeygenVerifyCert): StagedCertificate {
+export function stageCertificate(
+  certPath: string,
+  contents: string,
+  { verify = sshKeygenVerifyCert, publicKey }: { verify?: CertVerifier; publicKey?: string } = {},
+): StagedCertificate {
+  // BEFORE the file is even written, because this needs no file: `ssh-keygen -L`
+  // proves the response is a certificate, not that it is a certificate for the
+  // key we asked about. One issued for another key passes every other gate and
+  // fails at authentication time instead -- after the working credential is
+  // already gone.
+  if (publicKey !== undefined && !certifiesPublicKey(contents, publicKey)) {
+    throw new Error('the platform returned a certificate for a different key — the existing certificate was left untouched')
+  }
   mkdirSync(dirname(certPath), { recursive: true, mode: 0o700 })
   // Followed to its target, for the same reason writeFileAtomicSync does it:
   // rename(2) replaces the LINK, so a certificate someone symlinked into a
@@ -1058,23 +1070,44 @@ export function stageCertificate(certPath: string, contents: string, verify: Cer
  *  IDENTIFICATION HAS CHANGED for a random fraction of reconnects behind a load
  *  balancer. Re-run on every renewal too, so a rotated CA is trusted before the
  *  retired one stops signing rather than at the user's next `--setup`. */
-export function installCertAuthority(hostPattern: string, caPublicKey: string): void {
+export function installCertAuthority(hostPattern: string, caPublicKey: string): Undo {
   const knownHosts = join(homedir(), '.ssh', 'known_hosts')
   // The read and the write are ONE operation, and the lock is what makes them
   // one. Without it two aliases renewing together both read these contents and
   // each renames its own result over the other's -- see withKnownHostsLock.
-  withKnownHostsLock(() => {
+  return withKnownHostsLock(() => {
     mkdirSync(dirname(knownHosts), { recursive: true, mode: 0o700 })
     const existing = existsSync(knownHosts) ? readFileSync(knownHosts, 'utf8') : ''
-    writeFileAtomicSync(knownHosts, upsertCertAuthority(existing, hostPattern, caPublicKey), { mode: 0o600 })
+    const plan = planCertAuthority(existing, hostPattern, caPublicKey)
+    if (plan.next === existing) return () => {}
+    writeFileAtomicSync(knownHosts, plan.next, { mode: 0o600 })
+    // A ROTATION retires the anchor that vouches for the certificate currently
+    // installed, and the steps that follow it -- the config write, the
+    // certificate rename -- can still fail. Without a way back, a failed
+    // command leaves the old certificate in place with its CA gone: an alias
+    // that worked a moment ago now cannot authenticate, and nothing said so.
+    return () => withKnownHostsLock(() => {
+      const now = existsSync(knownHosts) ? readFileSync(knownHosts, 'utf8') : ''
+      writeFileAtomicSync(knownHosts, revertCertAuthority(now, plan), { mode: 0o600 })
+    })
   })
+}
+
+/** Puts back what the step before it changed. Idempotent is not required —
+ *  every undo here is called at most once, on the failure path only. */
+export type Undo = () => void
+
+/** The SSHDeps seam lets a test stub return anything at all, so what comes back
+ *  is checked here rather than trusted. */
+function record(undo: Undo[], back: unknown): void {
+  if (typeof back === 'function') undo.push(back as Undo)
 }
 
 /** How long an anchor update waits for another insta process before giving up.
  *  Short, because this still runs inside OpenSSH's config parse and the section
  *  it waits for is a read and a rename. */
 const KNOWN_HOSTS_LOCK_WAIT_MS = 1_000
-const KNOWN_HOSTS_LOCK_POLL_MS = 20
+const LOCK_POLL_MS = 20
 /** Much shorter than the renewal window, for the same reason: a lock older than
  *  this was left behind by a process that died inside a read and a rename, and
  *  every anchor update on the machine queues behind it until it is broken. */
@@ -1110,21 +1143,74 @@ export function withKnownHostsLock<T>(
   fn: () => T,
   { waitMs = KNOWN_HOSTS_LOCK_WAIT_MS, sleep = sleepSync }: { waitMs?: number; sleep?: (ms: number) => void } = {},
 ): T {
-  const path = join(instaSSHDir(), 'known_hosts.lock')
+  return withLockedFile('known_hosts.lock', fn, {
+    waitMs,
+    sleep,
+    staleMs: KNOWN_HOSTS_LOCK_STALE_MS,
+    busy: 'another insta process is updating ~/.ssh/known_hosts, so the trust anchor was left as it was',
+  })
+}
+
+/** How long a setup waits for another setup. Longer than the known_hosts wait
+ *  because the section it guards CONTAINS that wait, plus two file writes. */
+const ALIAS_STORE_LOCK_WAIT_MS = 10_000
+/** Generous next to the wait, for the same reason: a holder legitimately takes
+ *  as long as an anchor update plus two writes, and breaking a live lock is the
+ *  one thing that reintroduces the race this exists to close. */
+const ALIAS_STORE_LOCK_STALE_MS = 60_000
+
+/**
+ * Hold a lock across the whole read-modify-write of the alias store AND the
+ * ssh_config block rendered from it.
+ *
+ * These are one transaction, not two files that happen to be written together:
+ * the config block is rendered from the WHOLE store, so a stale read produces a
+ * config missing somebody else's alias. Two `--setup` runs for different
+ * services -- a project with an `api` and a `worker` is the ordinary case --
+ * both read the same aliases.json, each adds only its own entry, and each
+ * writes both files. Whichever finished second wins outright: the other alias
+ * is gone from the store and from the config, and BOTH commands printed the
+ * alias they had configured.
+ *
+ * It waits rather than giving up, because the loser of the race is a lost
+ * alias, and it is the caller's job to re-read the store once inside — see
+ * computeSSH, where the collision check runs again under the lock.
+ */
+export function withAliasStoreLock<T>(
+  fn: () => T,
+  { waitMs = ALIAS_STORE_LOCK_WAIT_MS, sleep = sleepSync }: { waitMs?: number; sleep?: (ms: number) => void } = {},
+): T {
+  return withLockedFile('aliases.lock', fn, {
+    waitMs,
+    sleep,
+    staleMs: ALIAS_STORE_LOCK_STALE_MS,
+    busy: 'another insta process is setting up an ssh alias, so nothing was changed. Try again in a moment.',
+  })
+}
+
+/** Hold a named lock in ~/.insta/ssh for the duration of `fn`, waiting for it.
+ *
+ *  LOCK ORDER, and it is the whole reason this is one helper: a caller that
+ *  needs both takes `aliases.lock` FIRST and `known_hosts.lock` inside it.
+ *  Nothing acquires them the other way round, so the pair cannot deadlock. */
+function withLockedFile<T>(
+  name: string,
+  fn: () => T,
+  { waitMs, staleMs, sleep, busy }: { waitMs: number; staleMs: number; sleep: (ms: number) => void; busy: string },
+): T {
+  const path = join(instaSSHDir(), name)
   const deadline = Date.now() + waitMs
   for (;;) {
-    const release = acquireLockFile(path, Date.now(), KNOWN_HOSTS_LOCK_STALE_MS)
+    const release = acquireLockFile(path, Date.now(), staleMs)
     if (release) {
       try { return fn() } finally { release() }
     }
-    if (Date.now() >= deadline) {
-      throw new Error('another insta process is updating ~/.ssh/known_hosts, so the trust anchor was left as it was')
-    }
-    sleep(KNOWN_HOSTS_LOCK_POLL_MS)
+    if (Date.now() >= deadline) throw new Error(busy)
+    sleep(LOCK_POLL_MS)
   }
 }
 
-function installConfigBlock(store: AliasStore): void {
+function installConfigBlock(store: AliasStore): Undo {
   const cfg = join(homedir(), '.ssh', 'config')
   mkdirSync(dirname(cfg), { recursive: true, mode: 0o700 })
   const existing = existsSync(cfg) ? readFileSync(cfg, 'utf8') : ''
@@ -1136,6 +1222,15 @@ function installConfigBlock(store: AliasStore): void {
   // Backed up: this is the file that decides whether the user can ssh anywhere
   // at all, and our block goes at the TOP of it.
   writeFileAtomicSync(cfg, upsertConfigBlock(existing, block), { mode: 0o600, backup: true })
+  // Safe to restore wholesale, unlike known_hosts: nothing else writes this
+  // file without the alias-store lock, and the caller holds it.
+  return () => {
+    if (existing === '') {
+      try { unlinkSync(cfg) } catch { /* never created */ }
+    } else {
+      writeFileAtomicSync(cfg, existing, { mode: 0o600 })
+    }
+  }
 }
 
 /**
@@ -1194,13 +1289,22 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
     // socket open, so the process lingers anyway.
     const out = await mintCert(api, rec.projectId, rec.serviceId, ensureKeyPair(), alias, AbortSignal.timeout(timeoutMs))
     try {
-      // The ANCHOR before the certificate. Everything below this line is a
-      // rename; everything that can fail has already happened. Committing the
-      // certificate first left the alias holding a credential signed by a CA
-      // this machine does not trust whenever the anchor write failed -- and
-      // the catch below would have swallowed that too.
-      if (out.caPublicKey) installCertAuthority(hostPatternFor(out.host), out.caPublicKey)
-      out.staged.commit()
+      // The ANCHOR before the certificate. Committing the certificate first
+      // left the alias holding a credential signed by a CA this machine does
+      // not trust whenever the anchor write failed -- and the catch below
+      // would have swallowed that too.
+      //
+      // The rename that follows is the step that does not fail halfway, but it
+      // can still fail outright, and on a ROTATION that leaves the retired CA
+      // gone and the certificate it signed still installed. So the anchor
+      // update is taken back when the rename does not happen.
+      const back = out.caPublicKey ? installCertAuthority(hostPatternFor(out.host), out.caPublicKey) : undefined
+      try {
+        out.staged.commit()
+      } catch (e) {
+        try { back?.() } catch { /* nothing better to do on the way out */ }
+        throw e
+      }
     } finally {
       out.staged.discard()
     }
@@ -1296,8 +1400,7 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
   // about to refuse -- the previously working `api.insta` could no longer
   // authenticate, and the command that broke it exited with an error saying it
   // had done nothing. Nothing is written until the alias is known to be ours.
-  const store = readAliasStore()
-  assertAliasFree(store, alias, { projectId: p.projectId, serviceId: svc.id, branch })
+  assertAliasFree(readAliasStore(), alias, { projectId: p.projectId, serviceId: svc.id, branch })
 
   const out = await mint(api, p.projectId, svc.id, ensureKeyPair(), alias)
   try {
@@ -1314,19 +1417,51 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
       )
     }
 
-    store[alias] = { projectId: p.projectId, ...(branch ? { branch } : {}), serviceId: svc.id, host: out.host, username: out.username }
-    writeAliasStore(store)
+    // ALL of it under one lock, and the store is re-read inside: the check
+    // above ran before the mint, which is where it has to be to avoid
+    // overwriting the certificate of an alias it is about to refuse -- but the
+    // network round trip between them is easily long enough for another setup
+    // to claim the alias, or to add one of its own that a stale store would
+    // then erase from both files.
+    withAliasStoreLock(() => {
+      const before = readAliasStore()
+      assertAliasFree(before, alias, { projectId: p.projectId, serviceId: svc.id, branch })
+      const store: AliasStore = {
+        ...before,
+        [alias]: { projectId: p.projectId, ...(branch ? { branch } : {}), serviceId: svc.id, host: out.host, username: out.username },
+      }
 
-    if (opts.setup) {
-      // upsertCertAuthority parses the key and refuses a bad one, so a hostile or
-      // malformed response fails HERE instead of appending lines to known_hosts.
-      if (out.caPublicKey) (deps.installCA ?? installCertAuthority)(hostPatternFor(out.host), out.caPublicKey)
-      ;(deps.installConfig ?? installConfigBlock)(store)
-    }
-    // Last, and for the same reason as in the renewal hook: a certificate whose
-    // anchor never landed authenticates nothing, so it does not replace one
-    // that still works.
-    out.staged.commit()
+      // Every step that can be taken back registers how, because the steps
+      // AFTER an anchor rotation can still fail and the rotation is what
+      // retires the CA vouching for the certificate already installed. Undone
+      // in reverse, so each step sees the world its own undo expects.
+      const undo: Undo[] = []
+      try {
+        writeAliasStore(store)
+        undo.push(() => writeAliasStore(before))
+        if (opts.setup) {
+          // planCertAuthority parses the key and refuses a bad one, so a hostile
+          // or malformed response fails HERE instead of appending lines to
+          // known_hosts.
+          if (out.caPublicKey) {
+            record(undo, (deps.installCA ?? installCertAuthority)(hostPatternFor(out.host), out.caPublicKey))
+          }
+          record(undo, (deps.installConfig ?? installConfigBlock)(store))
+        }
+        // Last, and for the same reason as in the renewal hook: a certificate
+        // whose anchor never landed authenticates nothing, so it does not
+        // replace one that still works.
+        out.staged.commit()
+      } catch (e) {
+        // Best-effort, and failures here are swallowed on purpose: the error
+        // that got us here is the one worth reporting, and an undo that cannot
+        // run leaves exactly the state we would have had without one.
+        for (const back of undo.reverse()) {
+          try { back() } catch { /* nothing better to do on the way out */ }
+        }
+        throw e
+      }
+    })
   } finally {
     out.staged.discard()
   }

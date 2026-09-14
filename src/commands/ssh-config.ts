@@ -332,6 +332,48 @@ export function isSSHCertificateRecord(v: unknown): v is string {
   return sshBlobTypeName(blob) === type
 }
 
+/** The ed25519 certificate type, and the only one we ever ask to be issued:
+ *  ensureKeyPair generates ed25519 and nothing else, so a certificate of any
+ *  other type cannot be a certificate for our key. */
+const ED25519_CERT_TYPE = 'ssh-ed25519-cert-v01@openssh.com'
+const ED25519_KEY_TYPE = 'ssh-ed25519'
+
+/**
+ * Whether `certRecord` certifies exactly the key in `publicKeyRecord`.
+ *
+ * `ssh-keygen -L` proves a response is a parseable certificate; it does not
+ * prove it is OURS. A valid certificate for somebody else's key passes every
+ * other gate, replaces the working credential at `<alias>-cert.pub`, and then
+ * fails at authentication time -- where the message points at the file rather
+ * than at the response that produced it. Comparing the certified key material
+ * against ~/.insta/ssh/id_ed25519.pub is what closes that.
+ *
+ * Compared as KEY MATERIAL rather than as an ssh-keygen fingerprint: `-L`
+ * prints the fingerprint of the certificate blob, not of the key inside it, so
+ * there is nothing there to compare against a plain public key.
+ *
+ * An OpenSSH ed25519 certificate is `string type, string nonce, string pk, ...`
+ * and a plain ed25519 key is `string type, string pk`, so the comparison is
+ * field 2 against field 1. Only the first three fields are walked, because the
+ * uint64 serial that follows is not an SSH `string` and a full walk would
+ * misparse it.
+ */
+export function certifiesPublicKey(certRecord: unknown, publicKeyRecord: unknown): boolean {
+  if (typeof certRecord !== 'string' || typeof publicKeyRecord !== 'string') return false
+  const cert = certRecord.trim().split(/[ \t]+/)
+  const pub = publicKeyRecord.trim().split(/[ \t]+/)
+  if (cert[0] !== ED25519_CERT_TYPE || pub[0] !== ED25519_KEY_TYPE) return false
+  if (cert.length < 2 || pub.length < 2) return false
+  const certFields = sshBlobFields(cert[1]!, 3)
+  const pubFields = sshBlobFields(pub[1]!)
+  if (!certFields || certFields.length !== 3 || !pubFields || pubFields.length !== 2) return false
+  // The blobs' OWN type names, for the same reason parseCAPublicKey reads them:
+  // the text field is a label anyone can write.
+  if (certFields[0]!.toString('utf8') !== cert[0] || pubFields[0]!.toString('utf8') !== pub[0]) return false
+  const certified = certFields[2]!, key = pubFields[1]!
+  return key.length === 32 && certified.equals(key)
+}
+
 /** The type name an SSH key/certificate blob declares about ITSELF.
  *
  *  Every OpenSSH blob begins with an SSH `string`: a 4-byte big-endian length
@@ -498,13 +540,55 @@ export function isSafeCAHostPattern(v: unknown): v is string {
  * never touched.
  */
 export function upsertCertAuthority(existing: string, hostPattern: string, caKey: string): string {
+  return planCertAuthority(existing, hostPattern, caKey).next
+}
+
+/**
+ * What an anchor install would write, and what it would retire to do it.
+ *
+ * Split out from upsertCertAuthority because a rotation is only half of a
+ * larger change -- the certificate signed by the new CA still has to be
+ * committed -- and the second half can fail. Retiring the old anchor is the
+ * step that BREAKS an alias which worked a moment ago: the old certificate is
+ * still installed and the CA that vouches for it is gone. So the caller is
+ * handed the retired lines and can put them back; see revertCertAuthority.
+ */
+export function planCertAuthority(existing: string, hostPattern: string, caKey: string): CertAuthorityPlan {
   const key = caKey.trim()
-  const kept = existing
-    .split('\n')
-    .filter((l) => !isSupersededAnchor(l, hostPattern, key))
-    .join('\n')
+  const lines = existing.split('\n')
+  const removed = lines.filter((l) => isSupersededAnchor(l, hostPattern, key))
+  const kept = lines.filter((l) => !isSupersededAnchor(l, hostPattern, key)).join('\n')
   const base = kept === '' ? '' : kept.endsWith('\n') ? kept : kept + '\n'
-  return base + renderCertAuthority(hostPattern, key)
+  const line = renderCertAuthority(hostPattern, key)
+  return { next: base + line, line: line.trimEnd(), removed }
+}
+
+export type CertAuthorityPlan = {
+  next: string
+  /** The anchor line the plan installs, without its newline. */
+  line: string
+  /** The anchor lines it retires to make room, verbatim. */
+  removed: string[]
+}
+
+/**
+ * Undo a plan against known_hosts AS IT STANDS NOW, not by restoring a snapshot.
+ *
+ * `ssh` appends host keys to this file without taking any lock and cannot be
+ * made to take one, so writing back the bytes we read would discard whatever
+ * landed in between. Removing exactly the line we added and putting back
+ * exactly the lines we retired touches nothing else.
+ */
+export function revertCertAuthority(current: string, plan: CertAuthorityPlan): string {
+  const kept = current.split('\n').filter((l) => l.trimEnd() !== plan.line)
+  // Only the trailing blank the split leaves; an interior blank line is the
+  // user's and stays where it is.
+  while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop()
+  // Only the anchors that are genuinely gone: a concurrent install may already
+  // have re-added one, and a duplicate anchor is not a failure mode.
+  const back = plan.removed.filter((l) => !kept.some((k) => k.trimEnd() === l.trimEnd()))
+  const body = [...kept, ...back]
+  return body.length === 0 ? '' : body.join('\n') + '\n'
 }
 
 function isSupersededAnchor(line: string, hostPattern: string, key: string): boolean {
