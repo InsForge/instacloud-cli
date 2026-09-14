@@ -7,12 +7,12 @@
 // single piece -- only from running the steps together and watching what
 // happens, and in what order.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { computeSSH, instaCertPath, instaAliasStorePath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias, hostPatternFor } from '../src/commands/compute.js'
-import { isSSHCertificateRecord, mayWidenCAHost } from '../src/commands/ssh-config.js'
+import { computeSSH, instaCertPath, instaAliasStorePath, writeAliasStore, readAliasStore, validateCertResponse, acquireRenewalLock, ensureCertForAlias, hostPatternFor, installCertificate } from '../src/commands/compute.js'
+import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey } from '../src/commands/ssh-config.js'
 
 // Redirect the whole ~/.insta and ~/.ssh tree into a temp dir.
 //
@@ -47,13 +47,36 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true })
 })
 
-// A STRUCTURALLY VALID certificate: the blob's first SSH `string` field
-// carries the same type name as the text field, which is what
-// isSSHCertificateRecord decodes and checks. A blob of arbitrary base64 of
-// the right length is deliberately NOT accepted, and is tested below.
+// A REAL certificate, signed by a real CA with ssh-keygen at suite start.
+//
+// The synthetic blob this replaces was itself a finding: it carried a correct
+// type name followed by filler, which the structural decode accepted and
+// `ssh-keygen -L` does not. A positive control built from something OpenSSH
+// would reject cannot detect the live-credential corruption these tests exist
+// to prevent -- it passes for a validator that checks nothing beyond the first
+// field.
 const CERT_TYPE = 'ssh-ed25519-cert-v01@openssh.com'
-const CERT = `${CERT_TYPE} AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=`
-const CA = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICAcaFakeCAKeyForTestsOnlyAAAAAAAAAAAAAAAAAAAA'
+const fixtures = mkdtempSync(join(tmpdir(), 'insta-ssh-fixtures-'))
+const CERT = (() => {
+  const ca = join(fixtures, 'ca'), user = join(fixtures, 'user')
+  execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', ca, '-C', 'ca@insta'])
+  execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', user, '-C', 'user@insta'])
+  execFileSync('ssh-keygen', ['-q', '-s', ca, '-I', 'test-id', '-n', 'u-svc-1', '-V', '+1h', `${user}.pub`])
+  return readFileSync(`${user}-cert.pub`, 'utf8').trim()
+})()
+const CA = readFileSync(join(fixtures, 'ca.pub'), 'utf8').trim()
+// Signed in the past, so certNeedsRenewal genuinely wants it replaced. The
+// tests that exercise renewal need a real certificate that is real-and-stale,
+// not one that merely fails to parse -- an unparseable file renews for the
+// wrong reason and would pass even if the expiry logic were gone.
+/** The `<type> <blob>` pair renderCertAuthority writes, comment stripped. */
+const caRecord = (key: string) => key.split(/\s+/).slice(0, 2).join(' ')
+const EXPIRED_CERT = (() => {
+  const old = join(fixtures, 'old')
+  execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', old, '-C', 'old@insta'])
+  execFileSync('ssh-keygen', ['-q', '-s', join(fixtures, 'ca'), '-I', 'stale', '-n', 'u-svc-1', '-V', '-2h:-1h', `${old}.pub`])
+  return readFileSync(`${old}-cert.pub`, 'utf8').trim()
+})()
 
 // A project whose service list holds one compute service named `api`.
 const project = (projectId: string, branch?: string) => async () => ({ projectId, branch } as never)
@@ -403,8 +426,9 @@ describe('renewal never blocks the ssh it runs inside', () => {
     // a never-settling response never does.
     mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
     writeAliasStore({ 'api.insta': { projectId: 'proj-1', serviceId: 'svc-1', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1' } })
-    // An expired certificate, so renewal is actually attempted.
-    writeFileSync(instaCertPath('api.insta'), CERT + '\n')
+    // A real certificate whose validity window has passed, so renewal is
+    // actually attempted rather than short-circuited by the healthy-cert check.
+    writeFileSync(instaCertPath('api.insta'), EXPIRED_CERT + '\n')
 
     let sawSignal: AbortSignal | undefined
     const hang = (_url: string, init: { signal?: AbortSignal }) => new Promise<never>((_resolve, reject) => {
@@ -488,7 +512,10 @@ describe.skipIf(!keygen)('a successful --setup installs everything the alias nee
     // An EXACT anchor: `ssh.us-west-1.compute.example` is not under a suffix we
     // own, so hostPatternFor refuses to widen the region label.
     const knownHosts = readFileSync(join(sshDir(), 'known_hosts'), 'utf8')
-    expect(knownHosts).toContain(`@cert-authority ssh.us-west-1.compute.example ${CA}`)
+    // Without the trailing `ca@insta` comment ssh-keygen wrote: the line is
+    // REBUILT from the parsed type and blob, which is what makes "exactly one
+    // key record" a property of the output rather than of the input.
+    expect(knownHosts).toContain(`@cert-authority ssh.us-west-1.compute.example ${caRecord(CA)}`)
     expect(knownHosts, 'the anchor was not tagged as ours, so rotation cannot retire it').toContain('# insta compute ssh')
 
     const cfg = readFileSync(join(sshDir(), 'config'), 'utf8')
@@ -651,7 +678,7 @@ describe.skipIf(!keygen)('an automatic renewal replaces the certificate it was i
     // Re-installed on EVERY renewal, so a rotated CA is trusted before the
     // retired one stops signing rather than at the user's next --setup.
     expect(readFileSync(join(home, '.ssh', 'known_hosts'), 'utf8'))
-      .toContain(`@cert-authority ssh.us-west-1.compute.example ${CA}`)
+      .toContain(`@cert-authority ssh.us-west-1.compute.example ${caRecord(CA)}`)
   })
 
   it('renews without an anchor when the response carries no CA key', async () => {
@@ -729,5 +756,67 @@ describe('the CA wildcard stays on the ssh gateway name', () => {
   it('still refuses a gateway name with no region label', () => {
     expect(mayWidenCAHost('ssh.compute.example', S)).toBe(false)
     expect(mayWidenCAHost('ssh.a.b.compute.example', S), 'widened a label that is not the region').toBe(false)
+  })
+})
+
+describe('a certificate OpenSSH cannot parse never replaces a working one', () => {
+  // The structural decode reads the blob's first field and stops, so a blob
+  // with the right type name and noise behind it -- no nonce, public key,
+  // serial, principals, validity window or signature -- still passes it. The
+  // authority is ssh-keygen, run against a STAGING file, and the live file is
+  // replaced only once it agrees.
+  const live = () => join(home, '.insta', 'ssh', 'api.insta-cert.pub')
+
+  beforeEach(() => {
+    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    writeFileSync(live(), CERT + '\n')
+  })
+
+  it('leaves the working certificate in place when ssh-keygen rejects it', () => {
+    const shaped = `${CERT_TYPE} ${Buffer.concat([
+      (() => { const b = Buffer.alloc(4); b.writeUInt32BE(CERT_TYPE.length, 0); return b })(),
+      Buffer.from(CERT_TYPE), Buffer.alloc(260, 0x41),
+    ]).toString('base64')}\n`
+    // It passes the cheap structural gate -- that is the point of the case.
+    expect(isSSHCertificateRecord(shaped.trim()), 'the fixture no longer exercises the gap').toBe(true)
+
+    expect(() => installCertificate(live(), shaped)).toThrow(/cannot parse|left untouched/)
+    expect(readFileSync(live(), 'utf8'), 'a certificate ssh cannot read replaced the working one').toBe(CERT + '\n')
+  })
+
+  it('refuses rather than passes when ssh-keygen is missing', () => {
+    // Cannot-confirm is not a licence to overwrite a credential that works.
+    const enoent = () => { const e: NodeJS.ErrnoException = new Error('spawn ENOENT'); e.code = 'ENOENT'; throw e }
+    expect(() => installCertificate(live(), CERT + '\n', enoent)).toThrow(/not installed/)
+    expect(readFileSync(live(), 'utf8')).toBe(CERT + '\n')
+  })
+
+  it('installs a real certificate, and leaves no staging file behind', () => {
+    // The positive control: a gate strict enough to refuse the cases above can
+    // refuse every real certificate too, and renewal would silently stop.
+    installCertificate(live(), EXPIRED_CERT + '\n')
+    expect(readFileSync(live(), 'utf8')).toBe(EXPIRED_CERT + '\n')
+    expect(readdirSync(join(home, '.insta', 'ssh')).filter((f) => f.includes('staging')),
+      'a staging file survived').toEqual([])
+  })
+
+  it('cleans up the staging file when verification fails', () => {
+    try { installCertificate(live(), 'not a certificate at all\n') } catch { /* expected */ }
+    expect(readdirSync(join(home, '.insta', 'ssh')).filter((f) => f.includes('staging'))).toEqual([])
+  })
+})
+
+describe('a CA key is decoded too, not just base64-checked', () => {
+  it('refuses a blob whose declared type disagrees with its body', () => {
+    // Same class as the certificate gap: an anchor built from a mislabelled
+    // blob installs silently and fails at connect time, where the message
+    // points at known_hosts rather than at the response that produced it.
+    const mislabelled = `ssh-ed25519 ${CA.split(/\s+/)[1]!.slice(0, 8)}${'A'.repeat(60)}`
+    expect(() => parseCAPublicKey(mislabelled)).toThrow()
+  })
+
+  it('accepts the real CA key ssh-keygen produced', () => {
+    expect(parseCAPublicKey(CA).type).toBe('ssh-ed25519')
+    expect(parseCAPublicKey(CA).blob).toBe(CA.split(/\s+/)[1])
   })
 })

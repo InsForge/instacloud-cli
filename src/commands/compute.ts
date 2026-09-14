@@ -752,7 +752,7 @@ export async function computeLimits(serviceName: string | undefined, opts: Limit
 
 // ---- ssh (interactive sessions) --------------------------------------------
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -939,7 +939,7 @@ async function mintCert(api: ApiClient, projectId: string, serviceId: string, pu
   // left with an error message and a broken alias. Same ordering rule as the
   // collision check: nothing is written until the whole response is known-good.
   const out = validateCertResponse(res.body)
-  writeFileAtomicSync(instaCertPath(alias), out.certificate.trim() + '\n', { mode: 0o644 })
+  installCertificate(instaCertPath(alias), out.certificate.trim() + '\n')
   return out
 }
 
@@ -969,6 +969,56 @@ export function validateCertResponse(body: unknown): CertResponse {
   // anything is written, instead of after the alias is already recorded.
   if (b.caPublicKey !== undefined) parseCAPublicKey(b.caPublicKey)
   return b as CertResponse
+}
+
+/** Verifies a certificate FILE. Injected in tests; ssh-keygen in production.
+ *  Throws when the file is not a certificate OpenSSH can parse. */
+export type CertVerifier = (certPath: string) => void
+
+const sshKeygenVerifyCert: CertVerifier = (certPath) => {
+  execFileSync('ssh-keygen', ['-L', '-f', certPath], { stdio: 'ignore' })
+}
+
+/**
+ * Write a certificate into place only once OpenSSH agrees it is one.
+ *
+ * The structural decode in isSSHCertificateRecord reads the blob's first field
+ * and stops. That rejects arbitrary base64, and it still accepts a blob whose
+ * type name is right and whose remaining bytes are noise -- there is no nonce,
+ * public key, serial, principal list, validity window or signature behind it.
+ * Such a response would replace a WORKING alias's live credential and fail
+ * later inside ssh, which is exactly the preservation guarantee this command
+ * makes.
+ *
+ * So the authority is `ssh-keygen -L`, run against a temporary file, and the
+ * real file is only replaced once it passes. Spawning it here costs nothing
+ * new: certNeedsRenewal already runs the same binary on this same path, every
+ * time a certificate exists. (An earlier round declined this on the grounds
+ * that a subprocess did not belong on the renewal path -- that reasoning was
+ * simply wrong about what the path already does.)
+ *
+ * A missing ssh-keygen is a REFUSAL, not a pass: it means we cannot confirm,
+ * and an unconfirmable certificate must not displace one that works. Nothing
+ * is lost by it either -- without OpenSSH installed the certificate has no
+ * consumer.
+ */
+export function installCertificate(certPath: string, contents: string, verify: CertVerifier = sshKeygenVerifyCert): void {
+  mkdirSync(dirname(certPath), { recursive: true, mode: 0o700 })
+  const staging = `${certPath}.staging-${process.pid}-${randomUUID()}`
+  try {
+    writeFileSync(staging, contents, { mode: 0o644 })
+    try {
+      verify(staging)
+    } catch (e) {
+      const why = (e as NodeJS.ErrnoException)?.code === 'ENOENT'
+        ? 'ssh-keygen is not installed, so the certificate cannot be checked'
+        : 'the platform returned a certificate OpenSSH cannot parse'
+      throw new Error(`${why} — the existing certificate was left untouched`)
+    }
+    renameSync(staging, certPath)
+  } finally {
+    try { unlinkSync(staging) } catch { /* moved into place, or never created */ }
+  }
 }
 
 /** One line covers every node in every region, which is the whole reason for a

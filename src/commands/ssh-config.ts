@@ -259,6 +259,13 @@ export function parseCAPublicKey(value: unknown): { type: string; blob: string }
   if (!/^[A-Za-z0-9+/]+={0,3}$/.test(blob) || blob.length < 32) {
     throw new Error('refusing a certificate authority key whose body is not base64')
   }
+  // The blob's OWN type must agree with the text field. Base64-shaped is not
+  // the same as "is a key": an anchor built from a mislabelled or arbitrary
+  // blob installs silently and then fails at connect time, where the message
+  // points at known_hosts rather than at the response that produced it.
+  if (sshBlobTypeName(blob) !== type) {
+    throw new Error(`refusing a certificate authority key whose body does not match its type ${JSON.stringify(type.slice(0, 32))}`)
+  }
   return { type, blob }
 }
 
@@ -296,17 +303,28 @@ export function isSSHCertificateRecord(v: unknown): v is string {
   // does not even carry a well-formed first field is not a certificate at all.
   // Decoding it here keeps the check dependency-free and off the subprocess
   // path, which matters because this runs during OpenSSH's own config parse.
+  return sshBlobTypeName(blob) === type
+}
+
+/** The type name an SSH key/certificate blob declares about ITSELF.
+ *
+ *  Every OpenSSH blob begins with an SSH `string`: a 4-byte big-endian length
+ *  followed by that many bytes, holding the algorithm name. Reading it is what
+ *  separates "base64 of the right length" -- which anyone can construct -- from
+ *  a blob that is at least the kind of thing it claims to be. Returns undefined
+ *  when the blob does not even carry a well-formed first field. */
+export function sshBlobTypeName(blob: string): string | undefined {
   let raw: Buffer
   try {
     raw = Buffer.from(blob, 'base64')
   } catch {
-    return false
+    return undefined
   }
-  if (raw.length < 4) return false
+  if (raw.length < 4) return undefined
   const nameLen = raw.readUInt32BE(0)
-  // A sane field length, checked before it is used as an offset.
-  if (nameLen === 0 || nameLen > 128 || raw.length < 4 + nameLen) return false
-  return raw.subarray(4, 4 + nameLen).toString('utf8') === type
+  // A sane field length, checked BEFORE it is used as an offset.
+  if (nameLen === 0 || nameLen > 128 || raw.length < 4 + nameLen) return undefined
+  return raw.subarray(4, 4 + nameLen).toString('utf8')
 }
 
 /** An SSH principal safe to place in a command line.
