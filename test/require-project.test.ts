@@ -3,7 +3,7 @@
 // project on the new plane picks it with no prompt and saves — replacing the committed team link
 // on a read-only command. These cases pin the caller, not just the config module.
 import { test, expect, afterEach } from 'vitest'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { requireProject } from '../src/api.js'
@@ -48,4 +48,18 @@ test('an unlinked directory still auto-resolves', async () => {
   const c = counter()
   await expect(requireProject({ cwd: dir, autoResolve: c.autoResolve })).resolves.toMatchObject({ projectId: 'p-box' })
   expect(c.calls()).toBe(1)
+})
+
+test('after a pull replaces the linked project, the command stops instead of guessing its control plane', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'insta-req-'))
+  process.env.INSTA_API_URL = CLOUD
+  await writeProject(proj, dir)
+  // The committed file changes underneath the ignored record.
+  writeFileSync(join(dir, '.insta', 'project.json'), JSON.stringify({ ...proj, projectId: 'p-box' }))
+  const before = readFileSync(join(dir, '.insta', 'project.json'), 'utf8')
+
+  const c = counter()
+  await expect(requireProject({ cwd: dir, autoResolve: c.autoResolve })).rejects.toBeInstanceOf(CliExit)
+  expect(c.calls()).toBe(0)
+  expect(readFileSync(join(dir, '.insta', 'project.json'), 'utf8')).toBe(before)
 })

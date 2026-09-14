@@ -5,7 +5,7 @@ import { test, expect, afterEach } from 'vitest'
 import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readProject, resolveProjectLink, writeProject } from '../src/config.js'
+import { foreignLinkMessage, readProject, resolveProjectLink, writeProject } from '../src/config.js'
 import { CliExit } from '../src/util.js'
 
 const proj = { projectId: 'p-1', orgId: 'o-1', branch: 'main' }
@@ -58,7 +58,7 @@ test('project.json keeps only the shared binding; the control plane goes in a gi
   await writeProject(proj, root)
   // The committed team file is unchanged in shape — a URL one machine chose never lands in it.
   expect(readJson(linkFile(root))).toEqual(proj)
-  expect(readJson(planeFile(root))).toEqual({ apiUrl: BOX })
+  expect(readJson(planeFile(root))).toEqual({ projectId: 'p-1', apiUrl: BOX })
   const gi = readFileSync(join(root, '.gitignore'), 'utf8')
   expect(gi).toContain('.insta/link-plane.json')
   expect(gi).not.toMatch(/^\.insta\/project\.json$/m)
@@ -70,7 +70,7 @@ test('a link made on another control plane is reported foreign, and resolves aga
   await writeProject(proj, root)
   process.env.INSTA_API_URL = BOX
   expect(await readProject(root)).toBeNull()
-  expect((await resolveProjectLink(root))?.foreign).toMatchObject({ projectId: 'p-1', linkedApiUrl: CLOUD, currentApiUrl: BOX })
+  expect((await resolveProjectLink(root))?.foreign).toMatchObject({ reason: 'plane', projectId: 'p-1', linkedApiUrl: CLOUD, currentApiUrl: BOX })
   process.env.INSTA_API_URL = CLOUD + '/' // trailing slashes do not make a different plane
   expect(await readProject(root)).toMatchObject({ projectId: 'p-1' })
 })
@@ -87,7 +87,7 @@ test('a malformed sidecar is ignored instead of crashing every command', async (
   const { root } = linkedProjectWithSubdir()
   process.env.INSTA_API_URL = CLOUD
   await writeProject(proj, root)
-  writeFileSync(planeFile(root), JSON.stringify({ apiUrl: 42 }))
+  writeFileSync(planeFile(root), JSON.stringify({ projectId: 'p-1', apiUrl: 42 }))
   process.env.INSTA_API_URL = BOX
   expect(await readProject(root)).toMatchObject({ projectId: 'p-1' })
 })
@@ -153,4 +153,62 @@ test('linking the home directory itself is refused', async () => {
   const { home } = fakeHome()
   await expect(writeProject(proj, home)).rejects.toBeInstanceOf(CliExit)
   expect(existsSync(linkFile(home))).toBe(false)
+})
+
+// ---- the record vouches for the project it was written for, and only that one -----------------
+// project.json is committed and the record is not, so a pull or checkout can replace the project
+// underneath it.
+
+test('a checkout that replaces project.json is reported changed, on either control plane', async () => {
+  const { root } = linkedProjectWithSubdir()
+  process.env.INSTA_API_URL = CLOUD
+  await writeProject(proj, root) // this machine linked p-1 on cloud
+  // A pull or checkout replaces the COMMITTED file; the ignored record is untouched.
+  writeFileSync(linkFile(root), JSON.stringify({ ...proj, projectId: 'p-box' }))
+
+  // Still on cloud, the cloud record must not vouch for p-box: that sent p-box's id to cloud.
+  expect(await readProject(root)).toBeNull()
+  expect((await resolveProjectLink(root))?.foreign).toMatchObject({ reason: 'changed', projectId: 'p-box', linkedProjectId: 'p-1' })
+  // On the box, it is not refused as a CLOUD link either — the reason reported is the true one.
+  process.env.INSTA_API_URL = BOX
+  expect((await resolveProjectLink(root))?.foreign?.reason).toBe('changed')
+
+  // Linking it confirms it for the current control plane.
+  await writeProject({ ...proj, projectId: 'p-box' }, root)
+  expect(await readProject(root)).toMatchObject({ projectId: 'p-box' })
+})
+
+test('a record without a project id is ignored: it cannot say which project it vouches for', async () => {
+  const { root } = linkedProjectWithSubdir()
+  process.env.INSTA_API_URL = CLOUD
+  await writeProject(proj, root)
+  writeFileSync(planeFile(root), JSON.stringify({ apiUrl: CLOUD }))
+  process.env.INSTA_API_URL = BOX
+  expect(await readProject(root)).toMatchObject({ projectId: 'p-1' })
+})
+
+test('a hand-edited record cannot put credentials or escape sequences on the terminal', async () => {
+  const { root } = linkedProjectWithSubdir()
+  process.env.INSTA_API_URL = CLOUD
+  await writeProject(proj, root)
+  // A raw ESC also makes URL() reject the value, which is exactly when credentials must still go.
+  writeFileSync(planeFile(root), JSON.stringify({ projectId: 'p-1', apiUrl: 'https://user:s3cret@api.box.example\u001b[31m' }))
+  const f = (await resolveProjectLink(root))?.foreign
+  expect(f?.reason).toBe('plane')
+  const msg = foreignLinkMessage(f!)
+  expect(msg).not.toContain('s3cret')
+  expect(msg).not.toContain('\u001b')
+})
+
+// The record is sanitized when READ, not only when printed: the comparison uses it too. A copied
+// record whose URL still carries userinfo names the same control plane as the bare URL, and must
+// not be reported foreign because of it. (Printing sanitizes again, so only this case pins the
+// read side.)
+test('a record whose URL carries credentials still matches its own control plane', async () => {
+  const { root } = linkedProjectWithSubdir()
+  process.env.INSTA_API_URL = CLOUD
+  await writeProject(proj, root)
+  writeFileSync(planeFile(root), JSON.stringify({ projectId: 'p-1', apiUrl: 'https://user:pw@api.cloud.example' }))
+  expect((await resolveProjectLink(root))?.foreign).toBeUndefined()
+  expect(await readProject(root)).toMatchObject({ projectId: 'p-1' })
 })

@@ -10,10 +10,11 @@ const GLOBAL_DIR = join(homedir(), '.insta')
 const GLOBAL_FILE = join(GLOBAL_DIR, 'config.json')
 const PROJECT_DIR = '.insta'
 const PROJECT_FILE = 'project.json'
-// Machine-local, gitignored: the control plane this machine linked against. It is NOT in
-// project.json because that file is the team's committed binding — a URL chosen by one machine
-// (a staging switch, a local box, a transient INSTA_API_URL) would make every teammate's CLI
-// treat the shared link as foreign.
+// Machine-local, gitignored: which project this machine linked here, and on which control plane.
+// It is NOT in project.json because that file is the team's committed binding — a URL chosen by one
+// machine (a staging switch, a local box, a transient INSTA_API_URL) would make every teammate's
+// CLI treat the shared link as foreign. It records the project id too, because project.json is
+// committed and this file is not: a pull or checkout can replace the project underneath it.
 const LINK_PLANE_FILE = 'link-plane.json'
 
 export type GlobalConfig = {
@@ -136,7 +137,17 @@ export async function findProjectRoot(cwd = process.cwd()): Promise<string | nul
   }
 }
 
-export type ForeignLink = { file: string; projectId: string; linkedApiUrl: string; currentApiUrl: string }
+/** Why a link is not for this control plane. `plane`: this machine linked this project against a
+ *  different control plane. `changed`: project.json names a different project than the one this
+ *  machine recorded — it was replaced by a pull or checkout, so its control plane is unknown. */
+export type ForeignLink = {
+  reason: 'plane' | 'changed'
+  file: string
+  projectId: string
+  linkedProjectId: string
+  linkedApiUrl: string
+  currentApiUrl: string
+}
 
 /** The link that applies to `cwd`, and whether it was made against a DIFFERENT control plane. A
  *  project id means nothing on another control plane (cloud, staging and every insta-oss box each
@@ -163,12 +174,19 @@ export async function resolveProjectLink(cwd = process.cwd()): Promise<{ link: P
   }
   // No sidecar — a link from before this existed, or a teammate who just cloned — resolves as it
   // always did: there is nothing to say which control plane it belongs to.
-  const plane = await readLinkPlane(root)
-  if (plane) {
+  const record = await readLinkPlane(root)
+  if (record) {
     const current = safeUrl((await readGlobal()).apiUrl)
-    if (normalizeUrl(plane) !== normalizeUrl(current)) {
-      return { link, foreign: { file: join(root, PROJECT_DIR, PROJECT_FILE), projectId: String(link.projectId), linkedApiUrl: plane, currentApiUrl: current } }
+    const base = {
+      file: join(root, PROJECT_DIR, PROJECT_FILE), projectId: String(link.projectId),
+      linkedProjectId: record.projectId, linkedApiUrl: record.apiUrl, currentApiUrl: current,
     }
+    // The record vouches for the project it was written for, and only that one. A record for
+    // another project says nothing about this one: trusting it would send this project to the
+    // control plane of the project it replaced, or refuse it for a reason that is not true. Fail
+    // closed with the real reason instead.
+    if (record.projectId !== base.projectId) return { link, foreign: { reason: 'changed', ...base } }
+    if (normalizeUrl(record.apiUrl) !== normalizeUrl(current)) return { link, foreign: { reason: 'plane', ...base } }
   }
   return { link }
 }
@@ -192,29 +210,44 @@ export async function readProject(cwd = process.cwd()): Promise<ProjectConfig | 
 const warnedForeignLinks = new Set<string>()
 
 export function foreignLinkMessage(f: ForeignLink): string {
-  return `${f.file} links project ${f.projectId} on ${f.linkedApiUrl}, but the CLI is pointed at ${f.currentApiUrl}. `
-    + `Link this directory for ${f.currentApiUrl} with \`insta project link <id>\`, or point the CLI back at ${f.linkedApiUrl}.`
+  // Every field can come from a file (a committed project.json, a copied or hand-edited record),
+  // so all of it is stripped of control characters before it reaches a terminal.
+  const file = safeText(f.file)
+  const id = safeText(f.projectId)
+  const linked = safeUrl(f.linkedApiUrl)
+  const current = safeUrl(f.currentApiUrl)
+  if (f.reason === 'changed') {
+    return `${file} now links project ${id}, but this machine linked project ${safeText(f.linkedProjectId)} there, on ${linked}. `
+      + `The link changed since (a pull or checkout), so its control plane is unknown. `
+      + `Confirm it for ${current} with \`insta project link ${id}\`.`
+  }
+  return `${file} links project ${id} on ${linked}, but the CLI is pointed at ${current}. `
+    + `Link this directory for ${current} with \`insta project link <id>\`, or point the CLI back at ${linked}.`
 }
 
-async function readLinkPlane(root: string): Promise<string | null> {
+async function readLinkPlane(root: string): Promise<{ projectId: string; apiUrl: string } | null> {
   try {
-    const raw = JSON.parse(await readFile(join(root, PROJECT_DIR, LINK_PLANE_FILE), 'utf8')) as { apiUrl?: unknown }
-    // Validated, not cast: a malformed sidecar is ignored rather than crashing every command.
-    return raw && typeof raw.apiUrl === 'string' && raw.apiUrl ? raw.apiUrl : null
+    const raw = JSON.parse(await readFile(join(root, PROJECT_DIR, LINK_PLANE_FILE), 'utf8')) as { projectId?: unknown; apiUrl?: unknown }
+    // Validated, not cast: a malformed record is ignored rather than crashing every command. A
+    // record with no project id cannot say which project it vouches for, so it is ignored too.
+    if (!raw || typeof raw.projectId !== 'string' || !raw.projectId || typeof raw.apiUrl !== 'string' || !raw.apiUrl) return null
+    // Untrusted input (it may have been copied or edited), so sanitized before it is compared or printed.
+    return { projectId: raw.projectId, apiUrl: safeUrl(raw.apiUrl) }
   } catch {
     return null
   }
 }
 
-/** A control-plane URL safe to persist and to print: userinfo removed (INSTA_API_URL may carry
- *  credentials) and control characters stripped (it is echoed to a terminal). */
+/** Text safe to echo to a terminal: control characters (escape sequences included) removed. */
+function safeText(text: string): string {
+  return String(text).replace(/[\u0000-\u001f\u007f]/g, '')
+}
+
+/** A control-plane URL safe to persist and to print: control characters removed, then any
+ *  userinfo (INSTA_API_URL may carry credentials). The userinfo goes by pattern, not by parsing: a
+ *  value URL() rejects — a stray escape character is enough — must not keep its credentials. */
 export function safeUrl(url: string): string {
-  let out = url
-  try {
-    const u = new URL(url)
-    if (u.username || u.password) { u.username = ''; u.password = ''; out = u.toString() }
-  } catch { /* not a parseable URL: keep the string, still strip control characters */ }
-  return out.replace(/[\u0000-\u001f\u007f]/g, '')
+  return safeText(url).replace(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/?#]*@/, '$1')
 }
 
 /** Writes to the existing project root when inside a linked project (branch switches from a
@@ -231,5 +264,5 @@ export async function writeProject(c: ProjectConfig, cwd = process.cwd()): Promi
   ensureGitignore(target, ['.insta/agent-session.json'], '# Local agent credentials')
   ensureGitignore(target, [`.insta/${LINK_PLANE_FILE}`], '# Local: the control plane this machine linked against')
   await writeFile(join(target, PROJECT_DIR, PROJECT_FILE), JSON.stringify(c, null, 2))
-  await writeFile(join(target, PROJECT_DIR, LINK_PLANE_FILE), JSON.stringify({ apiUrl: safeUrl(apiUrl) }, null, 2))
+  await writeFile(join(target, PROJECT_DIR, LINK_PLANE_FILE), JSON.stringify({ projectId: c.projectId, apiUrl: safeUrl(apiUrl) }, null, 2))
 }
