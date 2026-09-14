@@ -293,6 +293,82 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
     expect(g.get('identityfile')).toBe('C:/Users/Jun Wen/.insta/ssh/id_ed25519')
     expect(g.get('certificatefile')).toBe('C:/Users/Jun Wen/.insta/ssh/api.insta-cert.pub')
   })
+
+  // `ssh -G` is NOT the parser to ask about these two keywords: it dumps
+  // IdentityFile and CertificateFile verbatim and does the percent/dollar
+  // expansion later, on the connect path. So the only way to see the filename
+  // ssh will really open is to let it start connecting and read the path back
+  // out of `-v`. ProxyCommand keeps that attempt entirely local -- nothing is
+  // resolved and no packet leaves the machine.
+  const identityFilesSSHWouldOpen = (alias: string, body: string): string[] => {
+    const cfg = join(dir, 'config')
+    writeFileSync(cfg, body, { mode: 0o600 })
+    let log: string
+    try {
+      log = execFileSync('ssh', ['-v', '-o', 'BatchMode=yes', '-o', 'ProxyCommand=/bin/false', '-F', cfg, alias],
+        { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] })
+    } catch (e) {
+      // ProxyCommand always fails, which is the point: ssh has already logged
+      // the identity paths by then. An expansion error kills it EARLIER, so an
+      // empty list is a real result rather than a harness failure.
+      log = String((e as { stderr?: string | Buffer }).stderr ?? '')
+    }
+    return [...log.matchAll(/^debug1: identity file (.*) type /gm)].map((m) => m[1]!)
+  }
+
+  // A home directory with a `%` in it is ordinary, and OpenSSH does not read one
+  // literally: it percent-expands IdentityFile and CertificateFile, so `%te` is
+  // an unknown token and ssh ABORTS before it opens the key. The alias does not
+  // fail to authenticate, it fails to run.
+  const PERCENT = '/Users/dev%team/.insta/ssh'
+
+  const percentBlock = () => renderConfigBlock({
+    entries: [{
+      alias: 'api.insta',
+      hostName: 'ssh.us-west-1.compute.example',
+      user: 'svc-abc',
+      certificateFile: `${PERCENT}/api.insta-cert.pub`,
+    }],
+    identityFile: `${PERCENT}/id_ed25519`,
+  })
+
+  it('hands ssh the literal path when the home directory contains a %', () => {
+    expect(identityFilesSSHWouldOpen('api.insta', percentBlock()))
+      .toContain(`${PERCENT}/id_ed25519`)
+    // CertificateFile goes through the same expansion but is only opened once
+    // the key itself exists, so it is checked where `ssh -G` does show it:
+    // through the quotes, still carrying the escape that keeps it literal.
+    expect(effective('api.insta', percentBlock()).get('certificatefile'))
+      .toBe('/Users/dev%%team/.insta/ssh/api.insta-cert.pub')
+  })
+
+  it('is the %-escaping that saves it, not luck', () => {
+    // The negative control: with a single `%` the token is unknown, ssh gives up
+    // on the whole connection, and no identity path is ever reached.
+    const unescaped = percentBlock().replace(/%%/g, '%')
+    expect(unescaped, 'the renderer emitted no escaping, so this control proves nothing').not.toBe(percentBlock())
+    expect(identityFilesSSHWouldOpen('api.insta', unescaped))
+      .not.toContain(`${PERCENT}/id_ed25519`)
+  })
+
+  it('does not let a % in the path reach the ControlPath tokens', () => {
+    // ControlPath carries tokens we MEANT, and `ssh -G` does expand that one --
+    // so it is the check that the escaping did not spill outside the two path
+    // directives.
+    const g = effective('api.insta', percentBlock())
+    expect(g.get('controlpath')).toContain('cm-')
+    expect(g.get('controlpath'), 'our own ControlPath tokens were escaped away').not.toContain('%')
+  })
+
+  it('refuses environment-variable syntax, because ssh_config has no escape for it', () => {
+    // `${...}` is expanded on the same connect path, and there is no `$$`. A
+    // defined variable silently rewrites the filename; an undefined one aborts.
+    // Both are wrong for a literal path, so the renderer refuses instead.
+    expect(() => quoteConfigPath('/Users/a${HOME}b/.insta/ssh/id_ed25519')).toThrow()
+    const hand = 'Host api.insta\n  HostName ssh.us-west-1.compute.example\n  IdentityFile "/Users/a${HOME}b/id_ed25519"\n'
+    expect(identityFilesSSHWouldOpen('api.insta', hand), 'ssh read ${...} literally after all')
+      .not.toContain('/Users/a${HOME}b/id_ed25519')
+  })
 })
 
 const USER_ANCHOR = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhI'
@@ -307,12 +383,14 @@ describe('known_hosts trust anchor', () => {
     expect(out).toBe(`@cert-authority ssh.*.compute.example ${CA} ${CA_MARKER}\n`)
   })
 
-  it('is idempotent on the KEY, so a changed host pattern updates rather than duplicates', () => {
-    const first = upsertCertAuthority('', 'ssh.*.old.example', CA)
-    const second = upsertCertAuthority(first, 'ssh.*.new.example', CA)
+  it('is idempotent on the KEY, so a WIDENED host pattern updates rather than duplicates', () => {
+    // The pattern this CA is anchored under widened to cover the region label,
+    // so the exact line it replaces says nothing the new one does not.
+    const first = upsertCertAuthority('', 'ssh.us-west-1.compute.example', CA)
+    const second = upsertCertAuthority(first, 'ssh.*.compute.example', CA)
     const lines = second.trim().split('\n').filter((l) => l.startsWith('@cert-authority'))
     expect(lines, 'a re-run left two anchors for one CA').toHaveLength(1)
-    expect(lines[0]).toContain('ssh.*.new.example')
+    expect(lines[0]).toContain('ssh.*.compute.example')
   })
 
   // Rotation is the case the marker exists for: same host pattern, different
@@ -657,6 +735,24 @@ describe('paths are quoted, because a home directory may contain a space', () =>
     expect(() => quoteConfigPath('/home/dev/a\nProxyCommand sh')).toThrow()
     expect(quoteConfigPath('/home/dev/ssh/id')).toBe('"/home/dev/ssh/id"')
   })
+
+  // Quoting alone does not make a path literal. OpenSSH expands tokens INSIDE
+  // the quotes for IdentityFile and CertificateFile, so a `%` the user did not
+  // mean as a token is either read as one or aborts the connection outright.
+  it('escapes a % so the path is a filename rather than a token', () => {
+    expect(quoteConfigPath('/home/dev%team/.insta/ssh/id')).toBe('"/home/dev%%team/.insta/ssh/id"')
+    expect(quoteConfigPath('/home/%d/id')).toBe('"/home/%%d/id"')
+    expect(quoteConfigPath('/home/100%/id')).toBe('"/home/100%%/id"')
+  })
+
+  it('refuses a path carrying environment-variable syntax', () => {
+    // Unlike `%`, `${...}` has NO escape in ssh_config, so there is no correct
+    // string to emit. A lone `$` is not expansion syntax and stays a filename.
+    expect(() => quoteConfigPath('/home/${HOME}/id')).toThrow()
+    expect(() => quoteConfigPath('/home/dev/${}/id')).toThrow()
+    expect(quoteConfigPath('/home/dev$/id')).toBe('"/home/dev$/id"')
+    expect(quoteConfigPath('/home/$HOME/id')).toBe('"/home/$HOME/id"')
+  })
 })
 
 
@@ -734,11 +830,55 @@ describe('a trust anchor is matched field by field, never by substring', () => {
     expect(rotated.split('@cert-authority').length - 1).toBe(1)
   })
 
-  it('still moves the anchor when the SAME key changes host pattern', () => {
-    const first = upsertCertAuthority('', 'ssh.*.old.example', CA)
-    const moved = upsertCertAuthority(first, 'ssh.*.new.example', CA)
-    expect(moved).not.toContain('old.example')
-    expect(moved.split('@cert-authority').length - 1).toBe(1)
+  // A move is a pattern change that covers the SAME hosts, in either direction.
+  // That is the only pattern change one anchor can make on its own, because
+  // hostPatternFor derives the pattern from the host: the region label becoming
+  // widenable widens it, the suffix leaving the allowlist narrows it back.
+  it('still moves the anchor when the SAME key is widened over the region label', () => {
+    const exact = upsertCertAuthority('', 'ssh.us-west-1.compute.example', CA)
+    const widened = upsertCertAuthority(exact, 'ssh.*.compute.example', CA)
+    expect(widened, 'the exact anchor the wildcard already covers was left behind').not.toContain('ssh.us-west-1.compute.example')
+    expect(widened.split('@cert-authority').length - 1).toBe(1)
+  })
+
+  it('still moves it when the wildcard is narrowed back to one region', () => {
+    const wide = upsertCertAuthority('', 'ssh.*.compute.example', CA)
+    const narrowed = upsertCertAuthority(wide, 'ssh.us-west-1.compute.example', CA)
+    expect(narrowed, 'a wildcard we no longer widen to stayed trusted').not.toContain('ssh.*.compute.example')
+    expect(narrowed.split('@cert-authority').length - 1).toBe(1)
+  })
+
+  // The regression. Outside CA_WIDENABLE_SUFFIXES hostPatternFor deliberately
+  // returns an EXACT hostname -- one anchor per region, which is the documented
+  // fallback -- and every region is signed by the same platform CA. Treating
+  // "same key" as proof the anchor had merely moved made setting up the second
+  // region DELETE the first one's line, so an alias that worked yesterday met a
+  // host-key prompt instead.
+  it("keeps another region's exact anchor that shares this CA", () => {
+    const west = upsertCertAuthority('', 'ssh.us-west-1.self.hosted', CA)
+    const both = upsertCertAuthority(west, 'ssh.eu-west-1.self.hosted', CA)
+    expect(both, "setting up a second region deleted the first region's anchor").toContain('ssh.us-west-1.self.hosted')
+    expect(both).toContain('ssh.eu-west-1.self.hosted')
+    expect(both.split('@cert-authority').length - 1).toBe(2)
+  })
+
+  // Same defect, one level up: CA_WIDENABLE_SUFFIXES ships TWO gateway domains,
+  // so a user with projects on both holds two wildcard anchors under one CA and
+  // neither covers the other.
+  it("keeps another gateway domain's wildcard anchor that shares this CA", () => {
+    const tech = upsertCertAuthority('', 'ssh.*.compute.instacloud.tech', CA)
+    const both = upsertCertAuthority(tech, 'ssh.*.compute.insforge.dev', CA)
+    expect(both, 'the other gateway domain lost its anchor').toContain('ssh.*.compute.instacloud.tech')
+    expect(both).toContain('ssh.*.compute.insforge.dev')
+    expect(both.split('@cert-authority').length - 1).toBe(2)
+  })
+
+  // And a second run for a region that already has one must still not stack.
+  it('does not stack anchors when the same region is set up twice', () => {
+    let out = upsertCertAuthority('', 'ssh.us-west-1.self.hosted', CA)
+    out = upsertCertAuthority(out, 'ssh.eu-west-1.self.hosted', CA)
+    out = upsertCertAuthority(out, 'ssh.us-west-1.self.hosted', CA)
+    expect(out.split('@cert-authority').length - 1).toBe(2)
   })
 
   it('never touches an anchor the user added themselves', () => {

@@ -57,11 +57,27 @@ export function isSafeConfigValue(v: unknown): v is string {
  *  a config argument as an escape introducer -- so `\U` is consumed and the
  *  path silently becomes a different one. Windows OpenSSH accepts forward
  *  slashes everywhere, so rewriting is both safe and the only unambiguous
- *  form. */
+ *  form.
+ *
+ *  QUOTING DOES NOT MAKE A PATH LITERAL. OpenSSH expands tokens inside the
+ *  quotes for IdentityFile and CertificateFile, on the connect path rather than
+ *  at parse time -- which is why `ssh -G` shows nothing wrong. So a `%` in an
+ *  ordinary home directory is not a character, it is syntax: `/home/dev%team`
+ *  makes ssh abort the whole connection on an unknown token, and `/home/%d/...`
+ *  quietly resolves to somewhere else entirely. `%%` is the escape, and it is
+ *  applied to the path we were handed -- never to the ControlPath tokens, which
+ *  we write ourselves and do not route through here.
+ *
+ *  `${...}` gets no such treatment because ssh_config has no escape for it:
+ *  a defined variable rewrites the filename and an undefined one aborts, and
+ *  there is no third spelling that means "a dollar sign followed by a brace".
+ *  Refusing is the only honest answer, as with the double quote above. A lone
+ *  `$` is not expansion syntax and stays a filename. */
 export function quoteConfigPath(path: string): string {
   if (path.includes('"')) throw new Error(`cannot write an ssh_config path containing a double quote: ${JSON.stringify(path)}`)
   if (/[\n\r]/.test(path)) throw new Error(`cannot write an ssh_config path containing a newline: ${JSON.stringify(path)}`)
-  return `"${path.replace(/\\/g, '/')}"`
+  if (path.includes('${')) throw new Error(`cannot write an ssh_config path containing an environment-variable expansion: ${JSON.stringify(path)}`)
+  return `"${path.replace(/\\/g, '/').replace(/%/g, '%%')}"`
 }
 
 /**
@@ -476,9 +492,10 @@ export function isSafeCAHostPattern(v: unknown): v is string {
  * Rotation policy: we own at most ONE anchor per host pattern. A line of OURS
  * (it carries CA_MARKER) is dropped when it covers the same host pattern -- so
  * a rotated CA replaces the retired one instead of leaving it trusted forever
- * -- or when it carries the same key, so a changed host pattern moves the
- * anchor rather than duplicating it. Anchors the user added themselves have no
- * marker and are never touched.
+ * -- or when it carries the same key AND the two patterns cover the same hosts,
+ * so a pattern that merely widened or narrowed moves the anchor rather than
+ * duplicating it. Anchors the user added themselves have no marker and are
+ * never touched.
  */
 export function upsertCertAuthority(existing: string, hostPattern: string, caKey: string): string {
   const key = caKey.trim()
@@ -497,7 +514,42 @@ function isSupersededAnchor(line: string, hostPattern: string, key: string): boo
   // test would delete a DIFFERENT region's anchor that happened to extend ours
   // -- and a deleted anchor is not a visible failure, it is a host-key prompt
   // on every connection to a region that used to be trusted.
-  const [, pattern, keyType, keyBlob] = line.split(/\s+/)
+  // `''` for a line too short to carry one: it matches no host pattern and
+  // covers nothing, so such a line is simply never superseded.
+  const [, pattern = '', keyType, keyBlob] = line.split(/\s+/)
+  // Rotation: the platform issued a new CA for a pattern we already anchor.
+  if (pattern === hostPattern) return true
   const [wantType, wantBlob] = key.split(/\s+/)
-  return pattern === hostPattern || (keyType === wantType && keyBlob === wantBlob)
+  if (keyType !== wantType || keyBlob !== wantBlob) return false
+  // Same key, DIFFERENT pattern, and which of the two things that is decides
+  // whether the old line may go. One CA signs every region, so "same key" alone
+  // proves nothing: outside CA_WIDENABLE_SUFFIXES each region gets its own exact
+  // anchor, and CA_WIDENABLE_SUFFIXES itself holds two gateway domains. Treating
+  // every same-key line as the old position of THIS anchor deleted an anchor
+  // another alias still depends on -- again a silent host-key prompt.
+  //
+  // What separates the two is containment. hostPatternFor derives the pattern
+  // from the host, so the only pattern change a single anchor can make on its
+  // own is over the region label: widening when the suffix becomes widenable,
+  // narrowing when it stops being. Either way one pattern covers the other, and
+  // dropping the covered line loses no trust the new line does not restore.
+  // Patterns that cover nothing of each other are different deployments, and
+  // both are kept.
+  return caPatternCovers(hostPattern, pattern) || caPatternCovers(pattern, hostPattern)
+}
+
+/** Whether every host matching `inner` also matches `outer`.
+ *
+ *  Both patterns come from hostPatternFor, so each is either an exact hostname
+ *  or a single `*` standing for one label -- which makes containment a
+ *  label-by-label comparison rather than a question about pattern algebra. */
+function caPatternCovers(outer: string, inner: string): boolean {
+  if (outer === inner) return true
+  const o = outer.split('.'), i = inner.split('.')
+  // `*` never spans a dot in a known_hosts pattern, so a wider pattern has
+  // exactly as many labels as what it covers.
+  if (o.length !== i.length) return false
+  const star = o.indexOf('*')
+  if (star === -1) return false
+  return o.every((label, n) => n === star || label === i[n])
 }
