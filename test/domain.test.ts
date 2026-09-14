@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest'
-import { domainSearch, domainBuy, domainAttach, domainList, domainStatus, domainContactSet, contactFromOpts, searchLines } from '../src/commands/domain.js'
+import { domainSearch, domainBuy, domainAttach, domainList, domainStatus, searchLines } from '../src/commands/domain.js'
 import type { DomainDeps } from '../src/commands/compute.js'
 
 const services = [
@@ -95,33 +95,6 @@ describe('domain attach', () => {
     await domainAttach('myapp.com', { group: 'web' }, d)
     expect(calls[1]).toMatchObject({ method: 'POST', path: '/projects/p1/domains/myapp.com/attach', body: { branch: 'main', group: 'web' } })
     expect(out()).toContain('myapp.com will attach to web as myapp.com and www.myapp.com')
-  })
-})
-
-describe('contactFromOpts', () => {
-  const flags = { firstName: 'Ada', lastName: 'Lovelace', address1: '1 Analytical Way', city: 'Seattle', state: 'WA', zip: '98101', country: 'US', email: 'ada@example.com', phone: '+12065550100' }
-  it('builds the contact from the flags given; the platform validates', () => {
-    expect(contactFromOpts({ ...flags, companyName: 'Acme' })).toEqual({ ...flags, companyName: 'Acme' })
-    expect(contactFromOpts({ firstName: 'Ada' })).toEqual({ firstName: 'Ada' })
-  })
-  it('a file wins over flags', () => {
-    expect(contactFromOpts({ firstName: 'Ada' }, { firstName: 'X' })).toEqual({ firstName: 'X' })
-  })
-  it('no flags and no file means "no contact given"', () => {
-    expect(contactFromOpts({})).toBeUndefined()
-  })
-})
-
-describe('domain contact set', () => {
-  it('PUTs the org contact and refuses an empty one locally', async () => {
-    const flags = { firstName: 'Ada', lastName: 'Lovelace', address1: '1 Analytical Way', city: 'Seattle', state: 'WA', zip: '98101', country: 'US', email: 'ada@example.com', phone: '+12065550100' }
-    const { deps: d, calls } = deps({ '/domains/contact': { contact: { ...flags } } })
-    await domainContactSet(flags, d)
-    expect(calls[0]).toMatchObject({ method: 'PUT', path: '/orgs/org1/domains/contact', body: flags })
-    expect(out()).toContain('registrant contact saved:')
-    expect(out()).toContain('Ada Lovelace')
-    await expect(domainContactSet({}, d)).rejects.toThrow('exit 1')
-    expect(stderr.join('')).toContain('pass the contact as flags')
   })
 })
 

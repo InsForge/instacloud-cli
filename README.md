@@ -222,7 +222,7 @@ build never reaches a production installer.
 | `insta run <cmd>` | Run a command with the branch bundle injected, nothing written to disk |
 | `insta deploy [dir]` | Deploy a source directory (built remotely) or `--image <url>` |
 | `insta compute` | `start` · `stop` · `suspend` · `status` · `set-domain` · `check-domain` · `remove-domain` |
-| `insta domain` | Buy a domain through InstaCloud: `search` · `buy` · `attach` · `list` · `status` · `contact` |
+| `insta domain` | Buy a domain through InstaCloud: `search` · `buy` · `attach` · `list` · `status` |
 | `insta db` | `url` (print the postgres DSN) · `connect` (psql session) · `limits` · `stats` · `always-on` · `volume` |
 | `insta regions` | Regions available for postgres and compute |
 | `insta manifest` | Agent-legible view of every branch and its URLs |
