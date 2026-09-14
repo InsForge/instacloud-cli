@@ -66,7 +66,7 @@ describe('authorizeTerminal', () => {
   afterEach(() => vi.restoreAllMocks())
   const start = { state: 's1', verificationUri: 'https://github.com/login/device', userCode: 'WDJB-MJHT', interval: 1, expiresAt: new Date(Date.now() + 900_000).toISOString() }
   const drive = (answers: unknown[], startOverride: Record<string, unknown> = {}) => {
-    const polls: unknown[] = []; const waits: number[] = []; const said: string[] = []
+    const polls: unknown[] = []; const waits: number[] = []; const said: string[] = []; const opened: string[] = []
     const api = { request: async (method: string, path: string, body?: unknown) => {
       if (path === '/me/github/device') { expect(method).toBe('POST'); return { ...start, ...startOverride } }
       if (path !== '/me/github/device/poll') throw new Error(`unexpected path ${path}`)
@@ -77,46 +77,47 @@ describe('authorizeTerminal', () => {
       return a
     } } as unknown as ApiClient
     const spy = vi.spyOn(process.stderr, 'write').mockImplementation((l: any) => { said.push(String(l)); return true })
-    return { api, polls, waits, said, spy, wait: async (s: number) => { waits.push(s) } }
+    return { api, polls, waits, said, spy, opened, open: (url: string) => { opened.push(url); return false }, wait: async (s: number) => { waits.push(s) } }
   }
   it('prints the URL and the code, then polls with its own state until the person confirms', async () => {
     const d = drive([{ pending: true, slowDownBy: 0 }, { pending: false, repos: [{ id: 42, owner: 'acme', repo: 'app', installationId: 7 }] }])
-    await expect(authorizeTerminal(d.api, d.wait)).resolves.toEqual([{ id: 42, owner: 'acme', repo: 'app', installationId: 7 }])
+    await expect(authorizeTerminal(d.api, d.wait, d.open)).resolves.toEqual([{ id: 42, owner: 'acme', repo: 'app', installationId: 7 }])
     expect(d.polls).toEqual([{ state: 's1' }, { state: 's1' }])
     // The URL and the code ARE the flow: without them on screen there is nothing for the person to do.
     expect(d.said.join('')).toContain('https://github.com/login/device')
     expect(d.said.join('')).toContain('WDJB-MJHT')
+    expect(d.opened).toEqual([start.verificationUri])
   })
   it('honours slow_down and refuses a negative one: either way the wait must not collapse', async () => {
     const d = drive([{ pending: true, slowDownBy: 5 }, { pending: true, slowDownBy: -30 }, { pending: false, repos: [] }])
-    await authorizeTerminal(d.api, d.wait)
+    await authorizeTerminal(d.api, d.wait, d.open)
     expect(d.waits).toEqual([1, 6, 6])
   })
   it('clamps an interval Node would fire instantly', async () => {
     for (const [given, expected] of [[0, 5], [1e12, 60], [-4, 5]] as const) {
       const d = drive([{ pending: false, repos: [] }], { interval: given })
-      await authorizeTerminal(d.api, d.wait)
+      await authorizeTerminal(d.api, d.wait, d.open)
       expect(d.waits).toEqual([expected])
     }
   })
   it('a missing expiry is refused, not turned into an endless loop', async () => {
     const d = drive([{ pending: true }], { expiresAt: undefined })
-    await expect(authorizeTerminal(d.api, d.wait)).rejects.toThrow(/missing expiresAt/)
+    await expect(authorizeTerminal(d.api, d.wait, d.open)).rejects.toThrow(/missing expiresAt/)
     expect(d.polls).toEqual([])
   })
   it('stops at the deadline instead of polling forever', async () => {
     const d = drive([{ pending: true }], { expiresAt: new Date(Date.now() - 1).toISOString() })
-    await expect(authorizeTerminal(d.api, d.wait)).rejects.toThrow(/expired before it was confirmed/)
+    await expect(authorizeTerminal(d.api, d.wait, d.open)).rejects.toThrow(/expired before it was confirmed/)
     expect(d.polls).toEqual([])
   })
   it('a rate-limited or dropped poll backs off instead of ending the authorization', async () => {
     const d = drive([new ApiError(429, 'HTTP 429', {}), new TypeError('socket hang up'), { pending: false, repos: [] }])
-    await expect(authorizeTerminal(d.api, d.wait)).resolves.toEqual([])
+    await expect(authorizeTerminal(d.api, d.wait, d.open)).resolves.toEqual([])
     expect(d.waits).toEqual([1, 6, 11])
   })
   it('a confirmed authorization that carries no repositories fails loudly', async () => {
     const d = drive([{ pending: false }])
-    await expect(authorizeTerminal(d.api, d.wait)).rejects.toThrow(/returned no repositories/)
+    await expect(authorizeTerminal(d.api, d.wait, d.open)).rejects.toThrow(/returned no repositories/)
   })
 })
 
@@ -136,10 +137,10 @@ describe('findCallerRepo', () => {
     await expect(findCallerRepo(listed([{ id: 42, owner: 'Acme', repo: 'App', installationId: 7 }]), ref, never)).resolves.toEqual({ installationId: 7, repoId: 42 })
   })
   it('a repo this caller cannot reach says so, with the --public way out', async () => {
-    await expect(findCallerRepo(listed([{ id: 9, owner: 'acme', repo: 'other', installationId: 7 }]), ref, never)).rejects.toThrow(/not one your GitHub account can reach[\s\S]*--public/)
+    await expect(findCallerRepo(listed([{ id: 9, owner: 'acme', repo: 'other', installationId: 7 }]), ref, never, false)).rejects.toThrow(/not one your GitHub account can reach[\s\S]*--public/)
   })
-  it('reaching nothing at all points at installing the App', async () => {
-    await expect(findCallerRepo(listed([]), ref, never)).rejects.toThrow(/install it on the account/)
+  it('unattended setup points at the interactive command without opening or polling', async () => {
+    await expect(findCallerRepo(listed([]), ref, never, false)).rejects.toThrow(/without --json.*install or configure/)
   })
   it('a listed repo with no usable installation id is named as that, not as unreachable', async () => {
     for (const bad of [null, 0, '', undefined]) {
@@ -155,6 +156,98 @@ describe('findCallerRepo', () => {
   it('a failure to list is a real failure, not a reason to visit GitHub', async () => {
     const api = fake({ '/me/github/repos': new ApiError(502, 'github did not answer', {}) })
     await expect(findCallerRepo(api, ref, never)).rejects.toThrow(/github did not answer/)
+  })
+})
+
+describe('GitHub App setup', () => {
+  afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
+  const ref = { owner: 'acme', repo: 'app' }
+  const repo = { id: 42, owner: 'ACME', repo: 'App', installationId: 7 }
+  const drive = (initial: Record<string, unknown>, answers: unknown[] = [{ linked: true, repos: [repo] }]) => {
+    const requests: string[] = []; const opened: string[] = []; const waits: number[] = []
+    const states = [initial, ...answers]
+    const api = { request: async (method: string, path: string) => {
+      requests.push(`${method} ${path}`)
+      if (path === '/me/github/setup') return { installUrl: 'https://github.com/apps/example/installations/new?state=nonce' }
+      const answer = states.shift()
+      if (answer instanceof Error) throw answer
+      if (!answer) throw new Error('unexpected poll')
+      return answer
+    } } as unknown as ApiClient
+    const said: string[] = []
+    vi.spyOn(process.stderr, 'write').mockImplementation((s: any) => { said.push(String(s)); return true })
+    return { api, requests, opened, waits, said, wait: async (s: number) => { waits.push(s) }, open: (url: string) => { opened.push(url); return false } }
+  }
+  const linked = { linked: true, repos: [], installations: [] }
+  const never = async () => { throw new Error('must not authorize') }
+  it('opens installation, prints a usable URL even if opening fails, and resumes when the repo appears', async () => {
+    const d = drive(linked, [linked, { linked: true, repos: [repo] }])
+    await expect(findCallerRepo(d.api, ref, never, true, d.wait, d.open)).resolves.toEqual({ installationId: 7, repoId: 42 })
+    expect(d.opened).toEqual(['https://github.com/apps/example/installations/new?state=cli'])
+    expect(d.said.join('')).toContain(d.opened[0])
+    expect(d.requests).toEqual(['GET /me/github/repos', 'POST /me/github/setup', 'GET /me/github/repos', 'GET /me/github/repos'])
+    expect(d.waits).toEqual([5, 5])
+  })
+  it.each([
+    ['Organization', 'https://github.com/organizations/Acme/settings/installations/7'],
+    ['User', 'https://github.com/settings/installations/7'],
+  ])('opens the owning %s installation, not an installation on another account', async (accountType, url) => {
+    const d = drive({ ...linked, installations: [
+      { installationId: 9, accountLogin: 'other', accountType: 'Organization' },
+      { installationId: 7, accountLogin: 'Acme', accountType },
+    ] })
+    await expect(findCallerRepo(d.api, ref, never, true, d.wait, d.open)).resolves.toEqual({ installationId: 7, repoId: 42 })
+    expect(d.opened).toEqual([url])
+    expect(d.requests).toEqual(['GET /me/github/repos', 'GET /me/github/repos'])
+  })
+  it('continues from device authorization into App setup with fresh installation metadata', async () => {
+    const d = drive({ ...linked, linked: false }, [linked, { linked: true, repos: [repo] }])
+    const authorize = vi.fn(async () => [])
+    await expect(findCallerRepo(d.api, ref, authorize, true, d.wait, d.open)).resolves.toEqual({ installationId: 7, repoId: 42 })
+    expect(authorize).toHaveBeenCalledOnce()
+    expect(d.opened).toEqual(['https://github.com/apps/example/installations/new?state=cli'])
+    expect(d.requests).toEqual(['GET /me/github/repos', 'GET /me/github/repos', 'POST /me/github/setup', 'GET /me/github/repos'])
+  })
+  it('an already accessible repo never opens setup or waits', async () => {
+    const d = drive({ ...linked, repos: [repo] })
+    await expect(findCallerRepo(d.api, ref, never, false, d.wait, d.open)).resolves.toEqual({ installationId: 7, repoId: 42 })
+    expect(d.opened).toEqual([])
+    expect(d.waits).toEqual([])
+    expect(d.requests).toEqual(['GET /me/github/repos'])
+  })
+  it('backs off on rate limits and dropped connections while waiting for access', async () => {
+    const d = drive(linked, [new ApiError(429, 'limited', {}), new TypeError('socket'), { linked: true, repos: [repo] }])
+    await findCallerRepo(d.api, ref, never, true, d.wait, d.open)
+    expect(d.waits).toEqual([5, 10, 15])
+    expect(d.opened).toHaveLength(1)
+  })
+  it('stops after 15 minutes when access is never granted', async () => {
+    vi.useFakeTimers()
+    const d = drive(linked, [linked])
+    const wait = vi.fn(async (seconds: number) => { vi.advanceTimersByTime(wait.mock.calls.length === 1 ? 898_000 : seconds * 1000) })
+    await expect(findCallerRepo(d.api, ref, never, true, wait, d.open)).rejects.toThrow(/timed out waiting for access.*acme\/app/)
+    expect(wait.mock.calls).toEqual([[5], [2]])
+    expect(d.requests).toEqual(['GET /me/github/repos', 'POST /me/github/setup', 'GET /me/github/repos'])
+    expect(d.opened).toHaveLength(1)
+  })
+  it('bounds a stalled repository request by the remaining deadline', async () => {
+    vi.useFakeTimers()
+    const d = drive(linked)
+    const request = d.api.request.bind(d.api)
+    d.api.request = (async (method: string, path: string, body: unknown, opts: { signal?: AbortSignal } = {}) => {
+      if (path !== '/me/github/repos' || d.requests.includes('POST /me/github/setup') === false) return request(method, path, body)
+      expect(opts.signal).toBeDefined()
+      expect(opts.signal).toBe(timeout.mock.results[0]!.value)
+      vi.advanceTimersByTime(895_000)
+      throw new DOMException('timed out', 'TimeoutError')
+    }) as typeof d.api.request
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    await expect(findCallerRepo(d.api, ref, never, true, async (seconds) => { vi.advanceTimersByTime(seconds * 1000) }, d.open)).rejects.toThrow(/timed out waiting for access/)
+    expect(timeout.mock.calls).toEqual([[895_000]])
+  })
+  it('does not hide an API failure as pending installation', async () => {
+    const d = drive(linked, [new ApiError(502, 'GitHub unavailable', {})])
+    await expect(findCallerRepo(d.api, ref, never, true, d.wait, d.open)).rejects.toThrow(/GitHub unavailable/)
   })
 })
 
