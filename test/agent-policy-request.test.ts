@@ -21,13 +21,16 @@ const current = () => ({
 
 // `settled` is what the policy GET returns *after* the PUT, which is where the side-effect report
 // gets the decisions Platform actually resolved. Defaults to the pre-edit view, i.e. nothing moved.
-function fake(response: Record<string, any>, settled?: Record<string, any>) {
+// An Error stands for that GET failing transiently, after the PUT has already landed.
+function fake(response: Record<string, any>, settled?: Record<string, any> | Error) {
   const puts: Record<string, any>[] = []
   let written = false
   const api = {
     async request(_method: string, path: string) {
       if (path.endsWith('/branches')) return { branches: [{ id: 'b2', name: 'staging' }] }
-      return written ? (settled ?? response) : response
+      if (!written) return response
+      if (settled instanceof Error) throw settled
+      return settled ?? response
     },
     async rawRequest(_method: string, _path: string, body: any) {
       puts.push(body)
@@ -38,8 +41,11 @@ function fake(response: Record<string, any>, settled?: Record<string, any>) {
   return { deps: { api, project }, puts }
 }
 
-beforeEach(() => { vi.spyOn(process.stdout, 'write').mockReturnValue(true) })
+let stdout: ReturnType<typeof vi.spyOn<any, any>>
+beforeEach(() => { stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true) })
 afterEach(() => { vi.restoreAllMocks() })
+
+const wrote = (spy: { mock: { calls: any[][] } }) => spy.mock.calls.map(c => String(c[0])).join('')
 
 it('keeps the pre-rename rules it was not asked to touch', async () => {
   const { deps, puts } = fake(legacy())
@@ -72,10 +78,32 @@ it('reports the decisions a rule set moved but did not name', async () => {
   const after = { ...current(), effectiveRules: { unprotectedBranch: { deploy: 'deny', 'project.delete': 'deny' } } }
   const { deps } = fake(current(), after)
   await rule('deploy', 'deny', {}, deps)
-  const written = stderr.mock.calls.map(c => String(c[0])).join('')
-  expect(written).toContain('unprotectedBranch.project.delete: allow -> deny')
+  expect(wrote(stderr)).toContain('unprotectedBranch.project.delete: allow -> deny')
   // The action the caller named is the point of the command, not a surprise worth reporting.
-  expect(written).not.toContain('unprotectedBranch.deploy')
+  expect(wrote(stderr)).not.toContain('unprotectedBranch.deploy')
+})
+
+it('reports those decisions under --json too, without corrupting the document', async () => {
+  // The whole point of the report is that leaving a preset moves decisions nobody asked about, and
+  // a scripted caller is exactly who cannot notice that for itself. The warning goes to stderr, so
+  // stdout stays a parseable document.
+  const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true)
+  const after = { ...current(), effectiveRules: { unprotectedBranch: { deploy: 'deny', 'project.delete': 'deny' } } }
+  const { deps } = fake(current(), after)
+  await rule('deploy', 'deny', { json: true }, deps)
+  expect(wrote(stderr)).toContain('unprotectedBranch.project.delete: allow -> deny')
+  expect(JSON.parse(wrote(stdout)).policy.mode).toBe('customize')
+})
+
+it('keeps a landed update successful when the follow-up diagnostic GET fails', async () => {
+  // The PUT already succeeded; the GET only feeds the advisory diff. Rejecting here would report a
+  // mutation that happened as a failure, and invite a retry of an edit already in force.
+  const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true)
+  const { deps, puts } = fake(current(), new Error('gateway timeout'))
+  await expect(rule('deploy', 'deny', {}, deps)).resolves.toBeUndefined()
+  expect(puts).toHaveLength(1)
+  expect(wrote(stdout)).toContain('agent policy updated')
+  expect(wrote(stderr)).toContain('could not determine')
 })
 
 it('clears the pre-rename rules a preset is meant to drop', async () => {

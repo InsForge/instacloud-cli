@@ -99,10 +99,21 @@ async function update(change: (policy: any, state: Awaited<ReturnType<typeof cur
   const next = (await change(state.policy, state)) ?? state.policy
   const result = await state.api.rawRequest('PUT', state.path, next)
   if (handleApproval(result, opts.json)) return
-  if (opts.json) return printJson(result.body)
-  info(`agent policy updated: ${result.body.policy.mode}`)
+  // Printing does not end the command: the side-effect report below is owed to `--json` too, since
+  // a scripted caller is the one least able to notice for itself that leaving a preset moved
+  // decisions it never named. The report is on stderr, so stdout stays a parseable document.
+  if (opts.json) printJson(result.body)
+  else info(`agent policy updated: ${result.body.policy.mode}`)
   if (!asked) return
-  const moved = sideEffects(state.out, await state.api.request('GET', state.path), asked)
+  // The PUT already landed. A failed diagnostic GET costs the comparison, not the update: rejecting
+  // here would report a mutation that happened as a failure, and invite a retry of a done edit.
+  let after: Record<string, any>
+  try { after = await state.api.request('GET', state.path) }
+  catch {
+    process.stderr.write('note: could not determine whether this changed decisions you did not name\n')
+    return
+  }
+  const moved = sideEffects(state.out, after, asked)
   if (moved.length) process.stderr.write(`note: this also changed decisions you did not name:\n${moved.join('\n')}\n`)
 }
 
