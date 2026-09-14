@@ -491,10 +491,19 @@ describe.skipIf(!keygen)('a successful --setup installs everything the alias nee
     expect(cfg).toContain('HostName ssh.us-west-1.compute.example')
     expect(cfg).toContain('User u-svc-1')
     expect(cfg).toContain('IdentitiesOnly yes')
-    // Quoted, and from the real instaKeyPath/instaCertPath -- the check that
-    // the rendering is wired to the paths actually written above.
-    expect(cfg).toContain(`IdentityFile "${join(home, '.insta', 'ssh', 'id_ed25519')}"`)
-    expect(cfg).toContain(`CertificateFile "${instaCertPath('api.insta')}"`)
+    // Quoted, and built from the real instaKeyPath/instaCertPath -- the check
+    // that the rendering is wired to the paths actually written above.
+    //
+    // Compared in the FORWARD-SLASH form, because that is what the config
+    // carries on every platform: a native Windows path is `C:\Users\...`, and
+    // OpenSSH reads a backslash in a config argument as an escape introducer,
+    // so quoteConfigPath normalises it. Asserting the native separator passed
+    // on POSIX and failed on the Windows runner. The normalisation is written
+    // out here rather than borrowed from quoteConfigPath, so this stays an
+    // assertion about the output instead of a tautology.
+    const asConfigPath = (p: string) => p.replace(/\\/g, '/')
+    expect(cfg).toContain(`IdentityFile "${asConfigPath(join(home, '.insta', 'ssh', 'id_ed25519'))}"`)
+    expect(cfg).toContain(`CertificateFile "${asConfigPath(instaCertPath('api.insta'))}"`)
     // Without this the alias works exactly until the first certificate expires.
     expect(cfg, 'nothing renews the certificate').toContain('Match originalhost api.insta exec "insta __ssh-ensure-cert api.insta"')
     expect(cfg.trimEnd().endsWith('# END insta compute ssh')).toBe(true)
