@@ -51,6 +51,14 @@ describe('domain search', () => {
   it('renders an empty result honestly', () => {
     expect(searchLines([])).toEqual(['no results'])
   })
+  // The platform answers `unavailable` for every unpurchasable row — a name that is taken and a
+  // name whose extension is not sold read alike — so echoing it prints the word twice.
+  it('does not print the platform default reason twice', () => {
+    expect(searchLines([{ domainName: 'myapp.site', purchasable: false, reason: 'unavailable' } as never]))
+      .toEqual(['  myapp.site  unavailable'])
+    expect(searchLines([{ domainName: 'myapp.dev', purchasable: false, reason: 'Domain unavailable' } as never]))
+      .toEqual(['  myapp.dev  unavailable — Domain unavailable'])
+  })
 })
 
 describe('domain buy', () => {
