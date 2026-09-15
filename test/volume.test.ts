@@ -153,3 +153,16 @@ describe('dbVolumeLines (postgres read display)', () => {
     expect(lines[0]).toBe('postgres default: provider reported no volume size')
   })
 })
+
+
+describe('custom mount paths', () => {
+  it('forwards a creation mount path', () => {
+    expect(servicesAddRequestBody('compute', 'web', 'main', { volume: '1', mountPath: '/app/storage' })).toMatchObject({ volumeGib: 1, volumeMountPath: '/app/storage' })
+  })
+  it('rejects paths without an attachment and conflicting deletion flags before accessing config', async () => {
+    await expect(servicesAdd('compute', 'web', { mountPath: '/app/storage' })).rejects.toThrow(/requires --volume/)
+    await expect(servicesAdd('postgres', 'db', { mountPath: '/app/storage', volume: '1' })).rejects.toThrow(/compute/)
+    await expect(computeVolume('web', { mountPath: '/app/storage' })).rejects.toThrow(/requires --size/)
+    await expect(computeVolume('web', { mountPath: '/app/storage', delete: true })).rejects.toThrow(/cannot be combined/)
+  })
+})
