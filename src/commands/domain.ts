@@ -21,7 +21,9 @@ export function searchLines(results: Quote[]): string[] {
   const w = Math.max(...results.map((r) => r.domainName.length))
   return results.map((r) => r.purchasable
     ? `  ${r.domainName.padEnd(w)}  ${usd(r.priceCents!)}${r.renewalPriceCents !== undefined ? `  (renews ${usd(r.renewalPriceCents)}/yr)` : ''}`
-    : `  ${r.domainName.padEnd(w)}  unavailable${r.reason ? ` — ${r.reason}` : ''}`)
+    // The platform's default reason for every unpurchasable row IS `unavailable`, so passing it
+    // through prints the word twice.
+    : `  ${r.domainName.padEnd(w)}  unavailable${r.reason && r.reason !== 'unavailable' ? ` — ${r.reason}` : ''}`)
 }
 
 export async function domainSearch(keyword: string, opts: { tlds?: string; org?: string; json?: boolean }, deps?: DomainDeps): Promise<void> {
