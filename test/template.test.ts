@@ -11,6 +11,7 @@ import {
   parseSetFlags, resolveVariables, missingVariablesFrom, looksLikePath, deployMode, templateDeploy,
   stepIndexFor, deploymentUrls, serviceStateLines, partialMessage, watchDeployment, DEPLOY_STEPS,
 } from '../src/commands/template.js'
+import { ApiError } from '../src/api.js'
 
 const MANIFEST: TemplateManifest = {
   code: 'plausible',
@@ -654,23 +655,70 @@ describe('templateDeploy', () => {
     expect(posts).toEqual([])
   })
 
-  it('--region rides the request body and the accept line names what the platform recorded', async () => {
+  it('--region rides the request body, and the accept line names the RECORDED region, not the typed one', async () => {
+    // The two differ on purpose: with both set to the same slug this passes either way, so it could
+    // not tell reading res.body from echoing opts.region back.
     const { api, posts } = fakeApi(
       undefined,
-      { status: 202, body: { deploymentId: 'dep_1', deployment: { id: 'dep_1', region: 'eu-central' } } },
+      { status: 202, body: { deploymentId: 'dep_1', deployment: { id: 'dep_1', region: 'ap-southeast' } } },
     )
     await templateDeploy('plausible', { region: 'eu-central', yes: true }, { api, project: PROJECT, wait: NO_WAIT })
     expect(posts).toHaveLength(1)
     expect(posts[0]).toMatchObject({ templateCode: 'plausible', branch: 'main', region: 'eu-central' })
-    expect([...stdout, ...stderr].join('')).toContain('to branch main in eu-central (dep_1)')
+    const out = [...stdout, ...stderr].join('')
+    expect(out).toContain('to branch main in ap-southeast (dep_1)')
+    expect(out).not.toContain('in eu-central')
   })
 
-  it('without --region the body carries no region key, so a retry resumes with the recorded one', async () => {
+  it('a platform that echoes no region leaves the accept line as it was', async () => {
+    const { api } = fakeApi(undefined, { status: 202, body: { deploymentId: 'dep_1', deployment: { id: 'dep_1' } } })
+    await templateDeploy('plausible', { region: 'eu-central', yes: true }, { api, project: PROJECT, wait: NO_WAIT })
+    expect([...stdout, ...stderr].join('')).toContain('to branch main (dep_1)')
+  })
+
+  it('without --region the body carries no region key at all', async () => {
     const { api, posts } = fakeApi()
     await templateDeploy('plausible', { yes: true }, { api, project: PROJECT, wait: NO_WAIT })
     expect(posts).toHaveLength(1)
     expect(posts[0]).not.toHaveProperty('region')
     expect([...stdout, ...stderr].join('')).toContain('to branch main (dep_1)')
+  })
+
+  it("--region '' is SENT, so the platform's 400 decides it, rather than silently deploying to the default", async () => {
+    const { api, posts } = fakeApi()
+    await templateDeploy('plausible', { region: '', yes: true }, { api, project: PROJECT, wait: NO_WAIT })
+    expect(posts).toHaveLength(1)
+    expect(posts[0]).toHaveProperty('region', '')
+  })
+
+  it('a missing-variable retry re-sends the region on the SECOND body too', async () => {
+    // The retry path spreads the original body, so region has to survive it. Reaching that path
+    // needs a TTY (resolveVariables only prompts there) and a first POST that 400s.
+    const tty = { in: process.stdin.isTTY, out: process.stdout.isTTY }
+    process.stdin.isTTY = true
+    process.stdout.isTTY = true
+    try {
+      const posts: any[] = []
+      let calls = 0
+      const api = {
+        request: async (_m: string, path: string) => {
+          if (path.startsWith('/templates/')) return { template: { code: 'plausible', variables: { required: [], optional: [] } } }
+          return { status: 'succeeded', services: [] }
+        },
+        rawRequest: async (_m: string, _p: string, body?: unknown) => {
+          posts.push(body)
+          if (++calls === 1) throw new ApiError(400, 'missing variables', { error: 'missing_variables', missing: [{ name: 'API_KEY', key: 'API_KEY' }] })
+          return { status: 202, body: { deploymentId: 'dep_1', deployment: { id: 'dep_1', region: 'eu-central' } } }
+        },
+      }
+      await templateDeploy('plausible', { region: 'eu-central' }, { api: api as any, project: PROJECT, wait: NO_WAIT, ask: async () => 'k-1' })
+      expect(posts).toHaveLength(2)
+      expect(posts[0]).toMatchObject({ region: 'eu-central' })
+      expect(posts[1]).toMatchObject({ region: 'eu-central', variables: { API_KEY: 'k-1' } })
+    } finally {
+      process.stdin.isTTY = tty.in
+      process.stdout.isTTY = tty.out
+    }
   })
 })
 

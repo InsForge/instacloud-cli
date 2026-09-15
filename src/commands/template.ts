@@ -394,13 +394,13 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
   const variables = await resolveVariables(vars, given, { tty, ask, onAutoResolved })
 
   // The endpoint takes the branch NAME directly (branchId is its uuid alias) — no lookup needed.
-  // region only when asked: an omitted key lets the platform default apply, and lets a retry
-  // resume with the region its first attempt recorded.
+  // Presence, not truthiness: `--region ''` must reach the platform's 400 rather than be dropped
+  // into the default region. An omitted flag still sends no key, so a retry keeps the recorded one.
   const body = {
     ...(mode.kind === 'registry' ? { templateCode: mode.code } : { manifest }),
     branch: branchName,
     variables,
-    ...(opts.region ? { region: opts.region } : {}),
+    ...(opts.region !== undefined ? { region: opts.region } : {}),
   }
   let res
   try {
