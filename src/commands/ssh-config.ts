@@ -646,11 +646,14 @@ export function upsertCertAuthority(existing: string, hostPattern: string, caKey
 export function planCertAuthority(existing: string, hostPattern: string, caKey: string): CertAuthorityPlan {
   const key = caKey.trim()
   const lines = existing.split('\n')
-  const removed = lines.filter((l) => isSupersededAnchor(l, hostPattern, key))
+  const removed: string[] = [], removedAt: number[] = []
+  lines.forEach((l, i) => {
+    if (isSupersededAnchor(l, hostPattern, key)) { removed.push(l); removedAt.push(i) }
+  })
   const kept = lines.filter((l) => !isSupersededAnchor(l, hostPattern, key)).join('\n')
   const base = kept === '' ? '' : kept.endsWith('\n') ? kept : kept + '\n'
   const line = renderCertAuthority(hostPattern, key)
-  return { next: base + line, line: line.trimEnd(), removed }
+  return { next: base + line, line: line.trimEnd(), removed, removedAt }
 }
 
 export type CertAuthorityPlan = {
@@ -659,6 +662,10 @@ export type CertAuthorityPlan = {
   line: string
   /** The anchor lines it retires to make room, verbatim. */
   removed: string[]
+  /** Where each retired line sat in the file, so the undo can put it back
+   *  THERE rather than at the end -- a rollback that reorders the user's
+   *  entries around ours has not restored the file. */
+  removedAt: number[]
 }
 
 /**
@@ -676,10 +683,17 @@ export function revertCertAuthority(current: string, plan: CertAuthorityPlan): s
   // loop popping every empty tail line was deleting on the failure path.
   if (kept.length > 0 && kept[kept.length - 1] === '') kept.pop()
   // Only the anchors that are genuinely gone: a concurrent install may already
-  // have re-added one, and a duplicate anchor is not a failure mode.
-  const back = plan.removed.filter((l) => !kept.some((k) => k.trimEnd() === l.trimEnd()))
-  const body = [...kept, ...back]
-  return body.length === 0 ? '' : body.join('\n') + '\n'
+  // have re-added one, and a duplicate anchor is not a failure mode. Each goes
+  // back at the index it was retired from, in ascending order, so a file
+  // nothing else touched comes back byte for byte -- and a file `ssh` appended
+  // to meanwhile comes back with the user's lines in their original order and
+  // the new ones after. The index is clamped, because the file may be shorter
+  // than it was.
+  plan.removed.forEach((l, i) => {
+    if (kept.some((k) => k.trimEnd() === l.trimEnd())) return
+    kept.splice(Math.min(plan.removedAt[i] ?? kept.length, kept.length), 0, l)
+  })
+  return kept.length === 0 ? '' : kept.join('\n') + '\n'
 }
 
 /** A known_hosts line this CLI wrote: `@cert-authority <pattern> <type> <blob>`

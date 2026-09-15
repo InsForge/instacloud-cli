@@ -560,6 +560,15 @@ describe('an anchor rotation can be taken back', () => {
     expect(revertCertAuthority(plan.next, plan)).toBe(existing)
   })
 
+  it('puts a retired anchor back WHERE it was, not at the end', () => {
+    // A user's entries below our anchor came back above it: "the anchor is
+    // present" was true and the file was still not the one they had.
+    const existing = `${upsertCertAuthority('', PATTERN, RETIRED_CA)}github.com ssh-ed25519 AAAAuser\n\ngitlab.com ssh-ed25519 AAAAuser2\n`
+    const plan = planCertAuthority(existing, PATTERN, ROTATED_CA)
+    expect(plan.next.indexOf('github.com'), 'the fixture no longer has user lines below the retired anchor').toBeLessThan(plan.next.indexOf(ROTATED_CA.split(' ')[1]!))
+    expect(revertCertAuthority(plan.next, plan), "the user's entries were reordered around the restored anchor").toBe(existing)
+  })
+
   it("keeps the user's TRAILING blank lines too", () => {
     // A loop popping every empty tail line trimmed the user's own blank lines
     // off the end of the file, on the failure path, where nothing else was

@@ -1500,6 +1500,15 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
           : before
         const installed = configBlockInstalled()
         const ca = out.caPublicKey
+        // A move that may need a NEW anchor is a setup-grade change, and a
+        // response that moves the host but carries no CA cannot complete it:
+        // going ahead would route the alias to a host nothing in known_hosts
+        // vouches for -- a host-key prompt on every connection, the failure the
+        // anchor exists to prevent -- while reporting nothing. Abandoned whole,
+        // exactly as `--setup` refuses without a CA: the alias keeps what it
+        // has, and the next `--setup` repairs it. An unmoved renewal without a
+        // CA still goes ahead, because its anchor is already installed.
+        if (moved && installed && ca === undefined) return
 
         // The ANCHOR before the certificate. Committing the certificate first
         // left the alias holding a credential signed by a CA this machine does

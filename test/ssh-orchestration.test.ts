@@ -1449,6 +1449,24 @@ d('an automatic renewal moves the alias with the certificate', () => {
     expect(existsSync(configPath() + '.insta-bak'), 'the config was rewritten although nothing in it changed').toBe(false)
   })
 
+  it('abandons a move whose response carries no CA key, rather than routing to a host nothing vouches for', async () => {
+    // An unmoved renewal without a CA goes ahead (its anchor is installed).
+    // A MOVED one cannot: the new host has no anchor, so committing the move
+    // would leave `ssh <alias>` at a host-key prompt on every connection --
+    // the failure the anchor exists to prevent -- with nothing reported. Same
+    // rule as `--setup`, which refuses without a CA.
+    await anInstalledAlias()
+    const cfgBefore = readFileSync(configPath(), 'utf8')
+    const anchorsBefore = knownHosts()
+    const { caPublicKey: _, ...movedNoCA } = movedResponse
+    await renew(() => movedNoCA)
+    expect(readFileSync(configPath(), 'utf8'), 'the alias was routed to a host with no anchor').toBe(cfgBefore)
+    expect(readAliasStore()['api.insta']).toMatchObject({ host: HOST, username: 'u-svc-1' })
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8'), 'a half-move committed the certificate').toBe(EXPIRED_CERT + '\n')
+    expect(knownHosts()).toBe(anchorsBefore)
+    expect(readdirSync(join(home, '.insta', 'ssh')).filter((f) => f.includes('staging')), 'a staged certificate was left behind').toEqual([])
+  })
+
   it('puts the stanza, the store and the anchor back when the move cannot be committed', async () => {
     await anInstalledAlias()
     const before = readFileSync(configPath(), 'utf8')

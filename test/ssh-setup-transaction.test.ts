@@ -99,6 +99,9 @@ const anAlreadyWorkingAlias = () => {
   mkdirSync(join(home, '.ssh'), { recursive: true })
   writeFileSync(knownHosts(), 'github.com ssh-ed25519 AAAAuser\n\n\n')
   installCertAuthority(HOST, CA_OLD)
+  // And one BELOW our anchor, so a rollback that puts the anchor back at the
+  // end instead of where it was is a byte-for-byte failure.
+  writeFileSync(knownHosts(), readFileSync(knownHosts(), 'utf8') + 'gitlab.com ssh-ed25519 AAAAuser2\n')
   writeAliasStore({ [ALIAS]: { projectId: 'proj-1', serviceId: 'svc-1', host: HOST, username: 'u-svc-1' } })
   writeFileSync(instaCertPath(ALIAS), OLD_CERT + '\n')
   mkdirSync(join(home, '.ssh'), { recursive: true })
@@ -142,9 +145,12 @@ describe('a setup that fails AFTER rotating the anchor leaves the alias working'
     anAlreadyWorkingAlias()
     const before = readFileSync(sshConfig(), 'utf8')
     const anchorsBefore = readFileSync(knownHosts(), 'utf8')
+    // A DIFFERENT host and principal, so the store write this setup makes is
+    // not identical to the entry already there -- with the same values the
+    // store assertion below passes whether or not the rollback ran.
     const d = deps({
       mint: async () => ({
-        certificate: NEW_CERT, host: HOST, username: 'u-svc-1',
+        certificate: NEW_CERT, host: 'ssh.eu-central-1.compute.example', username: 'u-moved',
         expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA_NEW,
         staged: { commit: () => { throw new Error('rename failed') }, discard: () => {} },
       }),
