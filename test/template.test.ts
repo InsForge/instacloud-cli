@@ -653,6 +653,25 @@ describe('templateDeploy', () => {
     expect(fetched).toBe(true)
     expect(posts).toEqual([])
   })
+
+  it('--region rides the request body and the accept line names what the platform recorded', async () => {
+    const { api, posts } = fakeApi(
+      undefined,
+      { status: 202, body: { deploymentId: 'dep_1', deployment: { id: 'dep_1', region: 'eu-central' } } },
+    )
+    await templateDeploy('plausible', { region: 'eu-central', yes: true }, { api, project: PROJECT, wait: NO_WAIT })
+    expect(posts).toHaveLength(1)
+    expect(posts[0]).toMatchObject({ templateCode: 'plausible', branch: 'main', region: 'eu-central' })
+    expect([...stdout, ...stderr].join('')).toContain('to branch main in eu-central (dep_1)')
+  })
+
+  it('without --region the body carries no region key, so a retry resumes with the recorded one', async () => {
+    const { api, posts } = fakeApi()
+    await templateDeploy('plausible', { yes: true }, { api, project: PROJECT, wait: NO_WAIT })
+    expect(posts).toHaveLength(1)
+    expect(posts[0]).not.toHaveProperty('region')
+    expect([...stdout, ...stderr].join('')).toContain('to branch main (dep_1)')
+  })
 })
 
 describe('deployment progress', () => {

@@ -330,7 +330,7 @@ async function promptVariable(v: TemplateVar): Promise<string> {
   return answer.trim()
 }
 
-export type TemplateDeployOpts = { branch?: string; set?: string[]; yes?: boolean; json?: boolean }
+export type TemplateDeployOpts = { branch?: string; set?: string[]; yes?: boolean; json?: boolean; region?: string }
 
 // What the deploy path needs of the API client — ApiClient satisfies it.
 export type TemplateApi = {
@@ -394,7 +394,14 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
   const variables = await resolveVariables(vars, given, { tty, ask, onAutoResolved })
 
   // The endpoint takes the branch NAME directly (branchId is its uuid alias) — no lookup needed.
-  const body = { ...(mode.kind === 'registry' ? { templateCode: mode.code } : { manifest }), branch: branchName, variables }
+  // region only when asked: an omitted key lets the platform default apply, and lets a retry
+  // resume with the region its first attempt recorded.
+  const body = {
+    ...(mode.kind === 'registry' ? { templateCode: mode.code } : { manifest }),
+    branch: branchName,
+    variables,
+    ...(opts.region ? { region: opts.region } : {}),
+  }
   let res
   try {
     res = await api.rawRequest('POST', `/projects/${p.projectId}/template-deployments`, body)
@@ -411,8 +418,9 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
   if (handleApproval(res, opts.json)) return
 
   const deploymentId = res.body.deploymentId ?? (res.body.deployment ?? res.body).id
+  const acceptedRegion = (res.body.deployment ?? res.body).region
   const codeLabel = manifest?.code ?? target
-  if (!quiet) info(`deploying template ${codeLabel} to branch ${branchName} (${deploymentId})`)
+  if (!quiet) info(`deploying template ${codeLabel} to branch ${branchName}${acceptedRegion ? ` in ${acceptedRegion}` : ''} (${deploymentId})`)
   // The poll route is keyed by deployment id, not project: name the project so agent mode signs
   // with the project-bound session (a bootstrap session is rejected as "for a different project").
   const dep = await watchDeployment((id) => api.request('GET', `/template-deployments/${id}`, undefined, { projectId: p.projectId }), deploymentId, quiet ? () => {} : info, deps.wait)
