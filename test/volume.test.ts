@@ -56,7 +56,7 @@ describe('servicesAdd --volume validation (throws before any network/config acce
 describe('serviceListLine with a volume', () => {
   it('shows the volume on compute rows', () => {
     const line = serviceListLine({ type: 'compute', name: 'api', status: 'active', id: 'svc_1', machine_count: 1, volume_gib: 10 })
-    expect(line).toBe('compute/api  [active]  x1  vol 10Gi  svc_1')
+    expect(line).toBe('compute/api  [active]  x1  vol 10Gi at /data  svc_1')
   })
   it('renders volume-less compute rows unchanged (null and absent alike)', () => {
     const line = serviceListLine({ type: 'compute', name: 'api', status: 'active', id: 'svc_1', machine_count: 2, volume_gib: null })

@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-const fake = vi.hoisted(() => ({ request: vi.fn(), rawRequest: vi.fn() }))
+const fake = vi.hoisted(() => ({ request: vi.fn(), rawRequest: vi.fn(), load: vi.fn() }))
 vi.mock('../src/api.js', async (original) => ({
   ...await original<typeof import('../src/api.js')>(),
-  ApiClient: { load: async () => fake },
+  ApiClient: { load: fake.load },
   requireProject: async () => ({ projectId: 'p1', branch: 'main' }),
 }))
 vi.mock('../src/util.js', async (original) => ({ ...await original<typeof import('../src/util.js')>(), info: vi.fn(), printJson: vi.fn() }))
 import { computeVolume } from '../src/commands/compute.js'
-import { servicesAdd, serviceAddedLine } from '../src/commands/services.js'
+import { servicesAdd, serviceAddedLine, serviceListLine } from '../src/commands/services.js'
 beforeEach(() => {
-  fake.request.mockReset(); fake.rawRequest.mockReset()
+  fake.request.mockReset(); fake.rawRequest.mockReset(); fake.load.mockReset().mockResolvedValue(fake)
   fake.request.mockResolvedValue({ services: [{ id: 's1', type: 'compute', name: 'web' }] })
   fake.rawRequest.mockResolvedValue({ status: 200, body: { service: { id: 's1', type: 'compute', name: 'web', volume_gib: 1, volume_mount_path: '/app/storage' }, attached: true, volume: { sizeGib: 1, mountPath: '/app/storage' }, cap: { volumeGib: 10 } } })
 })
@@ -31,5 +31,23 @@ describe('volume mount path requests', () => {
     await servicesAdd('compute', 'web', { volume: '1', mountPath: '/app/storage' })
     expect(fake.rawRequest).toHaveBeenCalledWith('POST', '/projects/p1/services', expect.objectContaining({ volumeGib: 1, volumeMountPath: '/app/storage' }))
     expect(serviceAddedLine('compute', 'web', 'main', { id: 's1', type: 'compute', volume_gib: 1, volume_mount_path: '/app/storage' })).toContain('at /app/storage')
+  })
+})
+
+describe('mount path validation and list display', () => {
+  it.each([undefined, ''])('rejects mount path with missing or empty size (%j) before loading configuration', async (size) => {
+    await expect(computeVolume('web', { size, mountPath: '/cache' })).rejects.toThrow('--mount-path requires --size')
+    expect(fake.load).not.toHaveBeenCalled()
+    expect(fake.request).not.toHaveBeenCalled()
+    expect(fake.rawRequest).not.toHaveBeenCalled()
+  })
+  it.each(['/app/storage', '/data', null, undefined])('shows the recorded compute volume path (%j), defaulting legacy rows to /data', (path) => {
+    const line = serviceListLine({ type: 'compute', name: 'web', status: 'active', id: 's1', machine_count: 1, volume_gib: 1, volume_mount_path: path })
+    expect(line).toContain(`vol 1Gi at ${path ?? '/data'}`)
+  })
+  it('does not display a mount path without an attached volume', () => {
+    const line = serviceListLine({ type: 'compute', name: 'web', status: 'active', id: 's1', machine_count: 1, volume_gib: null, volume_mount_path: '/cache' })
+    expect(line).not.toContain('vol ')
+    expect(line).not.toContain('/cache')
   })
 })

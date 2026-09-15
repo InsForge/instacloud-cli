@@ -690,7 +690,7 @@ type VolumeOpts = LifeOpts & { size?: string; mountPath?: string; delete?: boole
 // ApiError messages as-is).
 export async function computeVolume(serviceName: string | undefined, opts: VolumeOpts): Promise<void> {
   if (opts.delete && opts.mountPath !== undefined) throw new Error('--delete cannot be combined with --mount-path')
-  if (opts.mountPath !== undefined && opts.size === undefined) throw new Error('--mount-path requires --size when attaching a volume')
+  if (opts.mountPath !== undefined && !opts.size) throw new Error('--mount-path requires --size when attaching a volume')
   if (opts.delete && opts.size) throw new Error('--delete cannot be combined with --size (one changes the volume, the other destroys it)')
   const api = await ApiClient.load()
   const p = await requireProject()

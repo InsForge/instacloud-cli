@@ -161,7 +161,7 @@ export function pgBadge(v: unknown): string {
 // billingLines in billing.ts). Compute rows show the running image when the platform reports one.
 export function serviceListLine(s: { type: string; name: string; status: string; id: string; domain?: string; machine_count?: number; public?: boolean; image?: string; port?: number; volume_gib?: number | null; volume_mount_path?: string | null; pg_version?: number | null }): string {
   const extra = s.type === 'compute'
-    ? `  x${s.machine_count}${s.volume_gib ? `  vol ${s.volume_gib}Gi` : ''}${s.image ? `  running ${s.image}${s.port ? `:${s.port}` : ''}` : ''}`
+    ? `  x${s.machine_count}${s.volume_gib ? `  vol ${s.volume_gib}Gi at ${s.volume_mount_path ?? '/data'}` : ''}${s.image ? `  running ${s.image}${s.port ? `:${s.port}` : ''}` : ''}`
     : ['redis', 'mysql', 'mongodb'].includes(s.type) ? `  tcp/${s.port ?? defaultDatabasePort(s.type)}${s.volume_gib ? `  vol ${s.volume_gib}Gi` : ''}`
       : s.type === 'storage' ? `  ${s.public ? 'public' : 'private'}`
         // Postgres major, so the reader picks matching pg_dump/psql BEFORE connecting (a newer client
