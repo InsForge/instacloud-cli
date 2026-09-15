@@ -85,7 +85,7 @@ function defaultDatabasePort(type: string): number {
 
 // ---- commands ----
 
-export type ServicesAddOpts = { branch?: string; public?: boolean; image?: string; port?: string; region?: string; alwaysOn?: boolean; volume?: string; json?: boolean }
+export type ServicesAddOpts = { branch?: string; public?: boolean; image?: string; port?: string; region?: string; alwaysOn?: boolean; volume?: string; mountPath?: string; json?: boolean }
 
 // Map service-add options to the platform POST body. Pure, so it's unit-tested without a network
 // mock (mirrors deployRequestBody in deploy.ts). Validation (which options are valid for which
@@ -100,6 +100,7 @@ export function servicesAddRequestBody(type: string, name: string, branch: strin
     // false. Omitted means the platform default.
     ...(opts.alwaysOn !== undefined ? { alwaysOn: opts.alwaysOn } : {}),
     ...(opts.volume !== undefined ? { volumeGib: parseVolumeGib(opts.volume) } : {}),
+    ...(opts.mountPath !== undefined ? { volumeMountPath: opts.mountPath } : {}),
   }
 }
 
@@ -114,6 +115,7 @@ export async function servicesAdd(type: string, name: string, opts: ServicesAddO
   }
   // Presence, not truthiness: `--no-always-on` is an explicit false and is just as compute-only.
   if (opts.alwaysOn !== undefined && type !== 'compute') throw new Error('--always-on / --no-always-on is only valid for compute services (for postgres, use `insta db always-on on|off` after creation)')
+  if (opts.mountPath !== undefined && (type !== 'compute' || opts.volume === undefined)) throw new Error('--mount-path requires --volume on a compute service')
   if (opts.volume !== undefined) {
     if (type !== 'compute') throw new Error('--volume is only valid for compute services (postgres has one by default — grow it with `insta db volume --size`)')
     parseVolumeGib(opts.volume) // junk fails here, before any config/network access
@@ -139,10 +141,10 @@ export async function servicesAdd(type: string, name: string, opts: ServicesAddO
 
 // The `services add` success line. Pure, so the badge's placement is unit-tested: a template string
 // nothing asserts on silently loses a segment.
-export function serviceAddedLine(type: string, name: string, branch: string | undefined, svc: { id: string; type: string; public?: boolean; image?: string; port?: number; volume_gib?: number | null; region?: string; domain?: string; pg_version?: number | null }): string {
+export function serviceAddedLine(type: string, name: string, branch: string | undefined, svc: { id: string; type: string; public?: boolean; image?: string; port?: number; volume_gib?: number | null; volume_mount_path?: string | null; region?: string; domain?: string; pg_version?: number | null }): string {
   const access = svc.type === 'storage' ? `  [${svc.public ? 'public' : 'private'}]` : ''
   const img = svc.image ? `  running ${svc.image}${svc.port ? `:${svc.port}` : ''}` : ''
-  const vol = svc.volume_gib ? `  vol ${svc.volume_gib}Gi at /data` : ''
+  const vol = svc.volume_gib ? `  vol ${svc.volume_gib}Gi at ${svc.volume_mount_path ?? "/data"}` : ''
   // The major belongs next to the connect hint: it decides which psql/pg_dump to reach for.
   const pg = svc.type === 'postgres' ? pgBadge(svc.pg_version) : ''
   return `added ${type} service ${name} on ${branch ?? 'default'} (${svc.id})${access}${svc.region ? `  ${svc.region}` : ''}${img}${vol}${pg}${svc.domain ? ` — ${svc.domain}` : ''}`
@@ -157,9 +159,9 @@ export function pgBadge(v: unknown): string {
 
 // Render one `services list` row. Pure, so it's unit-tested without a network mock (mirrors
 // billingLines in billing.ts). Compute rows show the running image when the platform reports one.
-export function serviceListLine(s: { type: string; name: string; status: string; id: string; domain?: string; machine_count?: number; public?: boolean; image?: string; port?: number; volume_gib?: number | null; pg_version?: number | null }): string {
+export function serviceListLine(s: { type: string; name: string; status: string; id: string; domain?: string; machine_count?: number; public?: boolean; image?: string; port?: number; volume_gib?: number | null; volume_mount_path?: string | null; pg_version?: number | null }): string {
   const extra = s.type === 'compute'
-    ? `  x${s.machine_count}${s.volume_gib ? `  vol ${s.volume_gib}Gi` : ''}${s.image ? `  running ${s.image}${s.port ? `:${s.port}` : ''}` : ''}`
+    ? `  x${s.machine_count}${s.volume_gib ? `  vol ${s.volume_gib}Gi at ${s.volume_mount_path ?? '/data'}` : ''}${s.image ? `  running ${s.image}${s.port ? `:${s.port}` : ''}` : ''}`
     : ['redis', 'mysql', 'mongodb'].includes(s.type) ? `  tcp/${s.port ?? defaultDatabasePort(s.type)}${s.volume_gib ? `  vol ${s.volume_gib}Gi` : ''}`
       : s.type === 'storage' ? `  ${s.public ? 'public' : 'private'}`
         // Postgres major, so the reader picks matching pg_dump/psql BEFORE connecting (a newer client
