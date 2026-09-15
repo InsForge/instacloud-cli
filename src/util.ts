@@ -1,6 +1,98 @@
 // Output + small pure helpers (env serialization is unit-tested).
 import { createInterface } from 'node:readline'
 import { spawn } from 'node:child_process'
+import { chmodSync, copyFileSync, existsSync, lstatSync, readlinkSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
+import { randomBytes } from 'node:crypto'
+
+/**
+ * Replace a file's contents in one step: write a sibling temporary file, then
+ * rename it over the target.
+ *
+ * For files the USER also owns — `~/.ssh/config`, `known_hosts` — a plain
+ * writeFileSync is a truncate followed by a write, so an interrupt, a full disk
+ * or a crash between the two leaves the user with a half a config and no way to
+ * ssh anywhere. rename(2) is atomic, so a reader sees either the old file or
+ * the new one. `backup` additionally leaves the previous contents recoverable.
+ *
+ * A SYMLINK is followed to its target first. Keeping a dotfiles repo and
+ * symlinking `~/.ssh/config` at it is a common setup, and rename(2) replaces
+ * the link itself rather than writing through it -- so the naive version
+ * silently severs the link, leaving the repo holding a copy that no longer
+ * matches the file ssh reads and the next dotfiles sync quietly reverting our
+ * block. Resolving first keeps the write atomic (the temp file still lands
+ * beside the real file, on the real file's filesystem) AND keeps the link.
+ */
+export function writeFileAtomicSync(target: string, data: string | Buffer, opts: { mode?: number; backup?: boolean } = {}): void {
+  const mode = opts.mode ?? 0o600
+  const path = resolveThroughSymlink(target)
+  const tmp = join(dirname(path), `.${basename(path)}.insta-${process.pid}-${randomBytes(6).toString('hex')}`)
+  try {
+    writeFileSync(tmp, data, { mode })
+    // writeFileSync applies `mode` only when it CREATES the file, and a umask
+    // can clear bits even then. ssh refuses a group-readable config outright.
+    chmodSync(tmp, mode)
+    if (opts.backup && existsSync(path)) copyFileSync(path, path + '.insta-bak')
+    renameSync(tmp, path)
+  } catch (e) {
+    try { unlinkSync(tmp) } catch { /* never created, or already gone */ }
+    throw e
+  }
+}
+
+/** The file `path` ultimately NAMES: itself when it is not a link, otherwise the
+ *  end of the symlink chain -- whether or not that end exists yet.
+ *
+ *  A DANGLING link resolves to the target it names, not to itself. `realpath`
+ *  gives up with ENOENT there, and returning the link path made the caller
+ *  rename over the LINK: a `~/.ssh/config` symlinked into a dotfiles repo that
+ *  has not been populated yet -- a fresh clone, a new machine -- was silently
+ *  turned into a regular file, destroying wiring that `readlink` could still
+ *  read off the link perfectly well. So the chain is walked by hand from there,
+ *  and the write lands on the file the user actually pointed at, creating it.
+ *
+ *  Every OTHER failure still propagates. A blanket catch was a quiet hole:
+ *  `ELOOP` (a symlink cycle) and `EACCES` (a directory the user cannot
+ *  traverse) would both return the link path and sever a link because we could
+ *  not read it. Cannot-confirm is not a licence to write -- and with the
+ *  dangling case handled above, there is no longer any case where replacing a
+ *  link is the right answer. */
+export function resolveThroughSymlink(path: string): string {
+  // realpath resolves a live chain in one call and reports ELOOP for a cycle,
+  // so a hand-walk only ever runs past the point where the chain dangles --
+  // which is finite by construction. The cap is for a link created underneath
+  // us mid-walk, where finite is no longer guaranteed.
+  for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
+    let link: string
+    try {
+      if (!lstatSync(path).isSymbolicLink()) return path
+      return realpathSync(path)
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') throw e
+    }
+    try {
+      link = readlinkSync(path)
+    } catch (e) {
+      // ENOENT from both calls means nothing is at `path` at all -- it is the
+      // file to create, which is what the caller wants written.
+      if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return path
+      throw e
+    }
+    // Link text is resolved against the directory holding the LINK, as the
+    // kernel does it -- not against the process cwd, which would scatter files
+    // into wherever the CLI happened to be run from. The REAL directory, too:
+    // the kernel resolves a relative target from where the link actually
+    // lives, so when `~/.ssh` is itself a link into a dotfiles repo, a
+    // `../x` inside it names a sibling of the repo directory, not of `~/.ssh`.
+    // The directory exists (the link was just lstat'ed inside it), and any
+    // failure resolving it propagates like every other one above.
+    path = resolve(realpathSync(dirname(path)), link)
+  }
+  throw new Error(`too many levels of symbolic links resolving ${JSON.stringify(path)}`)
+}
+
+/** Linux allows 40; the exact number does not matter, only that the walk ends. */
+const MAX_SYMLINK_HOPS = 40
 
 /** How to launch the default browser for `url` on `platform`. Pure so the Windows encoding is
  *  testable. On Windows NO shell may ever parse the URL: cmd.exe splits at bare `&` (which #138

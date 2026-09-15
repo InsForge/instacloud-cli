@@ -259,6 +259,14 @@ compute.command('limits [service]').description("Show or set a compute service's
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => computeCmd.computeLimits(service, o)))
 compute.command('always-on <mode> [service]').description('Set a compute service always-on (mode: on|off). on = machines never scale to zero (the default for new compute services); off = scale-to-zero. All plans; billing is actual usage either way')
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((mode, service, o) => computeCmd.computeAlwaysOn(mode, service, o)))
+compute.command('ssh [service]')
+  .description("Issue a short-lived SSH certificate for a compute service and print the command that uses it -- this command does NOT open the session itself, it makes `ssh` work. `--setup` does the one-time work: it generates a dedicated key under ~/.insta/ssh (your existing keys are never touched), has the platform sign a SHORT-LIVED certificate for it, adds one @cert-authority line to ~/.ssh/known_hosts so every region is trusted without per-node fingerprint prompts, and writes an ssh_config block AT THE TOP of ~/.ssh/config giving each compute service the alias `<service>.insta`. After that it is plain `ssh api.insta`, scp and -L: the block renews that alias's certificate for you while OpenSSH parses the config. Needs an interactive login -- API keys are refused; use `insta compute exec` for one-shot commands from CI")
+  .option('--setup', 'do the one-time client setup as well as issuing a certificate')
+  .option('--ensure-cert <alias>', 'renew the certificate for an alias such as api.insta if it is close to expiry, then exit (used by the ssh_config hook; silent by design)')
+  .option('-b, --branch <branch>', 'branch (default: linked)')
+  .option('--json', 'machine-readable output')
+  .action(guard((service, o) => computeCmd.computeSSH(service, o)))
+
 const execCmd = compute.command('exec [service]').description("Run a one-shot command inside a compute service's machine (`insta compute exec [service] -- <command> [args…]`) — no interactive shell/PTY: `command` is argv, no shell is invoked (use [\"sh\", \"-c\", \"...\"] for shell features). Wakes the machine first if it's scaled to zero — expect a few seconds of latency, billed as uptime, not an error. Exits with the remote command's own exit code (agents rely on this)")
   .action(guard((service, o) => computeCmd.computeExec(service, execCommand, o, { windowsFallback: execWindowsFallback })))
 // Declared from the same list splitExecArgs uses to find where the CLI's own arguments stop, so a
@@ -444,6 +452,16 @@ program.command('upgrade').description('Update the insta CLI to the latest relea
 program.command('autoupdate [mode]').description('Show or set auto-update: on | off (default: on while pre-1.0)')
   .action(guard((mode) => selfUpdate.autoupdate(mode)))
 program.command('__update-check', { hidden: true }).action(guard(() => selfUpdate.backgroundCheck(cliVersion())))
+// The ssh_config renewal hook. Hidden, and named with the `__` prefix that
+// trackCommand skips, because OpenSSH runs it while PARSING the config on EVERY
+// ssh/scp/`ssh -G`/IDE connection. Under the normal `compute ssh --ensure-cert`
+// path, guard's trackCommand ran afterwards regardless of the action returning
+// early -- reading config, possibly creating ~/.insta/telemetry.json, and
+// making a PostHog request with a timeout of up to 1.5s. That is a network
+// round trip on the critical path of every ordinary ssh, which is exactly what
+// the hook was specified not to do.
+program.command('__ssh-ensure-cert <alias>', { hidden: true })
+  .action(guard((alias: string) => computeCmd.ensureCertForAlias(alias)))
 
 selfUpdate.maybeUpdate(cliVersion(), process.argv)
 program.parseAsync(computeArgv)

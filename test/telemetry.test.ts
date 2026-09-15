@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { Command } from 'commander'
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../src/api.js'
+import { ENSURE_CERT_COMMAND } from '../src/commands/compute.js'
 import type { GlobalConfig } from '../src/config.js'
 import {
   buildCommandEvent, commandPath, detectAgent, readState, redactArgs, redactOptions,
@@ -238,6 +239,15 @@ describe('trackCommand', () => {
     const hidden = await deps(loggedIn)
     await trackCommand(new Command('insta').command('__update-check'), [], { durationMs: 1, exitCode: 0 }, '1.0.0', hidden)
     expect(hidden.calls).toHaveLength(0)
+
+    // The ssh renewal hook, by the name the config block ACTUALLY invokes --
+    // taken from the constant rather than retyped, so renaming the command
+    // without keeping the `__` prefix fails here instead of silently putting a
+    // PostHog request back on the critical path of every ssh, scp and `ssh -G`.
+    const sshHook = await deps(loggedIn)
+    const hookLeaf = ENSURE_CERT_COMMAND.split(/\s+/).find((t) => t.startsWith('__'))!
+    await trackCommand(new Command('insta').command(hookLeaf), [], { durationMs: 1, exitCode: 0 }, '1.0.0', sshHook)
+    expect(sshHook.calls, 'the ssh renewal hook sent telemetry').toHaveLength(0)
   })
 
   it('routes a login by the deployment it targeted, not by the previous configuration', async () => {
