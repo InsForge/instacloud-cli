@@ -160,8 +160,31 @@ async function readStdin(): Promise<string> {
   return data.trim()
 }
 
+// The per-entry write outcome /apply reports — false only when a name in the batch did not land.
+export type ApplyEntryOutcome = { name: string; written: boolean }
+
 // One /apply outcome per compute service the batch touched.
 export type ApplyServiceOutcome = { serviceId: string; result: 'deployed' | 'started' | 'skipped' | 'failed'; reason?: string }
+
+// Every platform SkipReason (applyTargets.ts) except 'unknown-service', which means the plan
+// could not resolve the service, not that it correctly chose to skip it.
+const BENIGN_SKIP_REASONS = new Set(['no-image', 'other-branch', 'caller-deploying', 'skip-deploy'])
+
+export type ApplyVerdict = 'ok' | 'degraded' | 'not-written'
+
+// Design doc §5's three outcomes: an unwritten entry is a hard failure; a written entry with a
+// failed or unexplained-skip service is durable but not fully live; anything else is success.
+export function applyVerdict(entries: ApplyEntryOutcome[], services: ApplyServiceOutcome[]): ApplyVerdict {
+  if (entries.some((e) => !e.written)) return 'not-written'
+  const degraded = services.some((s) => s.result === 'failed' || (s.result === 'skipped' && !BENIGN_SKIP_REASONS.has(s.reason ?? '')))
+  return degraded ? 'degraded' : 'ok'
+}
+
+// util.ts already claims 1 (plain failure) and 2 (nothing ran, re-run is safe); this state fits
+// neither, so it takes the next code rather than overload one of theirs.
+export function applyExitCode(verdict: ApplyVerdict): number {
+  return verdict === 'ok' ? 0 : verdict === 'not-written' ? 1 : 3
+}
 
 // Pure — one line per service, extending `branch.ts`'s create/skip convention; `started` matters most, it means new billing.
 export function applyServiceLines(services: ApplyServiceOutcome[]): string[] {
@@ -194,9 +217,16 @@ export async function secretsSet(
   const entry = { kind: 'set' as const, name, value: v, ...(branch ? { branch } : {}), ...(opts.service ? { service: opts.service } : {}) }
   const res = await d.api.rawRequest('POST', `/projects/${d.projectId}/apply`, { branch: branch ?? d.linkedBranch, entries: [entry] })
   if (handleApproval(res, opts.json)) return
-  if (opts.json) return printJson({ ok: true, name, branch: branch ?? null, service: opts.service ?? null, services: res.body.services })
+  const entries: ApplyEntryOutcome[] = res.body.entries ?? []
+  const services: ApplyServiceOutcome[] = res.body.services ?? []
+  const verdict = applyVerdict(entries, services)
+  process.exitCode = applyExitCode(verdict)
+  if (opts.json) return printJson({ ok: verdict === 'ok', verdict, name, branch: branch ?? null, service: opts.service ?? null, entries, services })
   info(`set ${name}${opts.service ? ` → ${opts.service}` : ''} (${branch ? `branch ${branch}` : 'project-wide'})`)
-  for (const line of applyServiceLines(res.body.services ?? [])) info(line)
+  for (const line of applyServiceLines(services)) info(line)
+  // Verdict note on stderr, after the per-service lines: not success, and not the same failure either.
+  if (verdict === 'not-written') process.stderr.write(`error: ${name} was not written\n`)
+  else if (verdict === 'degraded') process.stderr.write(`warning: ${name} is saved but not applied everywhere — retry the deploy for the services marked failed above, do not resend this value\n`)
 }
 
 // Remove a user secret. --service removes only THAT service's copy (the platform has always
@@ -214,12 +244,18 @@ export async function secretsUnset(
   const entry = { kind: 'delete' as const, name, ...(branch ? { branch } : {}), ...(opts.service ? { service: opts.service } : {}) }
   const res = await d.api.rawRequest('POST', `/projects/${d.projectId}/apply`, { branch: branch ?? d.linkedBranch, entries: [entry] })
   if (handleApproval(res, opts.json)) return
+  const entries: ApplyEntryOutcome[] = res.body.entries ?? []
+  const services: ApplyServiceOutcome[] = res.body.services ?? []
+  const verdict = applyVerdict(entries, services)
+  process.exitCode = applyExitCode(verdict)
   // The EFFECTIVE branch, not the flag: with --service and no --branch the scope that was deleted
   // is the linked branch's, and the output has to say which scope it actually touched.
-  if (opts.json) return printJson({ ok: true, name, branch: branch ?? null, service: opts.service ?? null, services: res.body.services })
+  if (opts.json) return printJson({ ok: verdict === 'ok', verdict, name, branch: branch ?? null, service: opts.service ?? null, entries, services })
   const scope = opts.service ? `${opts.service}, branch ${branch}` : branch ? `branch ${branch}` : 'project-wide'
   info(`unset ${name} (${scope})`)
-  for (const line of applyServiceLines(res.body.services ?? [])) info(line)
+  for (const line of applyServiceLines(services)) info(line)
+  if (verdict === 'not-written') process.stderr.write(`error: ${name} was not removed\n`)
+  else if (verdict === 'degraded') process.stderr.write(`warning: ${name} is removed but not applied everywhere — retry the deploy for the services marked failed above\n`)
 }
 
 export async function secretsBind(envName: string, source: string, opts: { branch?: string; to?: string; sourceName?: string; json?: boolean }): Promise<void> {
