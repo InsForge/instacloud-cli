@@ -43,14 +43,8 @@ export async function domainSearch(keyword: string, opts: { tlds?: string; org?:
 export type BuyOpts = { years?: string; open?: boolean; json?: boolean }
 
 export async function domainBuy(name: string, opts: BuyOpts, deps?: DomainDeps): Promise<void> {
+  const years = whole('--years', opts.years)
   const { api, project: p } = await domainDeps(deps)
-  // JSON.stringify drops undefined but keeps NaN as null, which the platform rejects as a type
-  // error rather than a bad term — so a malformed --years is refused here, with the reason.
-  let years: number | undefined
-  if (opts.years !== undefined) {
-    years = Number(opts.years)
-    if (!Number.isInteger(years)) die(`--years must be a whole number of years, not ${opts.years}`)
-  }
   const res = await api.rawRequest('POST', `/projects/${p.projectId}/domains/orders`, { domainName: name, years })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
@@ -156,12 +150,12 @@ export function recordLines(records: DnsRecord[]): string[] {
 
 const recordPath = (orgId: string, domainName: string) => `/orgs/${orgId}/domains/${encodeURIComponent(domainName)}/records`
 
-// JSON.stringify keeps NaN as null, which the platform refuses as a type error that names no flag.
+// Number() reads "" as 0 and "1e3" as 1000, and keeps NaN, which the platform refuses as a type error naming no flag.
 function whole(flag: string, value: string | undefined): number | undefined {
   if (value === undefined) return undefined
-  const n = Number(value)
-  if (!Number.isInteger(n)) die(`${flag} must be a whole number, not ${value}`)
-  return n
+  const digits = value.trim()
+  if (!/^\d+$/.test(digits)) die(`${flag} must be a whole number, not ${JSON.stringify(value)}`)
+  return Number(digits)
 }
 
 export async function domainRecordsList(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
@@ -175,8 +169,8 @@ export async function domainRecordsList(domainName: string, opts: RecordsOpts, d
 export type RecordAddOpts = RecordsOpts & { ttl?: string; priority?: string }
 
 export async function domainRecordsAdd(domainName: string, type: string, name: string, content: string, opts: RecordAddOpts, deps?: DomainDeps): Promise<void> {
-  const { api, orgId } = await orgDeps(opts, deps)
   const body = { type: type.toUpperCase(), host: name, answer: content, ttl: whole('--ttl', opts.ttl), priority: whole('--priority', opts.priority) }
+  const { api, orgId } = await orgDeps(opts, deps)
   const r = await api.request<DnsRecord>('POST', recordPath(orgId, domainName), body)
   if (opts.json) return printJson(r)
   for (const line of recordLines([r])) info(line)
@@ -185,9 +179,9 @@ export async function domainRecordsAdd(domainName: string, type: string, name: s
 export type RecordSetOpts = RecordsOpts & { type?: string; name?: string; content?: string; ttl?: string; priority?: string }
 
 export async function domainRecordsSet(domainName: string, id: string, opts: RecordSetOpts, deps?: DomainDeps): Promise<void> {
-  const { api, orgId } = await orgDeps(opts, deps)
   const body = { type: opts.type?.toUpperCase(), host: opts.name, answer: opts.content, ttl: whole('--ttl', opts.ttl), priority: whole('--priority', opts.priority) }
   if (Object.values(body).every((v) => v === undefined)) die('nothing to change — pass --type, --name, --content, --ttl or --priority')
+  const { api, orgId } = await orgDeps(opts, deps)
   const r = await api.request<DnsRecord>('PATCH', `${recordPath(orgId, domainName)}/${encodeURIComponent(id)}`, body)
   if (opts.json) return printJson(r)
   for (const line of recordLines([r])) info(line)

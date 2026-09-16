@@ -84,7 +84,7 @@ describe('domain buy', () => {
   it('refuses a malformed --years locally rather than sending NaN', async () => {
     const { deps: d, calls } = deps()
     await expect(domainBuy('myapp.com', { years: 'abc' }, d)).rejects.toThrow('exit 1')
-    expect(stderr.join('')).toContain('--years must be a whole number of years, not abc')
+    expect(stderr.join('')).toContain('--years must be a whole number, not "abc"')
     expect(calls).toEqual([])
   })
   it('--json is the platform body, nothing else', async () => {
@@ -217,9 +217,13 @@ describe('domain records', () => {
   it('refuses a malformed --ttl or --priority locally, sending nothing', async () => {
     const { deps: d, calls } = deps()
     await expect(domainRecordsAdd('myapp.com', 'A', '@', '203.0.113.7', { ttl: 'soon' }, d)).rejects.toThrow('exit 1')
-    expect(stderr.join('')).toContain('--ttl must be a whole number, not soon')
+    expect(stderr.join('')).toContain('--ttl must be a whole number, not "soon"')
     await expect(domainRecordsAdd('myapp.com', 'MX', '@', 'mx.test', { priority: 'high' }, d)).rejects.toThrow('exit 1')
-    expect(stderr.join('')).toContain('--priority must be a whole number, not high')
+    expect(stderr.join('')).toContain('--priority must be a whole number, not "high"')
+    // An empty value is not 0: `--priority "$P"` with P unset must not publish priority 0.
+    await expect(domainRecordsAdd('myapp.com', 'MX', '@', 'mx.test', { priority: '' }, d)).rejects.toThrow('exit 1')
+    expect(stderr.join('')).toContain('--priority must be a whole number, not ""')
+    await expect(domainRecordsAdd('myapp.com', 'A', '@', '203.0.113.7', { ttl: '-1' }, d)).rejects.toThrow('exit 1')
     expect(calls).toEqual([])
   })
   it('changes only the fields given, upper-casing a type, and refuses a set that names none', async () => {
