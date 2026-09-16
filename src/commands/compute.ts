@@ -680,7 +680,7 @@ export function volumeDeleteError(e: unknown): unknown {
   return e
 }
 
-type VolumeOpts = LifeOpts & { size?: string; delete?: boolean }
+type VolumeOpts = LifeOpts & { size?: string; mountPath?: string; delete?: boolean }
 
 // Show, attach, grow, or delete a compute service's /data volume. No flag: a safe read (size +
 // mount path + the plan cap). --size: PUT .../volume — attaches when no volume exists, grows
@@ -689,6 +689,8 @@ type VolumeOpts = LifeOpts & { size?: string; delete?: boolean }
 // 403/400 messages carry the upgrade hints and must reach the user verbatim (the guard prints
 // ApiError messages as-is).
 export async function computeVolume(serviceName: string | undefined, opts: VolumeOpts): Promise<void> {
+  if (opts.delete && opts.mountPath !== undefined) throw new Error('--delete cannot be combined with --mount-path')
+  if (opts.mountPath !== undefined && !opts.size) throw new Error('--mount-path requires --size when attaching a volume')
   if (opts.delete && opts.size) throw new Error('--delete cannot be combined with --size (one changes the volume, the other destroys it)')
   const api = await ApiClient.load()
   const p = await requireProject()
@@ -714,7 +716,7 @@ export async function computeVolume(serviceName: string | undefined, opts: Volum
   }
 
   const sizeGib = parseVolumeGib(opts.size)
-  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${id}/volume`, { sizeGib })
+  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${id}/volume`, { sizeGib, ...(opts.mountPath !== undefined ? { mountPath: opts.mountPath } : {}) })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   info(volumeWriteLine(res.body.service?.name ?? serviceName ?? id, res.body))

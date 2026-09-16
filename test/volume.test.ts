@@ -56,7 +56,7 @@ describe('servicesAdd --volume validation (throws before any network/config acce
 describe('serviceListLine with a volume', () => {
   it('shows the volume on compute rows', () => {
     const line = serviceListLine({ type: 'compute', name: 'api', status: 'active', id: 'svc_1', machine_count: 1, volume_gib: 10 })
-    expect(line).toBe('compute/api  [active]  x1  vol 10Gi  svc_1')
+    expect(line).toBe('compute/api  [active]  x1  vol 10Gi at /data  svc_1')
   })
   it('renders volume-less compute rows unchanged (null and absent alike)', () => {
     const line = serviceListLine({ type: 'compute', name: 'api', status: 'active', id: 'svc_1', machine_count: 2, volume_gib: null })
@@ -151,5 +151,18 @@ describe('dbVolumeLines (postgres read display)', () => {
   it('never reads the deprecated storage* aliases (dropped next release)', () => {
     const lines = dbVolumeLines('default', { storageSize: '10Gi', storageGiB: 10 })
     expect(lines[0]).toBe('postgres default: provider reported no volume size')
+  })
+})
+
+
+describe('custom mount paths', () => {
+  it('forwards a creation mount path', () => {
+    expect(servicesAddRequestBody('compute', 'web', 'main', { volume: '1', mountPath: '/app/storage' })).toMatchObject({ volumeGib: 1, volumeMountPath: '/app/storage' })
+  })
+  it('rejects paths without an attachment and conflicting deletion flags before accessing config', async () => {
+    await expect(servicesAdd('compute', 'web', { mountPath: '/app/storage' })).rejects.toThrow(/requires --volume/)
+    await expect(servicesAdd('postgres', 'db', { mountPath: '/app/storage', volume: '1' })).rejects.toThrow(/compute/)
+    await expect(computeVolume('web', { mountPath: '/app/storage' })).rejects.toThrow(/requires --size/)
+    await expect(computeVolume('web', { mountPath: '/app/storage', delete: true })).rejects.toThrow(/cannot be combined/)
   })
 })
