@@ -160,24 +160,43 @@ async function readStdin(): Promise<string> {
   return data.trim()
 }
 
+// One /apply outcome per compute service the batch touched.
+export type ApplyServiceOutcome = { serviceId: string; result: 'deployed' | 'started' | 'skipped' | 'failed'; reason?: string }
+
+// Pure — one line per service, extending `branch.ts`'s create/skip convention; `started` matters most, it means new billing.
+export function applyServiceLines(services: ApplyServiceOutcome[]): string[] {
+  return services.map((s) => {
+    if (s.result === 'started') return `  + ${s.serviceId} started (was stopped — this now bills)`
+    if (s.result === 'deployed') return `  ~ ${s.serviceId} redeployed`
+    if (s.result === 'failed') return `  ! ${s.serviceId} failed${s.reason ? `: ${s.reason}` : ''}`
+    return `  = ${s.serviceId}${s.reason ? ` (${s.reason})` : ''}`
+  })
+}
+
 // Set a user secret. Project-wide by default; --branch scopes it to one branch. --service binds
 // it to a branch service instead, which implies the current branch (binding requires one). Value
 // comes from the argument, or stdin when omitted (keeps secret values out of shell history).
-export async function secretsSet(name: string, value: string | undefined, opts: { branch?: string; service?: string; json?: boolean }): Promise<void> {
+export async function secretsSet(
+  name: string,
+  value: string | undefined,
+  opts: { branch?: string; service?: string; json?: boolean },
+  deps?: SecretsDeps,
+): Promise<void> {
   // An empty --service must not fall through to a project-wide WRITE. The scoping test below is a
   // truthiness check, so `--service ''` (a client interpolating an absent variable) would have put
   // the secret at a WIDER scope than the caller asked for, visible to every service on the branch.
   assertServiceRef(opts.service)
-  const api = await ApiClient.load()
-  const p = await requireProject()
+  const d = deps ?? (await loadDeps())
   const v = value ?? (await readStdin())
   if (!v) die('value is required (pass as an argument or on stdin)')
-  const branch = opts.service ? (opts.branch ?? p.branch) : opts.branch
-  const payload: Record<string, string> = { value: v, ...(branch ? { branch } : {}), ...(opts.service ? { service: opts.service } : {}) }
-  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/secrets/${encodeURIComponent(name)}`, payload)
+  const branch = opts.service ? (opts.branch ?? d.linkedBranch) : opts.branch
+  // The batch always deploys on ONE branch, so the top level falls back to the linked one even when the entry itself is project-wide.
+  const entry = { kind: 'set' as const, name, value: v, ...(branch ? { branch } : {}), ...(opts.service ? { service: opts.service } : {}) }
+  const res = await d.api.rawRequest('POST', `/projects/${d.projectId}/apply`, { branch: branch ?? d.linkedBranch, entries: [entry] })
   if (handleApproval(res, opts.json)) return
-  if (opts.json) return printJson({ ok: true, name, branch: branch ?? null, service: opts.service ?? null })
+  if (opts.json) return printJson({ ok: true, name, branch: branch ?? null, service: opts.service ?? null, services: res.body.services })
   info(`set ${name}${opts.service ? ` → ${opts.service}` : ''} (${branch ? `branch ${branch}` : 'project-wide'})`)
+  for (const line of applyServiceLines(res.body.services ?? [])) info(line)
 }
 
 // Remove a user secret. --service removes only THAT service's copy (the platform has always
@@ -192,17 +211,15 @@ export async function secretsUnset(
   // Service scoping REQUIRES a branch (a service exists on a branch, so the platform rejects the
   // pair without one) — so --service defaults to the linked branch, exactly as `secrets set` does.
   const branch = opts.service ? (opts.branch ?? d.linkedBranch) : opts.branch
-  const parts: string[] = []
-  if (branch) parts.push(`branch=${encodeURIComponent(branch)}`)
-  if (opts.service) parts.push(`service=${encodeURIComponent(opts.service)}`)
-  const qs = parts.length ? `?${parts.join('&')}` : ''
-  const res = await d.api.rawRequest('DELETE', `/projects/${d.projectId}/secrets/${encodeURIComponent(name)}${qs}`)
+  const entry = { kind: 'delete' as const, name, ...(branch ? { branch } : {}), ...(opts.service ? { service: opts.service } : {}) }
+  const res = await d.api.rawRequest('POST', `/projects/${d.projectId}/apply`, { branch: branch ?? d.linkedBranch, entries: [entry] })
   if (handleApproval(res, opts.json)) return
   // The EFFECTIVE branch, not the flag: with --service and no --branch the scope that was deleted
   // is the linked branch's, and the output has to say which scope it actually touched.
-  if (opts.json) return printJson({ ok: true, name, branch: branch ?? null, service: opts.service ?? null })
+  if (opts.json) return printJson({ ok: true, name, branch: branch ?? null, service: opts.service ?? null, services: res.body.services })
   const scope = opts.service ? `${opts.service}, branch ${branch}` : branch ? `branch ${branch}` : 'project-wide'
   info(`unset ${name} (${scope})`)
+  for (const line of applyServiceLines(res.body.services ?? [])) info(line)
 }
 
 export async function secretsBind(envName: string, source: string, opts: { branch?: string; to?: string; sourceName?: string; json?: boolean }): Promise<void> {

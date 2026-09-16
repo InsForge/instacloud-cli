@@ -10,7 +10,7 @@
 import { EventEmitter } from 'node:events'
 import { describe, it, expect } from 'vitest'
 import {
-  assertServiceRef, branchHint, bundleQuery, collisionLines, fetchSecretBundle, secrets, secretsSet, secretsUnset, type Collision,
+  applyServiceLines, assertServiceRef, branchHint, bundleQuery, collisionLines, fetchSecretBundle, secrets, secretsSet, secretsUnset, type Collision,
 } from '../src/commands/secrets.js'
 import { bundleFetcher, childEnv, refusalLines, runWithSecrets } from '../src/commands/run.js'
 import { CliExit } from '../src/util.js'
@@ -19,12 +19,15 @@ const COLLISION: Collision[] = [
   { name: 'ADMIN_PASSWORD', services: ['compute/hermes', 'compute/claude-code', 'compute/codex'] },
 ]
 
-/** Records every request the command makes, and answers with one canned body. */
+/** Records every request the command makes (path in `calls`, body in `bodies`, same index), and
+ *  answers with one canned body. */
 function stubApi(body: unknown, status = 200) {
   const calls: string[] = []
+  const bodies: unknown[] = []
   return {
     calls,
-    rawRequest: async (m: string, p: string) => { calls.push(`${m} ${p}`); return { status, body } },
+    bodies,
+    rawRequest: async (m: string, p: string, reqBody?: unknown) => { calls.push(`${m} ${p}`); bodies.push(reqBody); return { status, body } },
   }
 }
 
@@ -207,10 +210,11 @@ describe('secrets', () => {
 })
 
 describe('secrets unset --service', () => {
-  it('sends the service query param, so only that service’s copy is deleted', async () => {
+  it('posts a delete entry scoped to that service, so only its copy is removed', async () => {
     const api = stubApi({ ok: true })
     await capture(() => secretsUnset('ADMIN_PASSWORD', { branch: 'dev', service: 'compute/hermes' }, { api, projectId: 'p1' }))
-    expect(api.calls).toEqual(['DELETE /projects/p1/secrets/ADMIN_PASSWORD?branch=dev&service=compute%2Fhermes'])
+    expect(api.calls).toEqual(['POST /projects/p1/apply'])
+    expect(api.bodies).toEqual([{ branch: 'dev', entries: [{ kind: 'delete', name: 'ADMIN_PASSWORD', branch: 'dev', service: 'compute/hermes' }] }])
   })
 
   // A service exists ON a branch, so the platform rejects service+no-branch. `secrets set` has
@@ -219,7 +223,7 @@ describe('secrets unset --service', () => {
     const api = stubApi({ ok: true })
     const { out } = await capture(() =>
       secretsUnset('ADMIN_PASSWORD', { service: 'compute/hermes' }, { api, projectId: 'p1', linkedBranch: 'dev' }))
-    expect(api.calls).toEqual(['DELETE /projects/p1/secrets/ADMIN_PASSWORD?branch=dev&service=compute%2Fhermes'])
+    expect(api.bodies).toEqual([{ branch: 'dev', entries: [{ kind: 'delete', name: 'ADMIN_PASSWORD', branch: 'dev', service: 'compute/hermes' }] }])
     expect(out).toBe('unset ADMIN_PASSWORD (compute/hermes, branch dev)\n')
   })
 
@@ -230,10 +234,46 @@ describe('secrets unset --service', () => {
     expect(JSON.parse(out)).toEqual({ ok: true, name: 'ADMIN_PASSWORD', branch: 'dev', service: 'compute/hermes' })
   })
 
-  it('still deletes project-wide with no flags — no branch invented without --service', async () => {
+  it('still deletes project-wide with no flags — no branch on the entry, but the batch still names a deploy branch', async () => {
     const api = stubApi({ ok: true })
     await capture(() => secretsUnset('X', {}, { api, projectId: 'p1', linkedBranch: 'dev' }))
-    expect(api.calls).toEqual(['DELETE /projects/p1/secrets/X'])
+    expect(api.calls).toEqual(['POST /projects/p1/apply'])
+    expect(api.bodies).toEqual([{ branch: 'dev', entries: [{ kind: 'delete', name: 'X' }] }])
+  })
+
+  // The one thing a user most needs to see: which services were merely redeployed vs. STARTED
+  // (a stopped service coming back up, which costs money).
+  it('prints one line per service outcome, calling out started separately from redeployed', async () => {
+    const api = stubApi({ ok: true, services: [
+      { serviceId: 'svc-a', result: 'started' },
+      { serviceId: 'svc-b', result: 'deployed' },
+      { serviceId: 'svc-c', result: 'skipped', reason: 'no-image' },
+      { serviceId: 'svc-d', result: 'failed', reason: 'boom' },
+    ] })
+    const { out } = await capture(() => secretsUnset('X', {}, { api, projectId: 'p1', linkedBranch: 'dev' }))
+    expect(out).toBe([
+      'unset X (project-wide)',
+      '  + svc-a started (was stopped — this now bills)',
+      '  ~ svc-b redeployed',
+      '  = svc-c (no-image)',
+      '  ! svc-d failed: boom',
+      '',
+    ].join('\n'))
+  })
+})
+
+describe('secretsSet', () => {
+  it('posts a set entry to /apply instead of PUTting the old per-name route', async () => {
+    const api = stubApi({ services: [] })
+    await capture(() => secretsSet('FOO', 'bar', { branch: 'dev' }, { api, projectId: 'p1', linkedBranch: 'dev' }))
+    expect(api.calls).toEqual(['POST /projects/p1/apply'])
+    expect(api.bodies).toEqual([{ branch: 'dev', entries: [{ kind: 'set', name: 'FOO', value: 'bar', branch: 'dev' }] }])
+  })
+
+  it('a project-wide set (no --branch, no --service) still names a deploy branch at the top level', async () => {
+    const api = stubApi({ services: [] })
+    await capture(() => secretsSet('FOO', 'bar', {}, { api, projectId: 'p1', linkedBranch: 'dev' }))
+    expect(api.bodies).toEqual([{ branch: 'dev', entries: [{ kind: 'set', name: 'FOO', value: 'bar' }] }])
   })
 })
 
