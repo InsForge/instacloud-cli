@@ -10,8 +10,8 @@ import {
   aliasFor, isSafeAlias, isSafeConfigValue, quoteConfigPath, BLOCK_BEGIN, BLOCK_END, CA_MARKER,
 } from '../src/commands/ssh-config.js'
 
-const entry = (alias = 'api.insta', hostName = 'ssh.us-west-1.compute.example', user = 'svc-abc') => ({
-  alias, hostName, user, certificateFile: `/home/dev/.insta/ssh/${alias}-cert.pub`,
+const entry = (alias = 'api.insta', hostName = 'ssh.us-west-1.compute.example', user = 'svc-abc', port = 2222) => ({
+  alias, hostName, user, port, certificateFile: `/home/dev/.insta/ssh/${alias}-cert.pub`,
 })
 
 const KNOWN_HOSTS = '/home/dev/.ssh/known_hosts'
@@ -21,6 +21,17 @@ const block = (entries = [entry()]) => renderConfigBlock({
   identityFile: '/home/dev/.insta/ssh/id_ed25519',
   knownHostsFile: KNOWN_HOSTS,
   ensureCertCommand: 'insta compute ssh --ensure-cert',
+})
+
+describe('the Port line', () => {
+  it('writes the port the plane returned, whatever it is', () => {
+    expect(block([entry('api.insta', 'ssh.us-west-1.compute.example', 'svc-abc', 22)])).toContain('  Port 22')
+  })
+  for (const bad of [0, -1, 70000, 22.5, NaN, undefined as unknown as number]) {
+    it(`refuses to write an unusable port (${String(bad)})`, () => {
+      expect(() => block([{ ...entry(), port: bad }])).toThrow(/unusable ssh Port/)
+    })
+  }
 })
 
 describe('ssh_config block', () => {
@@ -56,6 +67,9 @@ describe('ssh_config block', () => {
     expect(b).toContain('Host api.insta')
     expect(b).toContain('  HostName ssh.us-west-1.compute.example')
     expect(b).toContain('  User svc-abc')
+    // WRITTEN, never defaulted: the gateway is on :2222 and an alias with no
+    // Port line dialled the closed :22 with a perfectly good certificate.
+    expect(b).toContain('  Port 2222')
   })
 
   // A certificate is issued for ONE service. A single shared cert file would
@@ -308,7 +322,7 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
       alias: 'api.insta',
       hostName: 'ssh.us-west-1.compute.example',
       user: 'svc-abc',
-      certificateFile: `${SPACED}/api.insta-cert.pub`,
+      port: 2222, certificateFile: `${SPACED}/api.insta-cert.pub`,
     }],
     identityFile: `${SPACED}/id_ed25519`,
   })
@@ -362,7 +376,7 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
     const g = effective('api.insta', rendered({
       entries: [{
         alias: 'api.insta', hostName: 'ssh.us-west-1.compute.example', user: 'svc-abc',
-        certificateFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\api.insta-cert.pub',
+        port: 2222, certificateFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\api.insta-cert.pub',
       }],
       identityFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\id_ed25519',
       knownHostsFile: 'C:\\Users\\Jun Wen\\.ssh\\known_hosts',
@@ -406,7 +420,7 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
       alias: 'api.insta',
       hostName: 'ssh.us-west-1.compute.example',
       user: 'svc-abc',
-      certificateFile: `${PERCENT}/api.insta-cert.pub`,
+      port: 2222, certificateFile: `${PERCENT}/api.insta-cert.pub`,
     }],
     identityFile: `${PERCENT}/id_ed25519`,
   })
@@ -998,7 +1012,7 @@ describe('paths are quoted, because a home directory may contain a space', () =>
         alias: 'api.insta',
         hostName: 'ssh.example.com',
         user: 'svc-abc',
-        certificateFile: '/Users/Jun Wen/.insta/ssh/api.insta-cert.pub',
+        port: 2222, certificateFile: '/Users/Jun Wen/.insta/ssh/api.insta-cert.pub',
       }],
       identityFile: '/Users/Jun Wen/.insta/ssh/id_ed25519',
       knownHostsFile: '/Users/Jun Wen/.ssh/known_hosts',
@@ -1188,7 +1202,7 @@ describe('a Windows path is normalised, not escaped away', () => {
     const out = renderConfigBlock({
       entries: [{
         alias: 'api.insta', hostName: 'ssh.example.com', user: 'svc-abc',
-        certificateFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\api.insta-cert.pub',
+        port: 2222, certificateFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\api.insta-cert.pub',
       }],
       identityFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\id_ed25519',
       knownHostsFile: 'C:\\Users\\Jun Wen\\.ssh\\known_hosts',

@@ -100,6 +100,10 @@ export type HostEntry = {
   hostName: string
   /** Remote user the certificate is issued for. */
   user: string
+  /** The gateway's public port. WRITTEN, never left to ssh's default of 22:
+   *  the lane listens on :2222 (:22 waits for a compliance exception), and an
+   *  alias without a Port line dialled a closed port with a valid certificate. */
+  port: number
   /** Absolute path to this alias's certificate. One per alias: a cert is issued
    *  for ONE service, so a shared cert file cannot serve two of them. */
   certificateFile: string
@@ -150,12 +154,14 @@ export function renderConfigBlock(o: ConfigBlockOpts): string {
     // file verbatim from an API response.
     if (!isSafeConfigValue(e.hostName)) throw new Error(`refusing to write an unsafe ssh HostName into ssh_config: ${JSON.stringify(e.hostName)}`)
     if (!isSafeConfigValue(e.user)) throw new Error(`refusing to write an unsafe ssh User into ssh_config: ${JSON.stringify(e.user)}`)
+    if (!Number.isInteger(e.port) || e.port < 1 || e.port > 65535) throw new Error(`refusing to write an unusable ssh Port into ssh_config: ${JSON.stringify(e.port)}`)
     lines.push(
       `Host ${e.alias}`,
       // Without HostName and User the alias is not routing at all: ssh resolves
       // `api.insta` in DNS and logs in as the local OS username.
       `  HostName ${e.hostName}`,
       `  User ${e.user}`,
+      `  Port ${e.port}`,
       `  IdentityFile ${quoteConfigPath(o.identityFile)}`,
       `  CertificateFile ${quoteConfigPath(e.certificateFile)}`,
       // WRITTEN, not left to the default, and this is the one keyword where

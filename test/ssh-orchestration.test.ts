@@ -310,6 +310,16 @@ d('what the plane returns is checked before anything is written', () => {
     expect(validateCertResponse(good)).toMatchObject({ host: good.host, username: good.username })
   })
 
+  it('passes the port through when the plane says one, and tolerates a plane that predates it', () => {
+    expect(validateCertResponse({ ...good, port: 22 })).toMatchObject({ port: 22 })
+    expect(validateCertResponse(good).port).toBeUndefined()
+  })
+  for (const [what, port] of [['a string', '2222'], ['zero', 0], ['a fraction', 22.5], ['out of range', 70000]] as const) {
+    it(`refuses a port that is ${what} rather than guessing`, () => {
+      expect(() => validateCertResponse({ ...good, port })).toThrow(/unusable ssh port/)
+    })
+  }
+
   it('accepts a response with no CA key, which only --setup needs', () => {
     expect(() => validateCertResponse({ ...good, caPublicKey: undefined })).not.toThrow()
   })

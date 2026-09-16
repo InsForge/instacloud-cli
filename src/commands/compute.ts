@@ -802,9 +802,24 @@ export type AliasRecord = {
   serviceId: string
   host: string
   username: string
+  /** The gateway's public port, as the plane returned it with the certificate.
+   *  Absent in stores written before the plane said which port (those aliases
+   *  dialled :22 and could not connect); read as DEFAULT_SSH_PORT. */
+  port?: number
 }
 
 export type AliasStore = Record<string, AliasRecord>
+
+/** The gateway's public port when the plane does not say: :2222, the port the
+ *  lane shipped on (:22 waits for a compliance exception). The plane's answer
+ *  in a mint response ALWAYS wins over this; it exists for stores and planes
+ *  that predate the `port` field, so a working alias does not stop working. */
+export const DEFAULT_SSH_PORT = 2222
+
+/** A TCP port as the plane returns it: an integer, 1..65535. */
+export function isValidPort(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 65535
+}
 
 /** Never throws: a missing or hand-mangled store must degrade to "nothing is
  *  set up", not break `ssh` for every alias. */
@@ -834,6 +849,7 @@ export function isValidAliasRecord(r: unknown): r is AliasRecord {
   return typeof v.projectId === 'string' && v.projectId !== ''
     && typeof v.serviceId === 'string' && v.serviceId !== ''
     && (v.branch === undefined || typeof v.branch === 'string')
+    && (v.port === undefined || isValidPort(v.port))
     && isSafeConfigValue(v.host) && isSafeConfigValue(v.username)
 }
 
@@ -880,7 +896,7 @@ export function hostEntries(store: AliasStore): HostEntry[] {
     // sit where the rendering does.
     .filter(([alias, r]) => isSafeAlias(alias) && isValidAliasRecord(r))
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([alias, r]) => ({ alias, hostName: r.host, user: r.username, certificateFile: instaCertPath(alias) }))
+    .map(([alias, r]) => ({ alias, hostName: r.host, user: r.username, port: r.port ?? DEFAULT_SSH_PORT, certificateFile: instaCertPath(alias) }))
 }
 
 /**
@@ -981,7 +997,7 @@ function ensureKeyPair(): string {
 /** `<type> <blob>` of a public-key record, comment dropped. */
 const keyMaterial = (record: string) => record.split(/\s+/).slice(0, 2).join(' ')
 
-type CertResponse = { certificate: string; host: string; username: string; expiresAt: string; caPublicKey?: string }
+type CertResponse = { certificate: string; host: string; username: string; port?: number; expiresAt: string; caPublicKey?: string }
 
 /** A validated response plus its certificate, written and verified but NOT yet
  *  in place. The caller decides when it goes live — see StagedCertificate. */
@@ -1023,6 +1039,11 @@ export function validateCertResponse(body: unknown): CertResponse {
   // Printed straight to a terminal, so control characters and escape sequences
   // are refused rather than rendered.
   if (!isSafeTimestamp(b.expiresAt)) throw new Error('the platform returned an unusable certificate expiry')
+  // Optional only because planes predating the field exist; PRESENT and wrong
+  // is refused, never coerced -- a port we made up is a connection that hangs.
+  if (b.port !== undefined && !isValidPort(b.port)) {
+    throw new Error(`the platform returned an unusable ssh port: ${JSON.stringify(String(b.port).slice(0, 16))}`)
+  }
   // Parsed here rather than at install time so a malformed key fails before
   // anything is written, instead of after the alias is already recorded.
   if (b.caPublicKey !== undefined) parseCAPublicKey(b.caPublicKey)
@@ -1498,7 +1519,7 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
         if (!certNeedsRenewal(instaCertPath(alias))) return
         const moved = held.host !== out.host || held.username !== out.username
         const store: AliasStore = moved
-          ? { ...before, [alias]: { ...held, host: out.host, username: out.username } }
+          ? { ...before, [alias]: { ...held, host: out.host, username: out.username, port: out.port ?? held.port ?? DEFAULT_SSH_PORT } }
           : before
         const installed = configBlockInstalled()
         const ca = out.caPublicKey
@@ -1827,7 +1848,7 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
       assertAliasFree(before, alias, { projectId: p.projectId, serviceId: svc.id, branch })
       const store: AliasStore = {
         ...before,
-        [alias]: { projectId: p.projectId, ...(branch ? { branch } : {}), serviceId: svc.id, host: out.host, username: out.username },
+        [alias]: { projectId: p.projectId, ...(branch ? { branch } : {}), serviceId: svc.id, host: out.host, username: out.username, port: out.port ?? DEFAULT_SSH_PORT },
       }
 
       // Whether ~/.ssh is BACKING this store, not merely whether --setup was
@@ -1885,7 +1906,7 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
     out.staged.discard()
   }
 
-  if (opts.json) return printJson({ alias, host: out.host, username: out.username, expiresAt: out.expiresAt, configured: installed })
+  if (opts.json) return printJson({ alias, host: out.host, username: out.username, port: out.port ?? DEFAULT_SSH_PORT, expiresAt: out.expiresAt, configured: installed })
   for (const line of sshAdvice({
     alias, host: out.host, username: out.username, expiresAt: out.expiresAt, serviceName: svc.name,
     configured: installed, identityFile: instaKeyPath(), certificateFile: instaCertPath(alias),

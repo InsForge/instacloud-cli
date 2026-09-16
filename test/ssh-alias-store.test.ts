@@ -75,6 +75,9 @@ describe('a hand-mangled store degrades to "not set up", never to a broken confi
     ['a username with a newline', { projectId: 'p', serviceId: 's', host: 'h.example', username: 'u\nProxyCommand sh' }],
     ['an empty projectId', { projectId: '', serviceId: 's', host: 'h.example', username: 'u' }],
     ['a numeric serviceId', { projectId: 'p', serviceId: 7, host: 'h.example', username: 'u' }],
+    ['a port that is a string', { projectId: 'p', serviceId: 's', host: 'h.example', username: 'u', port: '2222' }],
+    ['a port of zero', { projectId: 'p', serviceId: 's', host: 'h.example', username: 'u', port: 0 }],
+    ['a port past 65535', { projectId: 'p', serviceId: 's', host: 'h.example', username: 'u', port: 70000 }],
   ]
 
   for (const [what, r] of bad) {
@@ -191,5 +194,17 @@ describe('the renewal hook enters through an internal command name', () => {
     expect(ENSURE_CERT_COMMAND.split(/\s+/).some((t) => t.startsWith('__')),
       'the hook command is not __-prefixed, so telemetry runs on every ssh').toBe(true)
     expect(ENSURE_CERT_COMMAND).not.toContain('--ensure-cert')
+  })
+})
+
+describe('the port an alias dials', () => {
+  it('is the one the store holds', () => {
+    expect(hostEntries({ 'api.insta': rec({ port: 22 }) as never })[0]?.port).toBe(22)
+  })
+  it('defaults to 2222 for a record written before the plane said which port', () => {
+    // Those aliases dialled :22 and could not connect; reading them as :2222
+    // is what makes an existing setup start working without another --setup.
+    expect(isValidAliasRecord(rec())).toBe(true)
+    expect(hostEntries({ 'api.insta': rec() as never })[0]?.port).toBe(2222)
   })
 })
