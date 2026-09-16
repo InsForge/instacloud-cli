@@ -59,9 +59,9 @@ export async function domainBuy(name: string, opts: BuyOpts, deps?: DomainDeps):
   info(`then attach it: insta domain attach ${order.domainName}`)
 }
 
-// The bought name `host` sits under. At most one can match: only apex names are sold, so no bought
+// The bought name `host` sits under. At most one name can match: only apex names are sold, so no bought
 // domain is ever a subdomain of another.
-export function ownerOf(host: string, owned: Purchased[]): Purchased | null {
+export function ownerOf<T extends { domainName: string }>(host: string, owned: T[]): T | null {
   return owned.find((d) => host === d.domainName || host.endsWith(`.${d.domainName}`)) ?? null
 }
 
@@ -74,7 +74,13 @@ export async function domainAttach(host: string, opts: { branch?: string; group?
   const name = host.trim().toLowerCase()
   const { items } = await api.request<{ items: Purchased[] }>('GET', `/projects/${p.projectId}/domains`)
   const owner = ownerOf(name, items)
-  if (!owner) die(`no domain this org bought covers ${name} — for a domain you own elsewhere: insta compute set-domain ${name}`)
+  if (!owner) {
+    // The domains list holds registered names only; a bought name still registering is an order.
+    const { items: orders } = await api.request<{ items: Order[] }>('GET', `/projects/${p.projectId}/domains/orders`)
+    const o = ownerOf(name, orders)
+    if (o) die(`${o.domainName} is not registered yet — its order is ${o.status}: insta domain status ${o.domainName}`)
+    die(`no domain this org bought covers ${name} — for a domain you own elsewhere: insta compute set-domain ${name}`)
+  }
   const branch = opts.branch ?? p.branch
   const { target } = await domainTarget(api, p.projectId, branch, name, opts.group)
   const hostname = name === owner.domainName ? undefined : name
@@ -93,7 +99,12 @@ export async function domainAttach(host: string, opts: { branch?: string; group?
 function domainLines(d: Purchased): string[] {
   const out = [`${d.domainName}  ${d.status}${d.expiresAt ? `  (expires ${d.expiresAt.slice(0, 10)}${d.autorenew ? ', auto-renews' : ''})` : ''}`]
   // Vacuously true for a domain with no hostnames, which is every domain until something attaches.
-  if (d.hostnames.every((h) => h.state === 'failed')) out.push(`  nothing serving — insta domain attach ${d.domainName}`)
+  if (d.hostnames.every((h) => h.state === 'failed')) {
+    const names = d.hostnames.map((h) => h.hostname)
+    // Attaching the bought name itself re-attaches its www.
+    const retry = names.includes(d.domainName) ? names.filter((h) => h !== `www.${d.domainName}`) : names
+    out.push(`  nothing serving — ${(retry.length ? retry : [d.domainName]).map((h) => `insta domain attach ${h}`).join('; ')}`)
+  }
   const w = Math.max(0, ...d.hostnames.map((x) => x.hostname.length))
   for (const h of d.hostnames) out.push(`  ${h.hostname.padEnd(w)}  ${h.state}${h.service ? ` → ${h.service}` : ''}${h.reason ? ` — ${h.reason}` : ''}`)
   return out

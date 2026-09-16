@@ -112,11 +112,18 @@ describe('domain attach', () => {
     expect(out()).not.toContain('www.myapp.com')
   })
   it('a hostname under no bought name is refused before any service lookup', async () => {
-    const { deps: d, calls } = deps(inventory)
+    const { deps: d, calls } = deps({ '/domains/orders': { items: [] }, ...inventory })
     await expect(domainAttach('api.other.com', { group: 'web' }, d)).rejects.toThrow('exit 1')
     expect(stderr.join('')).toContain('no domain this org bought covers api.other.com')
     expect(stderr.join('')).toContain('insta compute set-domain api.other.com')
-    expect(calls.map((c) => c.method)).toEqual(['GET'])
+    expect(calls.map((c) => c.method)).toEqual(['GET', 'GET'])
+  })
+  // `buy` says to run this next; before the registrar answers the name is an order, and ours.
+  it('a bought name still registering is refused as an order, not as someone else\'s domain', async () => {
+    const { deps: d, calls } = deps({ '/domains/orders': { items: [{ ...order, status: 'registering' }] }, '/projects/p1/domains': { items: [] } })
+    await expect(domainAttach('MyApp.com', { group: 'web' }, d)).rejects.toThrow('exit 1')
+    expect(stderr.join('')).toContain('myapp.com is not registered yet — its order is registering: insta domain status myapp.com')
+    expect(calls.map((c) => c.method)).toEqual(['GET', 'GET'])
   })
   it('matches a bought name only on a label boundary', () => {
     const own = (domainName: string) => ({ domainName }) as never
@@ -132,7 +139,11 @@ describe('domain list / status', () => {
     const empty = { domainName: 'old.com', status: 'registered', expiresAt: null, autorenew: true, hostnames: [] }
     const moving = { domainName: 'new.com', status: 'attaching', expiresAt: null, autorenew: true,
       hostnames: [{ hostname: 'new.com', state: 'pending', service: 'web' }] }
-    const { deps: d } = deps({ '/projects/p1/domains': { items: [purchased, empty, moving] } })
+    const sub = { domainName: 'sub.com', status: 'attach_failed', expiresAt: null, autorenew: true,
+      hostnames: [{ hostname: 'api.sub.com', state: 'failed', service: 'api', reason: 'dns publish failed' }] }
+    const both = { domainName: 'both.com', status: 'attach_failed', expiresAt: null, autorenew: true,
+      hostnames: [{ hostname: 'both.com', state: 'failed', service: 'web' }, { hostname: 'www.both.com', state: 'failed', service: 'web' }] }
+    const { deps: d } = deps({ '/projects/p1/domains': { items: [purchased, empty, moving, sub, both] } })
     await domainList({}, d)
     expect(out()).toContain('myapp.com  attaching  (expires 2027-09-10, auto-renews)')
     expect(out()).toContain('api.myapp.com  active → api')
@@ -141,6 +152,10 @@ describe('domain list / status', () => {
     // An attach in flight is not "nothing serving": that line would tell you to re-run what you ran.
     expect(out()).not.toContain('insta domain attach new.com')
     expect(out()).not.toContain('insta domain attach myapp.com')
+    // The repair is the hostname that failed: attaching sub.com would bind it and its www instead.
+    expect(out()).toContain('nothing serving — insta domain attach api.sub.com\n')
+    // The bought name re-attaches its www, so it is not asked for twice.
+    expect(out()).toContain('nothing serving — insta domain attach both.com\n')
   })
   it('status shows the domain once it exists, else the order', async () => {
     const { deps: d } = deps({ '/domains/orders': { items: [{ ...order, status: 'attaching' }] }, '/projects/p1/domains': { items: [purchased] } })
