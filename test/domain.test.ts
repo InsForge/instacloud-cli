@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest'
-import { domainSearch, domainBuy, domainAttach, domainList, domainStatus, ownerOf, searchLines } from '../src/commands/domain.js'
+import { domainSearch, domainBuy, domainAttach, domainList, domainStatus, domainRecordsAdd, domainRecordsList, domainRecordsRemove, domainRecordsSet, ownerOf, searchLines } from '../src/commands/domain.js'
 import type { DomainDeps } from '../src/commands/compute.js'
 
 const services = [
@@ -84,7 +84,7 @@ describe('domain buy', () => {
   it('refuses a malformed --years locally rather than sending NaN', async () => {
     const { deps: d, calls } = deps()
     await expect(domainBuy('myapp.com', { years: 'abc' }, d)).rejects.toThrow('exit 1')
-    expect(stderr.join('')).toContain('--years must be a whole number of years, not abc')
+    expect(stderr.join('')).toContain('--years must be a whole number, not "abc"')
     expect(calls).toEqual([])
   })
   it('--json is the platform body, nothing else', async () => {
@@ -174,5 +174,74 @@ describe('domain list / status', () => {
     await expect(domainStatus('other.com', { json: true }, d)).rejects.toThrow('exit 1')
     expect(stderr.join('')).toContain('other.com was not bought through this org')
     expect(out()).toBe('')
+  })
+})
+
+describe('domain records', () => {
+  const zone = [
+    { id: 101, type: 'CNAME', fqdn: 'www.myapp.com', answer: 'edge.instacloud.com', ttl: 300, managed: true, hostname: 'www.myapp.com' },
+    { id: 102, type: 'TXT', fqdn: '_stale.myapp.com', answer: 'gone', ttl: 300, managed: true },
+    { id: 103, type: 'MX', fqdn: 'myapp.com', answer: 'mx1.mail.test', ttl: 3600, priority: 10, managed: false },
+  ]
+  it('lists the zone of the linked org with managed records marked; --org overrides and --json is the platform body', async () => {
+    const { deps: d, calls } = deps({ '/records': { items: zone } })
+    await domainRecordsList('myapp.com', {}, d)
+    expect(calls[0]).toMatchObject({ method: 'GET', path: '/orgs/org1/domains/myapp.com/records' })
+    const lines = out().split('\n')
+    expect(lines[0]).toContain('101  CNAME  www.myapp.com     edge.instacloud.com  300')
+    expect(lines[0]).toContain('(managed — published for www.myapp.com)')
+    expect(lines[1]).toContain('(managed — no hostname claims it; remove drops it)')
+    expect(lines[2]).toMatch(/103  MX {5}myapp.com {9}mx1.mail.test {8}3600  10$/)
+    await domainRecordsList('myapp.com', { org: 'org9', json: true }, d)
+    expect(calls[1]!.path.startsWith('/orgs/org9/')).toBe(true)
+    expect(JSON.parse(stdout.at(-1)!)).toEqual({ items: zone })
+  })
+  it('says how to add the first record of an empty zone, naming the domain', async () => {
+    const { deps: d } = deps({ '/records': { items: [] } })
+    await domainRecordsList('myapp.com', {}, d)
+    expect(out()).toContain('no records in myapp.com — add one: insta domain records add myapp.com A @ <ip>')
+  })
+  it('adds a record with the type upper-cased and the numbers as numbers, and prints it back', async () => {
+    const created = { id: 104, type: 'MX', fqdn: 'myapp.com', answer: 'mx2.mail.test', ttl: 600, priority: 20, managed: false }
+    const { deps: d, calls } = deps({ '/records': created })
+    await domainRecordsAdd('myapp.com', 'mx', '@', 'mx2.mail.test', { ttl: '600', priority: '20' }, d)
+    expect(calls[0]).toMatchObject({ method: 'POST', path: '/orgs/org1/domains/myapp.com/records' })
+    expect(calls[0]!.body).toEqual({ type: 'MX', host: '@', answer: 'mx2.mail.test', ttl: 600, priority: 20 })
+    expect(out()).toContain('104  MX  myapp.com  mx2.mail.test  600  20')
+  })
+  it('omits a flag that was not given, so the platform applies its default', async () => {
+    const { deps: d, calls } = deps({ '/records': zone[2] })
+    await domainRecordsAdd('myapp.com', 'A', 'www', '203.0.113.7', {}, d)
+    expect(calls[0]!.body).toEqual({ type: 'A', host: 'www', answer: '203.0.113.7' })
+  })
+  it('refuses a malformed --ttl or --priority locally, sending nothing', async () => {
+    const { deps: d, calls } = deps()
+    await expect(domainRecordsAdd('myapp.com', 'A', '@', '203.0.113.7', { ttl: 'soon' }, d)).rejects.toThrow('exit 1')
+    expect(stderr.join('')).toContain('--ttl must be a whole number, not "soon"')
+    await expect(domainRecordsAdd('myapp.com', 'MX', '@', 'mx.test', { priority: 'high' }, d)).rejects.toThrow('exit 1')
+    expect(stderr.join('')).toContain('--priority must be a whole number, not "high"')
+    // An empty value is not 0: `--priority "$P"` with P unset must not publish priority 0.
+    await expect(domainRecordsAdd('myapp.com', 'MX', '@', 'mx.test', { priority: '' }, d)).rejects.toThrow('exit 1')
+    expect(stderr.join('')).toContain('--priority must be a whole number, not ""')
+    await expect(domainRecordsAdd('myapp.com', 'A', '@', '203.0.113.7', { ttl: '-1' }, d)).rejects.toThrow('exit 1')
+    expect(calls).toEqual([])
+  })
+  it('changes only the fields given, upper-casing a type, and refuses a set that names none', async () => {
+    const { deps: d, calls } = deps({ '/records/103': { ...zone[2], ttl: 600 } })
+    await domainRecordsSet('myapp.com', '103', { type: 'mx', ttl: '600' }, d)
+    expect(calls[0]).toMatchObject({ method: 'PATCH', path: '/orgs/org1/domains/myapp.com/records/103' })
+    expect(calls[0]!.body).toEqual({ type: 'MX', ttl: 600 })
+    expect(out()).toContain('103  MX  myapp.com  mx1.mail.test  600  10')
+    await expect(domainRecordsSet('myapp.com', '103', {}, d)).rejects.toThrow('exit 1')
+    expect(stderr.join('')).toContain('nothing to change')
+    expect(calls).toHaveLength(1)
+  })
+  it('removes a record by id', async () => {
+    const { deps: d, calls } = deps({ '/records/103': { ok: true } })
+    await domainRecordsRemove('myapp.com', '103', {}, d)
+    expect(calls[0]).toMatchObject({ method: 'DELETE', path: '/orgs/org1/domains/myapp.com/records/103' })
+    expect(out()).toContain('removed record 103 from myapp.com')
+    await domainRecordsRemove('myapp.com', '103', { json: true }, d)
+    expect(JSON.parse(stdout.at(-1)!)).toEqual({ ok: true })
   })
 })
