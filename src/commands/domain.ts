@@ -7,6 +7,7 @@ type Quote = { domainName: string; purchasable: boolean; priceCents?: number; re
 type Order = { id: string; domainName: string; years: number; status: string; priceCents: number; renewalPriceCents: number | null; checkoutUrl?: string; failedReason: string | null }
 type HostnameState = { hostname: string; state: string; reason?: string; service: string | null }
 type Purchased = { domainName: string; status: string; hostnames: HostnameState[]; expiresAt: string | null; autorenew: boolean }
+type DnsRecord = { id: number; type: string; fqdn: string; answer: string; ttl: number; priority?: number; managed: boolean; hostname?: string }
 
 const usd = (cents: number): string => `$${(cents / 100).toFixed(2)}`
 
@@ -137,4 +138,64 @@ export async function domainStatus(name: string, opts: { json?: boolean }, deps?
   if (!domain && !order) die(`${host} was not bought through this org`)
   if (opts.json) return printJson({ domain, order })
   for (const line of domain ? domainLines(domain) : orderStatusLines(order!)) info(line)
+}
+
+// ---- records ----
+
+type RecordsOpts = { org?: string; json?: boolean }
+
+export function recordLines(records: DnsRecord[]): string[] {
+  const w = (pick: (r: DnsRecord) => string) => Math.max(...records.map((r) => pick(r).length))
+  const idW = w((r) => String(r.id)), typeW = w((r) => r.type), nameW = w((r) => r.fqdn), answerW = w((r) => r.answer), ttlW = w((r) => String(r.ttl))
+  return records.map((r) => {
+    const line = `  ${String(r.id).padEnd(idW)}  ${r.type.padEnd(typeW)}  ${r.fqdn.padEnd(nameW)}  ${r.answer.padEnd(answerW)}  ${String(r.ttl).padEnd(ttlW)}  ${r.priority === undefined ? '' : String(r.priority)}`.trimEnd()
+    if (r.managed) return `${line}  (managed${r.hostname ? ` — published for ${r.hostname}` : ' — no hostname claims it; remove drops it'})`
+    return line
+  })
+}
+
+const recordPath = (orgId: string, domainName: string) => `/orgs/${orgId}/domains/${encodeURIComponent(domainName)}/records`
+
+// JSON.stringify keeps NaN as null, which the platform refuses as a type error that names no flag.
+function whole(flag: string, value: string | undefined): number | undefined {
+  if (value === undefined) return undefined
+  const n = Number(value)
+  if (!Number.isInteger(n)) die(`${flag} must be a whole number, not ${value}`)
+  return n
+}
+
+export async function domainRecordsList(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
+  const r = await api.request<{ items: DnsRecord[] }>('GET', recordPath(orgId, domainName))
+  if (opts.json) return printJson(r)
+  if (!r.items.length) return info(`no records in ${domainName} — add one: insta domain records add ${domainName} A @ <ip>`)
+  for (const line of recordLines(r.items)) info(line)
+}
+
+export type RecordAddOpts = RecordsOpts & { ttl?: string; priority?: string }
+
+export async function domainRecordsAdd(domainName: string, type: string, name: string, content: string, opts: RecordAddOpts, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
+  const body = { type: type.toUpperCase(), host: name, answer: content, ttl: whole('--ttl', opts.ttl), priority: whole('--priority', opts.priority) }
+  const r = await api.request<DnsRecord>('POST', recordPath(orgId, domainName), body)
+  if (opts.json) return printJson(r)
+  for (const line of recordLines([r])) info(line)
+}
+
+export type RecordSetOpts = RecordsOpts & { type?: string; name?: string; content?: string; ttl?: string; priority?: string }
+
+export async function domainRecordsSet(domainName: string, id: string, opts: RecordSetOpts, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
+  const body = { type: opts.type?.toUpperCase(), host: opts.name, answer: opts.content, ttl: whole('--ttl', opts.ttl), priority: whole('--priority', opts.priority) }
+  if (Object.values(body).every((v) => v === undefined)) die('nothing to change — pass --type, --name, --content, --ttl or --priority')
+  const r = await api.request<DnsRecord>('PATCH', `${recordPath(orgId, domainName)}/${encodeURIComponent(id)}`, body)
+  if (opts.json) return printJson(r)
+  for (const line of recordLines([r])) info(line)
+}
+
+export async function domainRecordsRemove(domainName: string, id: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
+  const r = await api.request('DELETE', `${recordPath(orgId, domainName)}/${encodeURIComponent(id)}`)
+  if (opts.json) return printJson(r)
+  info(`removed record ${id} from ${domainName}`)
 }
