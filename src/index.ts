@@ -349,6 +349,7 @@ tpl.command('info <code>').description('Show a template: version, upstream pin, 
   .option('--json').action(guard((code, o) => template.templateInfo(code, o)))
 tpl.command('deploy <code-or-dir-or-url>').description('Deploy a template onto a branch — a registry code, a local directory containing insta.template.yaml (a path-looking target is always read as a directory), or a github.com URL (https://github.com/<owner>/<repo>[/tree/<ref>[/<dir>]]) whose manifest is fetched with your own git credentials. Missing required variables are prompted for on a terminal; generator-backed (secret:N) and defaulted ones are resolved by the platform')
   .option('--branch <b>', 'target branch (default: current)')
+  .option('--region <region>', 'region for every service the template creates, e.g. us-east (see `insta regions`)')
   .option('--set <NAME=value>', 'set a template variable (repeatable)', (v: string, prev: string[]) => [...prev, v], [] as string[])
   .option('-y, --yes', 'non-interactive: missing required variables fail with a --set list instead of prompting')
   .option('--json')
