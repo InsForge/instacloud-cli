@@ -385,7 +385,7 @@ dom.command('buy <name>').description('Buy a domain — pay at the printed Strip
 dom.command('attach <hostname>').description('Point a bought domain, or any subdomain of one, at a compute service — `abc.com` binds it and its www, `api.abc.com` binds only that (gated: deploy)')
   .option('--branch <b>').option('--group <g>', "compute service (default: the branch's sole compute service)").option('--json')
   .action(guard((hostname, o) => domainCmd.domainAttach(hostname, o)))
-dom.command('list').description('Domains bought through InstaCloud in this project, with attach state per hostname').option('--json')
+dom.command('list').description("Domains bought through InstaCloud in this org — a domain belongs to the org, each of its hostnames to a service").option('--json')
   .action(guard((o) => domainCmd.domainList(o)))
 dom.command('status <name>').description("A bought domain's order and attach state").option('--json')
   .action(guard((name, o) => domainCmd.domainStatus(name, o)))

@@ -72,7 +72,7 @@ export function ownerOf(host: string, owned: Purchased[]): Purchased | null {
 export async function domainAttach(host: string, opts: { branch?: string; group?: string; json?: boolean }, deps?: DomainDeps): Promise<void> {
   const { api, project: p } = await domainDeps(deps)
   const name = host.trim().toLowerCase()
-  const { items } = await api.request<{ items: Purchased[] }>('GET', `/orgs/${p.orgId!}/domains`)
+  const { items } = await api.request<{ items: Purchased[] }>('GET', `/projects/${p.projectId}/domains`)
   const owner = ownerOf(name, items)
   if (!owner) die(`no domain this org bought covers ${name} — for a domain you own elsewhere: insta compute set-domain ${name}`)
   const branch = opts.branch ?? p.branch
@@ -109,20 +109,21 @@ export async function domainList(opts: { json?: boolean }, deps?: DomainDeps): P
   const { api, project: p } = await domainDeps(deps)
   const r = await api.request<{ items: Purchased[] }>('GET', `/projects/${p.projectId}/domains`)
   if (opts.json) return printJson(r)
-  if (!r.items.length) return info('no domains bought through InstaCloud in this project (search: insta domain search <keyword>)')
+  if (!r.items.length) return info('no domains bought through InstaCloud in this org (search: insta domain search <keyword>)')
   for (const d of r.items) for (const line of domainLines(d)) info(line)
 }
 
 export async function domainStatus(name: string, opts: { json?: boolean }, deps?: DomainDeps): Promise<void> {
   const { api, project: p } = await domainDeps(deps)
   const host = name.trim().toLowerCase()
+  // Both are the ORG's; the project in the path is the scope the agent policy is read at.
   const [{ items: domains }, { items: orders }] = await Promise.all([
     api.request<{ items: Purchased[] }>('GET', `/projects/${p.projectId}/domains`),
     api.request<{ items: Order[] }>('GET', `/projects/${p.projectId}/domains/orders`),
   ])
   const domain = domains.find((d) => d.domainName === host) ?? null
   const order = orders.find((o) => o.domainName === host) ?? null
-  if (!domain && !order) die(`${host} was not bought through this project`)
+  if (!domain && !order) die(`${host} was not bought through this org`)
   if (opts.json) return printJson({ domain, order })
   for (const line of domain ? domainLines(domain) : orderStatusLines(order!)) info(line)
 }

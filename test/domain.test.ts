@@ -95,7 +95,7 @@ describe('domain buy', () => {
 })
 
 describe('domain attach', () => {
-  const inventory = { '/orgs/org1/domains': { items: [{ domainName: 'myapp.com', status: 'registered', hostnames: [], expiresAt: null, autorenew: true }] } }
+  const inventory = { '/projects/p1/domains': { items: [{ domainName: 'myapp.com', status: 'registered', hostnames: [], expiresAt: null, autorenew: true }] } }
   it('a bought name binds it and its www', async () => {
     const { deps: d, calls } = deps(inventory, { status: 200, body: { domainName: 'myapp.com', status: 'registered', hostnames: [{ hostname: 'myapp.com', state: 'pending', service: 'web' }, { hostname: 'www.myapp.com', state: 'pending', service: 'web' }] } })
     await domainAttach('myapp.com', { group: 'web' }, d)
@@ -132,7 +132,7 @@ describe('domain list / status', () => {
     const empty = { domainName: 'old.com', status: 'registered', expiresAt: null, autorenew: true, hostnames: [] }
     const moving = { domainName: 'new.com', status: 'attaching', expiresAt: null, autorenew: true,
       hostnames: [{ hostname: 'new.com', state: 'pending', service: 'web' }] }
-    const { deps: d } = deps({ '/domains': { items: [purchased, empty, moving] } })
+    const { deps: d } = deps({ '/projects/p1/domains': { items: [purchased, empty, moving] } })
     await domainList({}, d)
     expect(out()).toContain('myapp.com  attaching  (expires 2027-09-10, auto-renews)')
     expect(out()).toContain('api.myapp.com  active → api')
@@ -143,21 +143,21 @@ describe('domain list / status', () => {
     expect(out()).not.toContain('insta domain attach myapp.com')
   })
   it('status shows the domain once it exists, else the order', async () => {
-    const { deps: d } = deps({ '/domains/orders': { items: [{ ...order, status: 'attaching' }] }, '/domains': { items: [purchased] } })
+    const { deps: d } = deps({ '/domains/orders': { items: [{ ...order, status: 'attaching' }] }, '/projects/p1/domains': { items: [purchased] } })
     await domainStatus('MyApp.com', {}, d)
     expect(out()).not.toContain('order o1')
     expect(out()).toContain('api.myapp.com  active → api')
   })
   it('a canceled checkout says how to order again', async () => {
-    const { deps: d } = deps({ '/domains/orders': { items: [{ ...order, status: 'canceled', failedReason: 'checkout expired before payment' }] }, '/domains': { items: [] } })
+    const { deps: d } = deps({ '/domains/orders': { items: [{ ...order, status: 'canceled', failedReason: 'checkout expired before payment' }] }, '/projects/p1/domains': { items: [] } })
     await domainStatus('myapp.com', {}, d)
     expect(out()).toContain('canceled — checkout expired before payment')
     expect(out()).toContain('order again: insta domain buy myapp.com')
   })
   it('status of a name never bought here fails plainly, --json included', async () => {
-    const { deps: d } = deps({ '/domains/orders': { items: [] }, '/domains': { items: [] } })
+    const { deps: d } = deps({ '/domains/orders': { items: [] }, '/projects/p1/domains': { items: [] } })
     await expect(domainStatus('other.com', { json: true }, d)).rejects.toThrow('exit 1')
-    expect(stderr.join('')).toContain('other.com was not bought through this project')
+    expect(stderr.join('')).toContain('other.com was not bought through this org')
     expect(out()).toBe('')
   })
 })
