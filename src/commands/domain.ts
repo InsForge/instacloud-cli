@@ -4,9 +4,9 @@ import { presentUrl, resolveOrgId } from './billing.js'
 import { domainDeps, domainTarget, type DomainDeps } from './compute.js'
 
 type Quote = { domainName: string; purchasable: boolean; priceCents?: number; renewalPriceCents?: number; reason?: string }
-type Order = { id: string; domainName: string; years: number; status: string; priceCents: number; renewalPriceCents: number | null; branch: string | null; checkoutUrl?: string; failedReason: string | null }
-type HostnameState = { hostname: string; state: string; reason?: string }
-type Purchased = { domainName: string; status: string; hostnames: HostnameState[]; service: string | null; expiresAt: string | null; autorenew: boolean }
+type Order = { id: string; domainName: string; years: number; status: string; priceCents: number; renewalPriceCents: number | null; checkoutUrl?: string; failedReason: string | null }
+type HostnameState = { hostname: string; state: string; reason?: string; service: string | null }
+type Purchased = { domainName: string; status: string; hostnames: HostnameState[]; expiresAt: string | null; autorenew: boolean }
 
 const usd = (cents: number): string => `$${(cents / 100).toFixed(2)}`
 
@@ -39,12 +39,10 @@ export async function domainSearch(keyword: string, opts: { tlds?: string; org?:
 
 // ---- buy / attach ----
 
-export type BuyOpts = { years?: string; branch?: string; group?: string; open?: boolean; json?: boolean }
+export type BuyOpts = { years?: string; open?: boolean; json?: boolean }
 
 export async function domainBuy(name: string, opts: BuyOpts, deps?: DomainDeps): Promise<void> {
   const { api, project: p } = await domainDeps(deps)
-  const branch = opts.branch ?? p.branch
-  const { target } = await domainTarget(api, p.projectId, branch, name, opts.group)
   // JSON.stringify drops undefined but keeps NaN as null, which the platform rejects as a type
   // error rather than a bad term — so a malformed --years is refused here, with the reason.
   let years: number | undefined
@@ -52,35 +50,52 @@ export async function domainBuy(name: string, opts: BuyOpts, deps?: DomainDeps):
     years = Number(opts.years)
     if (!Number.isInteger(years)) die(`--years must be a whole number of years, not ${opts.years}`)
   }
-  const res = await api.rawRequest('POST', `/projects/${p.projectId}/domains/orders`, { domainName: name, years, branch, group: target.name })
+  const res = await api.rawRequest('POST', `/projects/${p.projectId}/domains/orders`, { domainName: name, years })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const { order } = res.body as { order: Order }
   info(`${order.domainName} — ${usd(order.priceCents)} for ${order.years} year${order.years === 1 ? '' : 's'}${order.renewalPriceCents !== null ? `, then ${usd(order.renewalPriceCents)}/yr` : ''}`)
-  info(`attaches to ${target.name}${order.branch ? ` (branch ${order.branch})` : ''} as ${order.domainName} and www.${order.domainName} once paid`)
   presentUrl(order.checkoutUrl!, 'Complete the payment in your browser:', opts.open)
-  info(`then: insta domain status ${order.domainName}`)
+  info(`then attach it: insta domain attach ${order.domainName}`)
 }
 
-export async function domainAttach(name: string, opts: { branch?: string; group?: string; json?: boolean }, deps?: DomainDeps): Promise<void> {
+// The bought name `host` sits under. At most one can match: only apex names are sold, so no bought
+// domain is ever a subdomain of another.
+export function ownerOf(host: string, owned: Purchased[]): Purchased | null {
+  return owned.find((d) => host === d.domainName || host.endsWith(`.${d.domainName}`)) ?? null
+}
+
+/**
+ * Point one hostname at a compute service. `host` is a bought name — which binds it and its www —
+ * or any subdomain of one, which binds only that; the rest of the domain is left as it is.
+ */
+export async function domainAttach(host: string, opts: { branch?: string; group?: string; json?: boolean }, deps?: DomainDeps): Promise<void> {
   const { api, project: p } = await domainDeps(deps)
+  const name = host.trim().toLowerCase()
+  const { items } = await api.request<{ items: Purchased[] }>('GET', `/orgs/${p.orgId!}/domains`)
+  const owner = ownerOf(name, items)
+  if (!owner) die(`no domain this org bought covers ${name} — for a domain you own elsewhere: insta compute set-domain ${name}`)
   const branch = opts.branch ?? p.branch
   const { target } = await domainTarget(api, p.projectId, branch, name, opts.group)
-  const res = await api.rawRequest('POST', `/projects/${p.projectId}/domains/${encodeURIComponent(name)}/attach`, { branch, group: target.name })
+  const hostname = name === owner.domainName ? undefined : name
+  const res = await api.rawRequest('POST', `/projects/${p.projectId}/domains/${encodeURIComponent(owner.domainName)}/attach`, { hostname, branch, group: target.name })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
-  const d = res.body as Purchased
-  info(`${d.domainName} will attach to ${target.name} as ${d.hostnames.map((h) => h.hostname).join(' and ')}`)
-  info(`then: insta domain status ${d.domainName}`)
+  // What THIS call asked for. Reading it back off the answer would also name a hostname some
+  // earlier attach left pending, which this command did not touch.
+  const asked = hostname ? [hostname] : [owner.domainName, `www.${owner.domainName}`]
+  info(`${asked.join(' and ')} will attach to ${target.name}`)
+  info(`then: insta domain status ${owner.domainName}`)
 }
 
 // ---- list / status ----
 
 function domainLines(d: Purchased): string[] {
-  const out = [`${d.domainName}  ${d.status}${d.service ? `  → ${d.service}` : ''}${d.expiresAt ? `  (expires ${d.expiresAt.slice(0, 10)}${d.autorenew ? ', auto-renews' : ''})` : ''}`]
-  if (d.status === 'detached' || d.status === 'attach_failed') out.push(`  attach it again: insta domain attach ${d.domainName}`)
+  const out = [`${d.domainName}  ${d.status}${d.expiresAt ? `  (expires ${d.expiresAt.slice(0, 10)}${d.autorenew ? ', auto-renews' : ''})` : ''}`]
+  // Vacuously true for a domain with no hostnames, which is every domain until something attaches.
+  if (d.hostnames.every((h) => h.state === 'failed')) out.push(`  nothing serving — insta domain attach ${d.domainName}`)
   const w = Math.max(0, ...d.hostnames.map((x) => x.hostname.length))
-  for (const h of d.hostnames) out.push(`  ${h.hostname.padEnd(w)}  ${h.state}${h.reason ? ` — ${h.reason}` : ''}`)
+  for (const h of d.hostnames) out.push(`  ${h.hostname.padEnd(w)}  ${h.state}${h.service ? ` → ${h.service}` : ''}${h.reason ? ` — ${h.reason}` : ''}`)
   return out
 }
 
