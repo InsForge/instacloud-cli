@@ -167,14 +167,6 @@ svc.command('remove <type> <name>').description('Remove a service and destroy it
 svc.command('rename <type> <name> <new-name>').description('Rename a service and re-key its managed secret names')
   .option('--json').option('--branch <branch>', 'branch (default: current)')
   .action(guard((type, name, newName, o) => services.servicesRename(type, name, newName, o)))
-svc.command('set-access <type> <name> <access>').description('Set a storage service bucket access mode (access: public|private)')
-  .option('--json').action(guard((type, name, access, o) => services.servicesSetAccess(type, name, access, o)))
-svc.command('scale <type> <name> <number> [region]').description('Set a compute service same-region replica count from 1 to 10 (paid plans only)')
-  .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((type, name, number, region, o) => services.servicesScale(type, name, number, region, o)))
-svc.command('upgrade <type> <name> <spec>').description('Change a compute service spec (paid plans only). Postgres upgrades are rejected by the platform — use `insta db limits` instead')
-  .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((type, name, spec, o) => services.servicesUpgrade(type, name, spec, o)))
-svc.command('secrets <type> <name>').description("List a service's secret names")
-  .option('--branch <b>').option('--json').action(guard((type, name, o) => services.servicesSecrets(type, name, o)))
 
 // ---- secrets (seam) ----
 const sec = program.command('secrets').description('Fetch the credential bundle (secret seam) into .env')

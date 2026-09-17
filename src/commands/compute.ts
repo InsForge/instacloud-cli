@@ -1,6 +1,6 @@
 import { ApiClient, ApiError, requireProject } from '../api.js'
 import { info, printJson, handleApproval, relayExitCode, writeFileAtomicSync, resolveThroughSymlink } from '../util.js'
-import { resolveComputeServiceId, resolveSoleService, q, parseVolumeGib } from './services.js'
+import { resolveComputeServiceId, resolveSoleService, q, parseVolumeGib, parseCount } from './services.js'
 
 type Opts = { branch?: string; group?: string; json?: boolean }
 
@@ -598,6 +598,24 @@ export async function serviceAlwaysOn(type: ManagedType, mode: string, serviceNa
   info(`${type} ${res.body.service?.name ?? svc.name}: always-on ${on ? 'ENABLED — machines stay warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle'}`)
 }
 export const computeAlwaysOn = (mode: string, serviceName: string | undefined, opts: LifeOpts): Promise<void> => serviceAlwaysOn('compute', mode, serviceName, opts)
+
+// ---- scale (same-region replica count; paid plans) ----
+type ScaleOpts = LifeOpts & { region?: string }
+
+// `insta compute scale <count> [service] [--region <r>]` — POST /services/:id/scale. Count is
+// validated locally (1..10); the paid-plan gate is the backend's and its 403 flows verbatim.
+export async function computeScale(count: string, serviceName: string | undefined, opts: ScaleOpts): Promise<void> {
+  const machineCount = parseCount(count)
+  const api = await ApiClient.load()
+  const p = await requireProject()
+  const branch = opts.branch ?? p.branch
+  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
+  const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, 'compute', serviceName)
+  const res = await api.rawRequest('POST', `/projects/${p.projectId}/services/${svc.id}/scale`, { machineCount, region: opts.region })
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body.service)
+  info(`scaled compute ${svc.name} to ${machineCount} replica(s)${opts.region ? ` in ${opts.region}` : ''}`)
+}
 
 // ---- limits (the resource ceiling; paid plans) ----
 

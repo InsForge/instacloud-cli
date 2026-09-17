@@ -1,4 +1,4 @@
-// `insta services` — manage a project's opt-in services (postgres | storage | compute | redis | mysql | mongodb).
+// `insta service` — manage a project's opt-in services (postgres | storage | compute | redis | mysql | mongodb).
 import { ApiClient, requireProject } from '../api.js'
 import { info, printJson, handleApproval, renderNextActions } from '../util.js'
 
@@ -211,60 +211,4 @@ export function parseAccess(raw: string): boolean {
   if (raw === 'public') return true
   if (raw === 'private') return false
   throw new Error(`access must be public|private, got: ${raw}`)
-}
-
-// insta services set-access storage <name> <public|private>
-export async function servicesSetAccess(type: string, name: string, access: string, _opts: { json?: boolean }): Promise<void> {
-  assertType(type, ['storage'])
-  const isPublic = parseAccess(access)
-  const api = await ApiClient.load()
-  const p = await requireProject()
-  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(p.branch)}`)
-  const id = resolveServiceId(services, type, name)
-  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${id}/access`, { public: isPublic })
-  if (handleApproval(res, _opts.json)) return
-  if (_opts.json) return printJson(res.body.service)
-  info(`set storage ${name} access to ${access}`)
-}
-
-// insta services scale compute <name> <number> [region]
-export async function servicesScale(type: string, name: string, number: string, region: string | undefined, _opts: { json?: boolean; branch?: string }): Promise<void> {
-  assertType(type, ['compute'])
-  const machineCount = parseCount(number)
-  const api = await ApiClient.load()
-  const p = await requireProject()
-  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(_opts.branch ?? p.branch)}`)
-  const id = resolveServiceId(services, type, name)
-  const res = await api.rawRequest('POST', `/projects/${p.projectId}/services/${id}/scale`, { machineCount, region })
-  if (handleApproval(res, _opts.json)) return
-  if (_opts.json) return printJson(res.body.service)
-  info(`scaled compute ${name} to ${machineCount} replica(s)${region ? ` in ${region}` : ''}`)
-}
-
-// insta services upgrade <compute|postgres> <name> <new-spec>
-export async function servicesUpgrade(type: string, name: string, spec: string, _opts: { json?: boolean; branch?: string }): Promise<void> {
-  assertType(type, ['compute', 'postgres'])
-  const api = await ApiClient.load()
-  const p = await requireProject()
-  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(_opts.branch ?? p.branch)}`)
-  const id = resolveServiceId(services, type, name)
-  const res = await api.rawRequest('POST', `/projects/${p.projectId}/services/${id}/upgrade`, { spec })
-  if (handleApproval(res, _opts.json)) return
-  if (_opts.json) return printJson(res.body.service)
-  info(`upgraded ${type} ${name} to ${spec}`)
-}
-
-// insta services secrets <type> <name> — the secret names bound to a service.
-export async function servicesSecrets(type: string, name: string, opts: { branch?: string; json?: boolean } = {}): Promise<void> {
-  assertType(type)
-  const api = await ApiClient.load()
-  const p = await requireProject()
-  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(opts.branch ?? p.branch)}`)
-  const id = resolveServiceId(services, type, name)
-  const res = await api.rawRequest('GET', `/projects/${p.projectId}/services/${id}/secrets`)
-  if (handleApproval(res, opts.json)) return
-  const { secrets } = res.body
-  if (opts.json) return printJson(secrets)
-  if (!secrets.length) return info(`(no secrets bound to ${type}/${name})`)
-  for (const n of secrets) info(n)
 }

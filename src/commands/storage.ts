@@ -6,7 +6,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { ApiClient, requireProject } from '../api.js'
 import { info, printJson, handleApproval } from '../util.js'
-import { q, resolveSoleService } from './services.js'
+import { q, resolveSoleService, parseAccess } from './services.js'
 import { fmtBytes } from './postgres.js' // the repo's tested bytes formatter — don't grow a third copy
 
 type Common = { branch?: string; service?: string; json?: boolean }
@@ -173,4 +173,18 @@ export async function storageDelete(key: string, opts: Common): Promise<void> {
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   info(`deleted ${key} from storage/${svc.name} (branch ${branch})`)
+}
+
+// `insta storage set-access <public|private> [--service <name>]` — PUT /services/:id/access.
+// public = anonymous public-read on the bucket; private is the default a bucket is born with.
+export async function storageSetAccess(access: string, opts: Common): Promise<void> {
+  const isPublic = parseAccess(access)
+  const api = await ApiClient.load()
+  const p = await requireProject()
+  const branch = opts.branch ?? p.branch
+  const svc = await storageTarget(api, p.projectId, branch, opts.service)
+  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${svc.id}/access`, { public: isPublic })
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body.service)
+  info(`set storage ${svc.name} access to ${access}`)
 }
