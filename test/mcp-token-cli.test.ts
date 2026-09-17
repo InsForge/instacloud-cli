@@ -52,7 +52,7 @@ test.each([true, false])('CLI exits nonzero for failed token registration (store
     for (const key of ['INSTA_ENV', 'INSTA_PROJECT_ID', 'INSTA_ORG_ID', 'INSTA_BRANCH']) delete childEnv[key as keyof typeof childEnv]
     const output = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
       const child = spawn(process.execPath, ['--import', loader, entry,
-        '--agent', 'mcp', 'install', '--agent', 'claude-code', '--mcp-token'], { cwd: home, env: childEnv })
+        '--agent', 'config', 'install-mcp', '--agent', 'claude-code', '--mcp-token'], { cwd: home, env: childEnv })
       let stdout = '', stderr = ''
       const timer = setTimeout(() => { child.kill(); reject(new Error('CLI timed out')) }, 10000)
       child.stdout.on('data', (chunk) => { stdout += chunk })

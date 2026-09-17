@@ -427,6 +427,8 @@ function execCommandIndex(argv: string[]): number {
   for (let cursor = 2; cursor < argv.length; cursor++) {
     const token = argv[cursor]!
     if (token === '--agent') continue
+    if (token === '--api-url') { cursor++; continue } // root flag with a value: skip both tokens
+    if (token.startsWith('--api-url=')) continue
     if (token.startsWith('-')) return -1 // a global flag, or `--`: either way not our command path
     return token === 'compute' && argv[cursor + 1] === 'exec' ? cursor : -1
   }

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { Command } from 'commander'
+import { Command, Option } from 'commander'
 import { configureAgent, detectAgent } from './agent.js'
+import { setApiUrlOverride } from './config.js'
 import * as agentPolicy from './commands/agent-policy.js'
 import { ApiError, AgentApprovalRequired } from './api.js'
 import { CliCancel, CliExit, fail, relayedExitCode } from './util.js'
@@ -23,8 +24,9 @@ import { deploy } from './commands/deploy.js'
 import { build } from './commands/build.js'
 import * as computeCmd from './commands/compute.js'
 import * as githubCmd from './commands/github.js'
-import * as dbCmd from './commands/postgres.js'
+import * as pgCmd from './commands/postgres.js'
 import * as dbQueryCmd from './commands/db-query.js'
+import * as managedDb from './commands/managed-db.js'
 import * as storageCmd from './commands/storage.js'
 import { manifest } from './commands/manifest.js'
 import * as template from './commands/template.js'
@@ -68,8 +70,13 @@ const program = new Command()
 // group's own options only match before the subcommand name, so occurrences after it are matched
 // against the subcommand's own (identically-named) option instead.
 program.enablePositionalOptions()
-program.name('insta').description('InstaCloud CLI — manage projects, branches, secrets, deploys').version(cliVersion())
+program.name('insta').description('InstaCloud CLI — manage projects, branches, services, deploys').version(cliVersion())
 program.option('--agent', 'run as an agent with a verified project session and project agent policy')
+program.option('--api-url <url>', 'control-plane API base URL for this invocation only — beats INSTA_API_URL, INSTA_ENV and the stored login; a URL for another deployment runs logged-out (internal debugging). Accepted before or after any subcommand')
+// The runtime --api-url must be in place before any action loads config (ApiClient.load →
+// readGlobal). optsWithGlobals merges the root's, a group's and the leaf's copy of the flag
+// (addApiUrlEverywhere below), so it is honoured wherever it was typed; typed twice, the outermost wins.
+program.hook('preAction', (_root, action) => setApiUrlOverride((action.optsWithGlobals() as { apiUrl?: string }).apiUrl))
 program.hook('preAction', () => configureAgent(detectAgent(!!program.opts().agent)))
 
 // ---- auth ----
@@ -86,37 +93,12 @@ program.command('login').description('Log in — bare: sign in from your browser
 program.command('logout').description('Log out and clear local tokens').action(guard(() => auth.logout()))
 program.command('status').description('Show login + linked project').option('--json').action(guard((o) => auth.status(o)))
 
-// ---- environment (prod | staging) ----
-const envCmd = program.command('env').description('Show or switch the deployment environment (prod | staging)')
+// ---- environment (prod | staging) — hidden: `--api-url` covers the debugging case; kept working ----
+const envCmd = program.command('env', { hidden: true }).description('Show or switch the deployment environment (prod | staging)')
 envCmd.command('show', { isDefault: true }).description('Show the current environment and its hosts')
   .option('--json').action(guard((o) => envCmd_.envShow(o)))
 envCmd.command('use <name>').description(`Switch environment (${ENV_NAMES.join(' | ')}) — drops the stored session, which is deployment-specific`)
   .option('--json').action(guard((name, o) => envCmd_.envUse(name, o)))
-
-// ---- run (per-request secret injection — nothing written to disk) ----
-program.command('run <cmd> [args...]').description('Run a command with the branch credential bundle injected into its environment (no .env written)')
-  .option('--branch <b>', 'branch bundle to inject (default: linked branch)')
-  .option('--service <type/name>', "inject one compute service's own slice of the branch bundle, e.g. compute/api — the unambiguous read when several services define the same name (NOT the container's env: it also carries the branch's provider credentials, which a container gets only where bound)")
-  .option('--ignore-collisions', 'run even when several services define the same name; every such name is REMOVED from the child environment (never inherited from your shell)')
-  .passThroughOptions().allowUnknownOption()
-  .action(guard((cmd, args, o) => runCmd.run([cmd, ...(args ?? [])], o)))
-
-// ---- agent setup (the `curl … | sh --agents` target) ----
-const setupCmd = program.command('setup').description('Set up this machine for InstaCloud agent workflows')
-setupCmd.command('agent').description('Install the insta CLI (if missing), the insta skill for all coding agents, and the MCP server — targets production; pass --env staging for the staging deployment')
-  .option('-y, --yes', 'non-interactive')
-  .option('--env <prod|staging>', 'deployment to set this machine up for (default: prod — switches and persists, like `insta env use`)')
-  .option('--mcp-token', 'register Claude Code with a minted insta_ API token instead of OAuth (requires login and token-creation permission)')
-  .option('--project <id>', 'also link this directory to an existing project after setup (flows through login first if needed)')
-  .option('--create [name]', 'also create a new project and link this directory after setup (default name: this directory; mutually exclusive with --project)')
-  .action(guard((o) => setup.setupAgent(o)))
-
-// ---- MCP server integration ----
-const mcpCmd = program.command('mcp').description('insta-cloud remote MCP server integration')
-mcpCmd.command('install').description('Register the remote MCP server with coding agents (default: Claude Code + all detected)')
-  .option('--agent <slug>', 'one agent: claude-code, cursor, codex, opencode, copilot, factory-droid')
-  .option('--mcp-token', 'claude-code only: minted insta_ API token instead of OAuth (requires login and token-creation permission)')
-  .action(guard((o) => mcp.mcpInstall(o)))
 
 // ---- org ----
 const orgCmd = program.command('org').description('Manage organizations')
@@ -139,8 +121,8 @@ br.command('delete <name>').option('--json').action(guard((name, o) => branch.br
 br.command('merge <source>').description('Merge a branch service set into another (structural, no data)')
   .option('--into <branch>', 'target branch (default: current)').option('--json').action(guard((source, o) => branch.branchMerge(source, o)))
 
-// ---- services (opt-in postgres/storage/compute/redis/mysql/mongodb) ----
-const svc = program.command('services').alias('svc').description('Manage project services (postgres|storage|compute|redis|mysql|mongodb)')
+// ---- service (opt-in postgres/storage/compute/redis/mysql/mongodb) ----
+const svc = program.command('service').aliases(['services', 'svc']).description('Manage project services: add / list / remove / rename (postgres|storage|compute|redis|mysql|mongodb)')
 // [type] [name] are optional so the command can answer "what can I add?" — a terminal is walked
 // through the dashboard's Add Service kinds, anything else gets that list back as an error
 // (resolve-service.ts). Picking Docker Image also fills in --image/--port from the answers.
@@ -205,20 +187,60 @@ sec.command('sources').description('List service credential sources available fo
 sec.command('tree').description('Show secrets as project → branch → service → secrets').option('--json')
   .action(guard((o) => secretsCmd.secretsTree(o)))
 
-// ---- build (pre-push verification — local, offline, deploys nothing) ----
-program.command('build [dir]').description('Verify a source directory would build before deploying: detection plan + the Dockerfile (yours, or the one nixpacks would generate server-side) + static checks. Local and offline — no login needed, nothing pushed. Exit 1 when the verdict is failed')
-  .option('--explain', 'include the Dockerfile content in the output')
-  .option('--port <p>', 'port the app listens on (else the Dockerfile EXPOSE)')
-  .option('--json')
-  .action(guard((dir, o) => build(dir, o)))
+// ---- domain (bought here, or bring your own; hostnames on compute services; DNS of bought zones) ----
+const dom = program.command('domain').description('Domains: buy through InstaCloud or bring your own — attach / check / detach hostnames on compute services; DNS records of bought domains')
+dom.command('search <keyword>').description('Search purchasable names with prices (a label like "myapp" or a full name like "myapp.com")')
+  .option('--tlds <list>', 'comma-separated TLDs to include').option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((keyword, o) => domainCmd.domainSearch(keyword, o)))
+dom.command('buy <name>').description('Buy a domain — pay at the printed Stripe Checkout link. It serves nothing until you attach it (gated: domain.purchase)')
+  .option('--years <n>', 'registration term in years (default 1)')
+  .option('--no-open', 'print the checkout URL instead of opening a browser').option('--json')
+  .action(guard((name, o) => domainCmd.domainBuy(name, o)))
+dom.command('attach <hostname>').description('Point a hostname at a compute service. A domain bought here: `abc.com` binds it and its www, `api.abc.com` binds only that. A domain you own elsewhere: the DNS records to publish in your own zone are printed (gated: deploy)')
+  .option('--branch <b>').option('--group <g>', "compute service (default: the branch's sole compute service)").option('--json')
+  .action(guard((hostname, o) => domainCmd.domainAttach(hostname, o)))
+dom.command('check <hostname>').description("A hostname's attach state — ownership TXT, routing CNAME, edge certificate, where it resolves — and what each still needs")
+  .option('--branch <b>').option('--group <g>', "compute service (default: the branch's sole compute service)").option('--json')
+  .action(guard((hostname, o) => domainCmd.domainCheck(hostname, o)))
+dom.command('detach <hostname>').description('Detach a hostname from its compute service (gated: deploy)')
+  .option('--branch <b>').option('--group <g>', "compute service (default: the branch's sole compute service)").option('--json')
+  .action(guard((hostname, o) => domainCmd.domainDetach(hostname, o)))
+dom.command('list').description("Domains bought through InstaCloud in this org — a domain belongs to the org, each of its hostnames to a service").option('--json')
+  .action(guard((o) => domainCmd.domainList(o)))
+dom.command('status <name>').description("A bought domain's order and attach state").option('--json')
+  .action(guard((name, o) => domainCmd.domainStatus(name, o)))
+const rec = dom.command('records').description('DNS records of a bought domain — the zone InstaCloud holds at the registrar')
+rec.command('list <domain>').description('Every record in the zone, managed ones marked')
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((domain, o) => domainCmd.domainRecordsList(domain, o)))
+rec.command('add <domain> <type> <name> <content>').description('Add a record — type A|AAAA|CNAME|ANAME|MX|TXT|SRV|NS; name "@" for the domain itself, a label like "www", or the full hostname under it')
+  .option('--ttl <seconds>', 'time to live in seconds (default 300)').option('--priority <n>', 'MX and SRV only')
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((domain, type, name, content, o) => domainCmd.domainRecordsAdd(domain, type, name, content, o)))
+rec.command('set <domain> <id>').description('Change a record by its id (from `records list`); fields you omit keep their value')
+  .option('--type <t>', 'A|AAAA|CNAME|ANAME|MX|TXT|SRV|NS').option('--name <host>', '"@" for the domain itself, a label like "www", or the full hostname under it').option('--content <value>', 'the answer').option('--ttl <seconds>', 'time to live in seconds').option('--priority <n>', 'MX and SRV only')
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((domain, id, o) => domainCmd.domainRecordsSet(domain, id, o)))
+rec.command('remove <domain> <id>').description('Remove a record by its id (a record InstaCloud published for a live hostname is refused)')
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((domain, id, o) => domainCmd.domainRecordsRemove(domain, id, o)))
 
-// ---- deploy ----
-program.command('deploy [dir]').description('Deploy a source directory (built remotely; on insta-compute a Dockerfile is optional and nixpacks detects the runtime) or a prebuilt --image to a branch compute group')
-  .option('--image <url>', 'prebuilt container image to deploy (instead of a source dir)').option('--branch <b>').option('--group <g>').option('--port <p>')
-  .option('--websocket', 'run a WebSocket app (larger guest + connection-based concurrency)')
-  .option('--replace-source', 'the service deploys from a connected GitHub repo: switch it to this image and remove the repo connection (admin); without it such a deploy is refused')
-  .option('--json', 'print the deploy result as JSON (build progress goes to stderr)')
-  .action(guard((dir, o) => deploy(dir, o)))
+// logs/metrics live under each resource; the platform component is fixed by the parent. One
+// registration path so the five groups cannot drift apart in flags or wording.
+function addObservability(group: Command, component: 'compute' | 'db' | 'redis' | 'mysql' | 'mongodb', noun: string): void {
+  group.command('metrics [service]').description(`${noun} metrics — last value per series (--json for the points)`)
+    .option('--branch <b>').option('--from <unix>').option('--to <unix>').option('--step <s>').option('--json')
+    .action(guard((service, o) => obs.metrics(component, service, o)))
+  const logs = group.command('logs [service]').description(component === 'db'
+    ? `${noun} logs (runtime; a window pages ~7 days of history)`
+    : `${noun} logs (runtime by default; --deploy = machine lifecycle events)`)
+    .option('--branch <b>').option('--limit <n>').option('--region <r>').option('--instance <i>').option('--json')
+    .option('--from <t>', 'window start: unix seconds or ISO-8601 — pages history (~7-day retention); without a window one recent provider page (~100 lines) is returned')
+    .option('--to <t>', 'window end: unix seconds or ISO-8601 (default: now)')
+    .option('--since <dur>', 'relative window start, e.g. 90s, 30m, 2h, 1d (shorthand for --from now-dur)')
+  if (component !== 'db') logs.option('--deploy', 'show deploy events (machine lifecycle) instead of runtime logs')
+  logs.action(guard((service, o) => obs.logs(component, service, o)))
+}
 
 // `insta compute exec` needs the command verbatim after a literal `--`; split it out of argv here,
 // before commander parses anything (see splitExecArgs's own comment for why `service` being
@@ -229,14 +251,8 @@ const {
   windowsFallback: execWindowsFallback,
 } = computeCmd.splitExecArgs(process.argv)
 
-// ---- compute (lifecycle control + custom domains) ----
-const compute = program.command('compute').description('Control compute lifecycle (start/stop/suspend/restart/status) + custom domains')
-compute.command('set-domain <host>').description('Attach a custom domain to a branch compute service (gated: deploy)')
-  .option('--branch <b>').option('--group <g>').option('--json').action(guard((host, o) => computeCmd.setDomain(host, o)))
-compute.command('check-domain <host>').description("Show a custom domain's cert status + required DNS records")
-  .option('--branch <b>').option('--group <g>').option('--json').action(guard((host, o) => computeCmd.checkDomain(host, o)))
-compute.command('remove-domain <host>').description('Detach a custom domain (gated: deploy)')
-  .option('--branch <b>').option('--group <g>').option('--json').action(guard((host, o) => computeCmd.removeDomain(host, o)))
+// ---- compute ----
+const compute = program.command('compute').description('Compute services: lifecycle (start/stop/suspend/restart/status), scale, limits, volume, always-on, exec, ssh, GitHub source, logs, metrics')
 compute.command('start [service]').description('Bring a compute service online (persistent — re-enables auto-wake)')
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => computeCmd.computeStart(service, o)))
 compute.command('stop [service]').description('Take a compute service offline; traffic will NOT wake it until `start`')
@@ -247,6 +263,10 @@ compute.command('restart [service]').description("Restart a compute service by r
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => computeCmd.computeRestart(service, o)))
 compute.command('status [service]').description("Show a compute service's desired vs. live state")
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => computeCmd.computeStatus(service, o)))
+compute.command('scale <count> [service]').description('Set a compute service same-region replica count, 1 to 10 (paid plans only)')
+  .option('--region <region>', 'region to scale in (default: the service region)')
+  .option('--json').option('--branch <branch>', 'branch (default: current)')
+  .action(guard((count, service, o) => computeCmd.computeScale(count, service, o)))
 compute.command('limits [service]').description("Show or set a compute service's resource ceiling (any plan within the free cap; raising above it needs a paid plan). --memory is the dial; cpu derives from it unless --cpu is given. Billing is actual usage — the ceiling caps what the app may burn, it is not a price")
   .option('--memory <size>', 'memory ceiling, e.g. 512mb or 1gb').option('--cpu <n>', 'vCPU ceiling override (provider sizes: 1, 2, 4, 6, 8)')
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => computeCmd.computeLimits(service, o)))
@@ -287,37 +307,61 @@ compute.command('volume [service]').description("Show, attach, grow, or delete a
   .option('--size <gi>', 'new size in whole Gi, e.g. 10 (must be ≥ the current size)')
   .option('--delete', 'destroy the volume and ALL its data (irreversible; download anything you need first)')
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => computeCmd.computeVolume(service, o)))
+addObservability(compute, 'compute', 'compute')
 
-// ---- db (postgres service controls + managed-DB query) ----
-const db = program.command('db').description('Postgres service controls (url / connect / limits / volume / always-on / scale-to-zero) + managed-DB query (mysql/redis/mongodb)')
-db.command('url').description('Print the postgres connection string (DSN) — bare on stdout for piping, e.g. `psql "$(insta db url)"` (gated: secrets.read). Provider credentials are not in `insta secrets` — this is the command that yields the DSN')
-  .option('--json').option('--branch <branch>', 'branch (default: current)').option('--group <g>', 'postgres service name (default: the sole/default one)')
-  .action(guard((o) => dbCmd.dbUrl(o.group, o)))
-db.command('connect').description("Open an interactive psql session on the postgres service (needs psql on PATH; gated: secrets.read). A suspended instance wakes on connect — the first prompt can take a few seconds. Exits with psql's own exit code")
-  .option('--branch <branch>', 'branch (default: current)').option('--group <g>', 'postgres service name (default: the sole/default one)')
-  .action(guard((o) => dbCmd.dbConnect(o.group, o)))
-db.command('limits').description("Show or set a postgres service's resource ceiling (any plan within the free cap, paid above it; insta-db-backed only). Moves both directions")
-  .option('--cpu <n>', "vCPU ceiling, e.g. 2 or 2500m").option('--memory <size>', "memory ceiling, e.g. 4Gi")
-  .option('--json').option('--branch <branch>', 'branch (default: current)').option('--group <g>', 'postgres service name (default: the sole/default one)')
-  .action(guard((o) => dbCmd.dbLimits(o.group, o)))
-db.command('stats').description("Postgres stats snapshot: connections vs the server's max (active count), cache hit rate, database size. insta-db-backed services answer without waking a suspended instance")
-  .option('--json').option('--branch <branch>', 'branch (default: current)').option('--group <g>', 'postgres service name (default: the sole/default one)')
-  .action(guard((o) => dbCmd.dbStats(o.group, o)))
-db.command('always-on <mode>').description('Set a postgres service always-on (mode: on|off). on = instance stays warm, no cold starts; off = default scale-to-zero (idle instance suspends; first connection cold-starts). insta-db-backed services only')
-  .option('--json').option('--branch <branch>', 'branch (default: current)').option('--group <g>', 'postgres service name (default: the sole/default one)')
-  .action(guard((mode, o) => dbCmd.dbAlwaysOn(mode, o.group, o)))
-db.command('volume').description("Show or grow a postgres service's provisioned volume (block disk; insta-db-backed only). No --size: print size and the plan cap (any plan). --size grows it (paid plans; grow-only — a provisioned disk cannot shrink). Billing is actual data stored — the size is a cap, not a price")
-  .option('--size <gi>', 'new size in whole Gi, e.g. 10 (must be ≥ the current size)')
-  .option('--json').option('--branch <branch>', 'branch (default: current)').option('--group <g>', 'postgres service name (default: the sole/default one)')
-  .action(guard((o) => dbCmd.dbVolume(o.group, o)))
-db.command('query <service> [args...]').description('Run a query/command against a managed database (mysql/redis/mongodb) via the console exec API. mysql/mongodb take one quoted statement; redis takes a pre-tokenized argv (e.g. `GET mykey`). Not for postgres — use `insta db url|connect` / the SQL editor')
-  .option('--database <db>', 'mongodb only — the database to run against (default admin)')
+// ---- postgres ----
+const pg = program.command('postgres').description('Postgres services: connection string, psql, stats, resource ceiling, volume, always-on, logs, metrics')
+pg.command('url [service]').description('Print the postgres connection string (DSN) — bare on stdout for piping, e.g. `psql "$(insta postgres url)"` (gated: secrets.read). Provider credentials are not in `insta secrets` — this is the command that yields the DSN')
+  .option('--json').option('--branch <branch>', 'branch (default: current)')
+  .action(guard((service, o) => pgCmd.dbUrl(service, o)))
+pg.command('connect [service]').description("Open an interactive psql session on the postgres service (needs psql on PATH; gated: secrets.read). A suspended instance wakes on connect — the first prompt can take a few seconds. Exits with psql's own exit code")
   .option('--branch <branch>', 'branch (default: current)')
-  .option('--json')
-  .action(guard((service, args, o) => dbQueryCmd.dbQuery(service, args, o)))
+  .action(guard((service, o) => pgCmd.dbConnect(service, o)))
+pg.command('stats [service]').description("Postgres stats snapshot: connections vs the server's max (active count), cache hit rate, database size. insta-db-backed services answer without waking a suspended instance")
+  .option('--json').option('--branch <branch>', 'branch (default: current)')
+  .action(guard((service, o) => pgCmd.dbStats(service, o)))
+pg.command('limits [service]').description("Show or set a postgres service's resource ceiling (any plan within the free cap, paid above it; insta-db-backed only). Moves both directions")
+  .option('--cpu <n>', 'vCPU ceiling, e.g. 2 or 2500m').option('--memory <size>', 'memory ceiling, e.g. 4Gi')
+  .option('--json').option('--branch <branch>', 'branch (default: current)')
+  .action(guard((service, o) => pgCmd.dbLimits(service, o)))
+pg.command('volume [service]').description("Show or grow a postgres service's provisioned volume (block disk; insta-db-backed only). No --size: print size and the plan cap (any plan). --size grows it (paid plans; grow-only — a provisioned disk cannot shrink). Billing is actual data stored — the size is a cap, not a price")
+  .option('--size <gi>', 'new size in whole Gi, e.g. 10 (must be ≥ the current size)')
+  .option('--json').option('--branch <branch>', 'branch (default: current)')
+  .action(guard((service, o) => pgCmd.dbVolume(service, o)))
+pg.command('always-on <mode> [service]').description('Set a postgres service always-on (mode: on|off). on = instance stays warm, no cold starts; off = default scale-to-zero (idle instance suspends; first connection cold-starts). insta-db-backed services only')
+  .option('--json').option('--branch <branch>', 'branch (default: current)')
+  .action(guard((mode, service, o) => pgCmd.dbAlwaysOn(mode, service, o)))
+addObservability(pg, 'db', 'postgres')
 
-// ---- storage (bucket objects) ----
-const storage = program.command('storage').description("Browse, download, and delete a storage service's bucket objects")
+// ---- redis / mysql / mongodb (managed Fly databases) ----
+for (const type of ['redis', 'mysql', 'mongodb'] as const) {
+  const g = program.command(type).description(`Managed ${type} services: query, status, resource ceiling, volume, always-on, logs, metrics`)
+  const query = g.command('query <service> [args...]').description(type === 'redis'
+    ? 'Run a redis command against the service via the console exec API — a pre-tokenized argv, e.g. `GET mykey`'
+    : `Run one quoted ${type} statement against the service via the console exec API`)
+    .option('--branch <branch>', 'branch (default: current)').option('--json')
+  if (type === 'mongodb') query.option('--database <db>', 'the database to run against (default admin)')
+  query.action(guard((service, args, o) => dbQueryCmd.dbQuery(service, args, o, undefined, type)))
+  g.command('status [service]').description(`A ${type} service's live runtime health: healthy | crashed | starting | standby (scaled to zero, wakes on request — normal) | none | unknown`)
+    .option('--json').option('--branch <branch>', 'branch (default: current)')
+    .action(guard((service, o) => managedDb.managedStatus(type, service, o)))
+  g.command('limits [service]').description(`Show or set a ${type} service's resource ceiling (any plan within the free cap; raising above it needs a paid plan). --memory is the dial; cpu derives from it unless --cpu is given. Billing is actual usage — the ceiling caps what the database may burn, it is not a price`)
+    .option('--memory <size>', 'memory ceiling, e.g. 512mb or 1gb').option('--cpu <n>', 'vCPU ceiling override (provider sizes: 1, 2, 4, 6, 8)')
+    .option('--json').option('--branch <branch>', 'branch (default: current)')
+    .action(guard((service, o) => computeCmd.serviceLimits(type, service, o)))
+  g.command('volume [service]').description(`Show, grow, or delete a ${type} service's data volume (mounted at the image's data directory). No flag: size and the plan cap (any plan). --size grows it (paid plans; grow-only). --delete DESTROYS the disk and ALL its data immediately (no undo). Billing is actual data stored — the size is a cap, not a price`)
+    .option('--size <gi>', 'new size in whole Gi, e.g. 10 (must be ≥ the current size)')
+    .option('--delete', 'destroy the volume and ALL its data (irreversible; back up first)')
+    .option('--json').option('--branch <branch>', 'branch (default: current)')
+    .action(guard((service, o) => computeCmd.serviceVolume(type, service, o)))
+  g.command('always-on <mode> [service]').description(`Set a ${type} service always-on (mode: on|off). on = machines never scale to zero; off = scale-to-zero. Billing is actual usage either way`)
+    .option('--json').option('--branch <branch>', 'branch (default: current)')
+    .action(guard((mode, service, o) => computeCmd.serviceAlwaysOn(type, mode, service, o)))
+  addObservability(g, type, type)
+}
+
+// ---- storage (bucket objects + access mode) ----
+const storage = program.command('storage').description("Storage services: browse, download, delete bucket objects; set the bucket's access mode")
 storage.command('list').description("List the bucket's objects. S3 filters by prefix only — there is no substring search")
   .option('--prefix <p>', 'only keys starting with this prefix (applied server-side)')
   .option('--cursor <c>', 'continue from the nextCursor a previous page printed')
@@ -335,6 +379,33 @@ storage.command('delete <key>').description('DELETES one object from the bucket 
   .option('--service <name>', 'storage service (default: the sole one on the branch)')
   .option('--branch <b>', 'branch (default: current)').option('--json')
   .action(guard((key, o) => storageCmd.storageDelete(key, o)))
+storage.command('set-access <access>').description("Set the bucket's access mode — public (anonymous public-read) or private (the default)")
+  .option('--service <name>', 'storage service (default: the sole one on the branch)')
+  .option('--branch <b>', 'branch (default: current)').option('--json')
+  .action(guard((access, o) => storageCmd.storageSetAccess(access, o)))
+
+// ---- build (pre-push verification — local, offline, deploys nothing) ----
+program.command('build [dir]').description('Verify a source directory would build before deploying: detection plan + the Dockerfile (yours, or the one nixpacks would generate server-side) + static checks. Local and offline — no login needed, nothing pushed. Exit 1 when the verdict is failed')
+  .option('--explain', 'include the Dockerfile content in the output')
+  .option('--port <p>', 'port the app listens on (else the Dockerfile EXPOSE)')
+  .option('--json')
+  .action(guard((dir, o) => build(dir, o)))
+
+// ---- deploy ----
+program.command('deploy [dir]').description('Deploy a source directory (built remotely; on insta-compute a Dockerfile is optional and nixpacks detects the runtime) or a prebuilt --image to a branch compute group')
+  .option('--image <url>', 'prebuilt container image to deploy (instead of a source dir)').option('--branch <b>').option('--group <g>').option('--port <p>')
+  .option('--websocket', 'run a WebSocket app (larger guest + connection-based concurrency)')
+  .option('--replace-source', 'the service deploys from a connected GitHub repo: switch it to this image and remove the repo connection (admin); without it such a deploy is refused')
+  .option('--json', 'print the deploy result as JSON (build progress goes to stderr)')
+  .action(guard((dir, o) => deploy(dir, o)))
+
+// ---- run (per-request secret injection — nothing written to disk) ----
+program.command('run <cmd> [args...]').description('Run a command with the branch credential bundle injected into its environment (no .env written)')
+  .option('--branch <b>', 'branch bundle to inject (default: linked branch)')
+  .option('--service <type/name>', "inject one compute service's own slice of the branch bundle, e.g. compute/api — the unambiguous read when several services define the same name (NOT the container's env: it also carries the branch's provider credentials, which a container gets only where bound)")
+  .option('--ignore-collisions', 'run even when several services define the same name; every such name is REMOVED from the child environment (never inherited from your shell)')
+  .passThroughOptions().allowUnknownOption()
+  .action(guard((cmd, args, o) => runCmd.run([cmd, ...(args ?? [])], o)))
 
 // ---- templates (registry, local insta.template.yaml, or a GitHub URL) ----
 const tpl = program.command('template').description('Browse and deploy app templates (registry, a local dir, or a GitHub URL)')
@@ -349,85 +420,31 @@ tpl.command('deploy <code-or-dir-or-url>').description('Deploy a template onto a
   .option('--json')
   .action(guard((target, o) => template.templateDeploy(target, o)))
 
-// ---- manifest ----
-program.command('manifest').description('Print an agent-legible view of the project environments').option('--json').action(guard((o) => manifest(o)))
-
-// ---- regions ----
-program.command('regions').description('List regions available for postgres/compute services').option('--json').action(guard((o) => regions.regionsList(o)))
-
-// ---- observability ----
-program.command('metrics <target> [group]').description('Service metrics (target: db|compute|redis|mysql|mongodb)')
-  .option('--branch <b>').option('--from <unix>').option('--to <unix>').option('--step <s>').option('--json')
-  .action(guard((target, group, o) => obs.metrics(target, group, o)))
-program.command('logs <target> [group]').description('Service logs (runtime by default; --deploy = machine lifecycle events; target: db|compute|redis|mysql|mongodb)')
-  .option('--branch <b>').option('--limit <n>').option('--region <r>').option('--instance <i>').option('--deploy', 'show deploy events (machine lifecycle) instead of runtime logs — Fly-backed targets only, not db').option('--json')
-  .option('--from <t>', 'window start: unix seconds or ISO-8601 — pages history (~7-day retention); without a window one recent provider page (~100 lines) is returned')
-  .option('--to <t>', 'window end: unix seconds or ISO-8601 (default: now)')
-  .option('--since <dur>', 'relative window start, e.g. 90s, 30m, 2h, 1d (shorthand for --from now-dur)')
-  .action(guard((target, group, o) => obs.logs(target, group, o)))
-program.command('usage').description('Usage for the current billing cycle by billing dimension (org by default; --proj for one project)')
-  .option('--from <unix>').option('--to <unix>').option('--proj [id]', 'show one project (the linked one, or a given id) instead of the whole org').option('--json')
-  .action(guard((o) => obs.usage(o)))
-// ---- domains bought through InstaCloud (BYO domains: `insta compute set-domain`) ----
-const dom = program.command('domain').description('Buy a domain through InstaCloud and attach it to a compute service (your own domain: `insta compute set-domain`)')
-dom.command('search <keyword>').description('Search purchasable names with prices (a label like "myapp" or a full name like "myapp.com")')
-  .option('--tlds <list>', 'comma-separated TLDs to include').option('--org <id>', "target org (default: linked project's org)").option('--json')
-  .action(guard((keyword, o) => domainCmd.domainSearch(keyword, o)))
-dom.command('buy <name>').description('Buy a domain — pay at the printed Stripe Checkout link. It serves nothing until you attach it (gated: domain.purchase)')
-  .option('--years <n>', 'registration term in years (default 1)')
-  .option('--no-open', 'print the checkout URL instead of opening a browser').option('--json')
-  .action(guard((name, o) => domainCmd.domainBuy(name, o)))
-dom.command('attach <hostname>').description('Point a bought domain, or any subdomain of one, at a compute service — `abc.com` binds it and its www, `api.abc.com` binds only that (gated: deploy)')
-  .option('--branch <b>').option('--group <g>', "compute service (default: the branch's sole compute service)").option('--json')
-  .action(guard((hostname, o) => domainCmd.domainAttach(hostname, o)))
-dom.command('list').description("Domains bought through InstaCloud in this org — a domain belongs to the org, each of its hostnames to a service").option('--json')
-  .action(guard((o) => domainCmd.domainList(o)))
-dom.command('status <name>').description("A bought domain's order and attach state").option('--json')
-  .action(guard((name, o) => domainCmd.domainStatus(name, o)))
-const rec = dom.command('records').description('DNS records of a bought domain — the zone InstaCloud holds at the registrar')
-rec.command('list <domain>').description('Every record in the zone, managed ones marked')
-  .option('--org <id>', "target org (default: linked project's org)").option('--json')
-  .action(guard((domain, o) => domainCmd.domainRecordsList(domain, o)))
-rec.command('add <domain> <type> <name> <content>').description('Add a record — type A|AAAA|CNAME|ANAME|MX|TXT|SRV|NS; name "@" for the domain itself, a label like "www", or the full hostname under it')
-  .option('--ttl <seconds>', 'time to live in seconds (default 300)').option('--priority <n>', 'MX and SRV only')
-  .option('--org <id>', "target org (default: linked project's org)").option('--json')
-  .action(guard((domain, type, name, content, o) => domainCmd.domainRecordsAdd(domain, type, name, content, o)))
-rec.command('set <domain> <id>').description('Change a record by its id (from `records list`); fields you omit keep their value')
-  .option('--type <t>', 'A|AAAA|CNAME|ANAME|MX|TXT|SRV|NS').option('--name <host>', '"@" for the domain itself, a label like "www", or the full hostname under it').option('--content <value>', 'the answer').option('--ttl <seconds>', 'time to live in seconds').option('--priority <n>', 'MX and SRV only')
-  .option('--org <id>', "target org (default: linked project's org)").option('--json')
-  .action(guard((domain, id, o) => domainCmd.domainRecordsSet(domain, id, o)))
-rec.command('remove <domain> <id>').description('Remove a record by its id (a record InstaCloud published for a live hostname is refused)')
-  .option('--org <id>', "target org (default: linked project's org)").option('--json')
-  .action(guard((domain, id, o) => domainCmd.domainRecordsRemove(domain, id, o)))
-
-const bill = program.command('billing').description('Current billing cycle overview (tier / used / included / overage / credits / forecast + per-dimension & per-project breakdown)')
+// ---- billing ----
+const bill = program.command('billing').description('Billing: current cycle overview (bare), subscribe to a tier, Stripe portal, usage by dimension')
   .option('--org <id>', 'target org (default: linked project\'s org)').option('--json')
   .action(guard((o) => billing(o)))
-bill.command('upgrade <tier>').description('Subscribe the org to a paid tier (pro|team) via Stripe Checkout')
+bill.command('subscribe <tier>').description('Subscribe the org to a paid tier (pro|team) via Stripe Checkout')
   .option('--org <id>').option('--no-open', 'print the URL instead of opening a browser').option('--json')
   .action(guard((tier, o) => billingUpgrade(tier, o)))
 bill.command('portal').description('Open the Stripe Customer Portal (change plan / card / cancel)')
   .option('--org <id>').option('--no-open', 'print the URL instead of opening a browser').option('--json')
   .action(guard((o) => billingPortal(o)))
+bill.command('usage').description('Usage for the current billing cycle by billing dimension (org by default; --proj for one project)')
+  .option('--from <unix>').option('--to <unix>').option('--proj [id]', 'show one project (the linked one, or a given id) instead of the whole org').option('--json')
+  .action(guard((o) => obs.usage(o)))
 
-// ---- events (audit timeline) ----
-program.command('events').description('Show the audit + agent-event timeline').option('--branch <b>').option('--limit <n>').option('--json').action(guard((o) => govern.events(o)))
-
-// ---- approvals ----
-const ap = program.command('approvals').description('Governance approvals (HITL)')
-ap.command('list').option('--status <s>', 'pending|granted|denied|consumed').option('--json').action(guard((o) => govern.approvalsList(o)))
-ap.command('approve <id>').option('--json').action(guard((id, o) => govern.approvalsApprove(id, o)))
-ap.command('deny <id>').option('--json').action(guard((id, o) => govern.approvalsDeny(id, o)))
-
-// ---- observe (local credential audit) ----
-const ob = program.command('observe').description('Local credential-audit hook')
-ob.command('install').description('Install the PostToolUse hook into this project').action(guard(() => observe.observeInstall()))
-ob.command('uninstall').action(guard(() => observe.observeUninstall()))
-ob.command('report').description('Render the local credential audit').option('--json').action(guard((o) => observe.observeReport(o)))
-ob.command('sync').description('Upload findings into the project timeline').action(guard(() => observe.observeSync()))
-
-// ---- policy ----
-const agentPol = program.command('agent-policy').description('Project agent access policy')
+// ---- agent (this machine's coding agents + the project's agent governance) ----
+const agent = program.command('agent').description('Agents: set up this machine, the project manifest, access policy, approvals (HITL), the local credential audit, the event timeline')
+agent.command('setup').description('Install the insta CLI (if missing), the insta skill for all coding agents, and the MCP server — targets production; pass --env staging for the staging deployment')
+  .option('-y, --yes', 'non-interactive')
+  .option('--env <prod|staging>', 'deployment to set this machine up for (default: prod — switches and persists, like `insta env use`)')
+  .option('--mcp-token', 'register Claude Code with a minted insta_ API token instead of OAuth (requires login and token-creation permission)')
+  .option('--project <id>', 'also link this directory to an existing project after setup (flows through login first if needed)')
+  .option('--create [name]', 'also create a new project and link this directory after setup (default name: this directory; mutually exclusive with --project)')
+  .action(guard((o) => setup.setupAgent(o)))
+agent.command('manifest').description('Print an agent-legible view of the project environments').option('--json').action(guard((o) => manifest(o)))
+const agentPol = agent.command('policy').description('Project agent access policy')
 agentPol.command('get').option('--json').action(guard((o) => agentPolicy.get(o)))
 agentPol.command('set <mode>').description('full-access | read-only | branch-specific (resets rules; customize comes from `rule set`)')
   .option('--json').action(guard((mode, o) => agentPolicy.set(mode, o)))
@@ -437,6 +454,25 @@ agentPol.command('rule').command('set <action> <decision>').description('Set an 
   .option('--json').action(guard((action, decision, o) => agentPolicy.rule(action, decision, o)))
 agentPol.command('revoke-sessions').description('Revoke ALL CLI agent sessions for this project')
   .option('--json').action(guard((o) => agentPolicy.revoke(o)))
+const ap = agent.command('approvals').description('Governance approvals (HITL)')
+ap.command('list').option('--status <s>', 'pending|granted|denied|consumed').option('--json').action(guard((o) => govern.approvalsList(o)))
+ap.command('approve <id>').option('--json').action(guard((id, o) => govern.approvalsApprove(id, o)))
+ap.command('deny <id>').option('--json').action(guard((id, o) => govern.approvalsDeny(id, o)))
+const ob = agent.command('observe').description('Local credential-audit hook')
+ob.command('install').description('Install the PostToolUse hook into this project').action(guard(() => observe.observeInstall()))
+ob.command('uninstall').action(guard(() => observe.observeUninstall()))
+ob.command('report').description('Render the local credential audit').option('--json').action(guard((o) => observe.observeReport(o)))
+ob.command('sync').description('Upload findings into the project timeline').action(guard(() => observe.observeSync()))
+agent.command('events').description('Show the audit + agent-event timeline').option('--branch <b>').option('--limit <n>').option('--json').action(guard((o) => govern.events(o)))
+
+// ---- config (this machine's CLI configuration) ----
+const cfg = program.command('config').description('CLI configuration: register the remote MCP server with coding agents, list regions, auto-update')
+cfg.command('install-mcp').description('Register the remote MCP server with coding agents (default: Claude Code + all detected)')
+  .option('--agent <slug>', 'one agent: claude-code, cursor, codex, opencode, copilot, factory-droid')
+  .option('--mcp-token', 'claude-code only: minted insta_ API token instead of OAuth (requires login and token-creation permission)')
+  .action(guard((o) => mcp.mcpInstall(o)))
+cfg.command('regions').description('List regions available for postgres/compute services').option('--json').action(guard((o) => regions.regionsList(o)))
+cfg.command('autoupdate [mode]').description('Show or set auto-update: on | off (default: on while pre-1.0)').action(guard((mode) => selfUpdate.autoupdate(mode)))
 
 // ---- feedback (agent + human hurdle reports → the InstaCloud team) ----
 program.command('feedback')
@@ -459,8 +495,6 @@ program.command('feedback')
 // ---- self-update ----
 program.command('upgrade').description('Update the insta CLI to the latest release (binary or npm install)')
   .action(guard(() => selfUpdate.upgrade(cliVersion())))
-program.command('autoupdate [mode]').description('Show or set auto-update: on | off (default: on while pre-1.0)')
-  .action(guard((mode) => selfUpdate.autoupdate(mode)))
 program.command('__update-check', { hidden: true }).action(guard(() => selfUpdate.backgroundCheck(cliVersion())))
 // The ssh_config renewal hook. Hidden, and named with the `__` prefix that
 // trackCommand skips, because OpenSSH runs it while PARSING the config on EVERY
@@ -468,6 +502,22 @@ program.command('__update-check', { hidden: true }).action(guard(() => selfUpdat
 // critical path of every ordinary ssh.
 program.command('__ssh-ensure-cert <alias>', { hidden: true })
   .action(guard((alias: string) => computeCmd.ensureCertForAlias(alias)))
+
+// `--api-url` reaches every command, hidden from each command's own help (the root documents it
+// once). It must be declared per command: positional-options mode matches the root's options only
+// BEFORE the subcommand name, so `insta compute status --api-url X` is legal only if `status` knows
+// the flag. `login` keeps its own copy (that one persists the URL). `compute exec` is skipped:
+// splitExecArgs reads argv ahead of commander and does not know this option takes a value — for
+// exec, pass it at the root: `insta --api-url X compute exec …` (execCommandIndex skips it there).
+function addApiUrlEverywhere(cmd: Command): void {
+  for (const sub of cmd.commands) {
+    if (!(cmd.name() === 'compute' && sub.name() === 'exec') && !sub.options.some((o) => o.long === '--api-url')) {
+      sub.addOption(new Option('--api-url <url>').hideHelp())
+    }
+    addApiUrlEverywhere(sub)
+  }
+}
+addApiUrlEverywhere(program)
 
 selfUpdate.maybeUpdate(cliVersion(), process.argv)
 program.parseAsync(computeArgv)

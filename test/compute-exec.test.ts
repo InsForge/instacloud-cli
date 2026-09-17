@@ -42,6 +42,13 @@ describe('splitExecArgs', () => {
     expect(splitExecArgs(A('app', 'echo', 'hi'), 'linux')).toEqual({ argv: A('app', 'echo', 'hi') })
   })
 
+  it('finds `compute exec` behind a root --api-url (with a value, or =value)', () => {
+    expect(splitExecArgs(['node', 'insta', '--api-url', 'http://x', 'compute', 'exec', 'api', '--', 'ls'], 'linux'))
+      .toEqual({ argv: ['node', 'insta', '--api-url', 'http://x', 'compute', 'exec', 'api'], command: ['ls'] })
+    expect(splitExecArgs(['node', 'insta', '--api-url=http://x', '--agent', 'compute', 'exec', '--', 'ls'], 'linux'))
+      .toEqual({ argv: ['node', 'insta', '--api-url=http://x', '--agent', 'compute', 'exec'], command: ['ls'] })
+  })
+
   // ---- the shim ate the separator (win32 only) ----
   //
   // Everything from the first non-option token is PAYLOAD and is never interpreted, so the remote
