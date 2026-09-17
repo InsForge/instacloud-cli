@@ -190,18 +190,24 @@ export function renderConfigBlock(o: ConfigBlockOpts): string {
     // second terminal onto ONE connection; without it a single developer can
     // reach the per-service session cap in an afternoon.
     //
-    // OMITTED ON WINDOWS, where it is not an optimisation but a broken config.
+    // The socket is keyed on %C -- a hash of (local host, remote host, port,
+    // user) -- not %r@%h:%p. A ControlPath is a Unix-domain socket, whose path
+    // is capped at 104 bytes on macOS (108 on Linux), and the route-key user
+    // plus the regional gateway hostname sailed past that: a real prod alias
+    // rendered a 109-byte path and every `ssh` died on `ControlPath too long`.
+    // %C is a fixed 40 hex chars however long the host and user grow, so the
+    // path can no longer overflow; it also drops the `:` the old token carried.
+    //
+    // OMITTED ON WINDOWS, where it is not an optimisation but a broken config:
     // Win32-OpenSSH does not implement ControlMaster (PowerShell/Win32-OpenSSH
-    // #1328, #405) and fails the connection rather than ignoring the directive,
-    // and the ControlPath itself contains a `:` before %p, which is not a legal
-    // character in a Windows filename. Every alias would be unusable on a
-    // platform this repo runs CI for. The effective-config tests need a real
-    // `ssh` and skip on Windows, so this branch is asserted on the rendered
-    // text instead.
+    // #1328, #405) and FAILS the connection rather than ignoring the directive,
+    // so every alias would be unusable on a platform this repo runs CI for. The
+    // effective-config tests need a real `ssh` and skip on Windows, so this
+    // branch is asserted on the rendered text instead.
     if ((o.platform ?? process.platform) !== 'win32') {
       lines.push(
         '  ControlMaster auto',
-        '  ControlPath ~/.insta/ssh/cm-%r@%h:%p',
+        '  ControlPath ~/.insta/ssh/cm-%C',
         '  ControlPersist 10m',
       )
     }
