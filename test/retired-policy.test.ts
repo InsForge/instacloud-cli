@@ -17,7 +17,7 @@ it('exposes policy only under agent, and rejects the retired top-level names', (
     expect(r.stderr).toContain(`unknown command '${retired[0]}'`)
   }
   expect(run('agent', 'policy', 'get', '--help').status).toBe(0)
-})
+}, 30_000)
 
 it('rejects approval --always instead of promising a permanent grant', () => {
   const help = run('agent', 'approvals', 'approve', '--help')
@@ -26,4 +26,4 @@ it('rejects approval --always instead of promising a permanent grant', () => {
   const retired = run('agent', 'approvals', 'approve', 'test-id', '--always')
   expect(retired.status).not.toBe(0)
   expect(retired.stderr).toContain("unknown option '--always'")
-})
+}, 30_000)

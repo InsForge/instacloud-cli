@@ -72,7 +72,7 @@ const program = new Command()
 program.enablePositionalOptions()
 program.name('insta').description('InstaCloud CLI — manage projects, branches, services, deploys').version(cliVersion())
 program.option('--agent', 'run as an agent with a verified project session and project agent policy')
-program.option('--api-url <url>', 'control-plane API base URL for this invocation only — beats INSTA_API_URL, INSTA_ENV and the stored login; a URL for another deployment runs logged-out (internal debugging). Accepted before or after any subcommand')
+program.option('--api-url <url>', 'control-plane API base URL for this invocation only — beats INSTA_API_URL, INSTA_ENV and the stored login; a URL for another deployment runs logged-out (internal debugging). Accepted before or after any subcommand (except `compute exec`: pass it before `compute` there)')
 // The runtime --api-url must be in place before any action loads config (ApiClient.load →
 // readGlobal). optsWithGlobals merges the root's, a group's and the leaf's copy of the flag
 // (addApiUrlEverywhere below), so it is honoured wherever it was typed; typed twice, the outermost wins.
@@ -156,6 +156,9 @@ const sec = program.command('secrets').description('Fetch the credential bundle 
   .option('--service <type/name>', "read one compute service's own slice of the bundle instead of the branch-wide merge, e.g. compute/api")
   .option('-o, --output <file>', 'output file (default .env)').option('--print', 'print instead of writing').option('--json')
   .action(guard((o) => secretsCmd.secrets(o)))
+// commander 12 defaults allowExcessArguments to true, so a mistyped/retired subcommand (e.g.
+// `secrets lst`) would otherwise run this group's own action instead of failing.
+sec.allowExcessArguments(false)
 sec.command('list').description('List secret names, grouped by service').option('--branch <branch>').option('--json').action(guard((o) => secretsCmd.secretsList(o)))
 sec.command('set <name> [value]').description('Set a user secret (project-wide; value from stdin if omitted)')
   .option('--branch <branch>', 'scope to one branch').option('--service <type/name>', 'bind to a branch service (implies current branch)')
@@ -424,6 +427,9 @@ tpl.command('deploy <code-or-dir-or-url>').description('Deploy a template onto a
 const bill = program.command('billing').description('Billing: current cycle overview (bare), subscribe to a tier, Stripe portal, usage by dimension')
   .option('--org <id>', 'target org (default: linked project\'s org)').option('--json')
   .action(guard((o) => billing(o)))
+// commander 12 defaults allowExcessArguments to true, so a mistyped/retired subcommand (e.g.
+// `billing upgrade pro`) would otherwise silently run the overview action instead of failing.
+bill.allowExcessArguments(false)
 bill.command('subscribe <tier>').description('Subscribe the org to a paid tier (pro|team) via Stripe Checkout')
   .option('--org <id>').option('--no-open', 'print the URL instead of opening a browser').option('--json')
   .action(guard((tier, o) => billingUpgrade(tier, o)))

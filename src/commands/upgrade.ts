@@ -20,7 +20,7 @@ import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { readGlobal, writeGlobal } from '../config.js'
+import { readGlobal, readPersistedGlobal, writeGlobal } from '../config.js'
 import { resolveSpawnable } from '../spawn.js'
 import { info } from '../util.js'
 
@@ -368,12 +368,18 @@ export async function backgroundCheck(current: string, deps: CheckDeps = {}): Pr
 
 // `insta config autoupdate [on|off]` — toggle / show the auto-update preference (default: on).
 export async function autoupdate(mode?: string): Promise<void> {
-  const cfg = await readGlobal()
   if (mode === 'on' || mode === 'off') {
+    // Read-modify-write must use the PERSISTED config (like `env use` does), not readGlobal()'s
+    // runtime view: readGlobal() folds in a --api-url/INSTA_API_URL override and, when that override
+    // points at a different deployment, scrubs the stored session. Writing that view back to disk
+    // here would silently re-point ~/.insta/config.json at the override and log the user out just
+    // from toggling autoupdate.
+    const cfg = await readPersistedGlobal()
     await writeGlobal({ ...cfg, autoUpdate: mode === 'on' })
     info(`autoupdate ${mode}`)
     return
   }
+  const cfg = await readGlobal()
   const enabled = cfg.autoUpdate !== false && !process.env.INSTA_NO_AUTOUPDATE
   info(`autoupdate: ${enabled ? 'on' : 'off'} (default on while the CLI is pre-1.0 — \`insta config autoupdate off\` to disable)`)
 }

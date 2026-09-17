@@ -670,7 +670,12 @@ export function volumeLines(name: string, volume: { sizeGib: number; mountPath: 
 // disk was already extended); the wire size is authoritative in both cases.
 export function volumeWriteLine(name: string, body: { volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }; attached?: boolean }, type: ManagedType = 'compute'): string {
   if (body.attached) {
-    return `${type} ${name}: volume ${body.volume.sizeGib}Gi attached — mounts at ${body.volume.mountPath} on the next deploy  (plan max ${body.cap.volumeGib}Gi)`
+    // Only a compute service has a deploy step for the mount to wait on; a managed database has
+    // no deploy, so its disk is simply mounted.
+    const mounts = type === 'compute'
+      ? `mounts at ${body.volume.mountPath} on the next deploy`
+      : `mounts at ${body.volume.mountPath}`
+    return `${type} ${name}: volume ${body.volume.sizeGib}Gi attached — ${mounts}  (plan max ${body.cap.volumeGib}Gi)`
   }
   return `${type} ${name}: volume grown to ${body.volume.sizeGib}Gi at ${body.volume.mountPath}  (plan max ${body.cap.volumeGib}Gi)`
 }
@@ -757,7 +762,7 @@ export async function serviceLimits(type: ManagedType, serviceName: string | und
     const r = await api.request('GET', `/projects/${p.projectId}/services/${svc.id}/limits`)
     if (opts.json) return printJson(r)
     info(`${type} ${svc.name}: ceiling ${r.limits.cpu} vCPU / ${fmtMb(r.limits.memoryMb)}  (plan max ${r.cap.cpu} vCPU / ${fmtMb(r.cap.memoryMb)})`)
-    info('  billing is actual usage — the ceiling caps what the app may burn, it is not a price')
+    info(`  billing is actual usage — the ceiling caps what the ${type === 'compute' ? 'app' : 'database'} may burn, it is not a price`)
     return
   }
   if (!opts.memory) throw new Error('--memory is required when setting limits (cpu is derived from it; pass --cpu only to override)')

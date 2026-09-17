@@ -60,4 +60,22 @@ describe('managedStatus', () => {
     await expect(managedStatus('redis', 'db', {}, d)).rejects.toThrow('redis service not found: db')
     await expect(managedStatus('mongodb', undefined, {}, d)).rejects.toThrow(/no mongodb service/)
   })
+  it('falls back to unknown when runtime-health omits the resolved service (not just via statusLine)', async () => {
+    const calls: string[] = []
+    const healthMissingR1 = { services: health.services.filter((e) => e.serviceId !== 'r1') }
+    const api = {
+      request: async (_m: string, path: string) => {
+        calls.push(path)
+        return path.includes('/runtime-health') ? healthMissingR1 : { services }
+      },
+    }
+    const d = { api, project: { projectId: 'p1', branch: 'main' } } as unknown as ManagedDeps
+
+    await managedStatus('redis', undefined, {}, d)
+    expect(out()).toContain('redis cache: unknown  (the runtime-health read did not include this service)')
+
+    stdout.length = 0
+    await managedStatus('redis', undefined, { json: true }, d)
+    expect(JSON.parse(out())).toEqual({ serviceId: 'r1', status: 'unknown', machines: 0, failing: 0 })
+  })
 })

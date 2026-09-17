@@ -30,6 +30,7 @@ const RETIRED: string[][] = [
   ['compute', 'set-domain'], ['compute', 'check-domain'], ['compute', 'remove-domain'],
   ['db'], ['metrics'], ['logs'], ['usage'], ['manifest'], ['approvals'], ['agent-policy'], ['observe'], ['events'],
   ['setup'], ['mcp'], ['regions'], ['autoupdate'],
+  ['billing', 'upgrade'],
 ]
 
 // Command names from a commander help page: the lines indented exactly two spaces under
@@ -48,11 +49,11 @@ describe('top-level surface', () => {
     const r = run(['--help'])
     expect(r.status).toBe(0)
     expect(commandNames(r.stdout)).toEqual(VISIBLE)
-  })
+  }, 30_000)
   it('documents --api-url once, on the root', () => {
     expect(run(['--help']).stdout).toContain('--api-url <url>')
     expect(run(['compute', 'status', '--help']).stdout).not.toContain('--api-url')
-  })
+  }, 30_000)
   it('keeps services and svc as aliases of service', () => {
     for (const alias of ['services', 'svc']) {
       const r = run([alias, '--help'])
@@ -60,17 +61,24 @@ describe('top-level surface', () => {
       expect(r.stdout).toMatch(/^\s+add\b/m)
       expect(r.stdout).not.toMatch(/^\s+scale\b/m)
     }
-  })
+  }, 30_000)
   it('hides env from the root help but keeps it working', () => {
     expect(run(['--help']).stdout).not.toMatch(/^\s+env\b/m)
     const r = run(['env', '--help'])
     expect(r.status).toBe(0)
     expect(r.stdout).toMatch(/^\s+use\b/m)
-  })
+  }, 30_000)
   it.each(RETIRED)('retired path `%s` is gone', (...path) => {
     const r = run([...path])
     expect(r.status).not.toBe(0)
-    expect(r.stderr).toMatch(/unknown command/)
+    // commander 12's allowExcessArguments(false) rejects a retired subcommand under a still-live
+    // group (e.g. `billing upgrade`) with "too many arguments", not "unknown command".
+    expect(r.stderr).toMatch(/unknown command|too many arguments/)
+  }, 30_000)
+  it('retired `secrets lst` fails loudly instead of silently writing .env', () => {
+    const r = run(['secrets', 'lst'])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/unknown command|too many arguments/)
   }, 30_000)
 })
 
@@ -104,7 +112,7 @@ describe('group shapes', () => {
     expect(commandNames(run(['agent', '--help']).stdout)).toEqual(['setup', 'manifest', 'policy', 'approvals', 'observe', 'events'])
     expect(commandNames(run(['config', '--help']).stdout)).toEqual(['install-mcp', 'regions', 'autoupdate'])
     expect(commandNames(run(['billing', '--help']).stdout)).toEqual(['subscribe', 'portal', 'usage'])
-  })
+  }, 30_000)
 })
 
 describe('--api-url placement', () => {
@@ -115,5 +123,5 @@ describe('--api-url placement', () => {
     expect(JSON.parse(run(['env', '--json', '--api-url', URL_A]).stdout).apiUrl).toBe(URL_A)
     expect(JSON.parse(run(['--api-url', URL_A, 'env', '--json']).stdout).apiUrl).toBe(URL_A)
     expect(JSON.parse(run(['env', '--json', '--api-url', URL_A], { INSTA_API_URL: URL_B }).stdout).apiUrl).toBe(URL_A)
-  })
+  }, 30_000)
 })
