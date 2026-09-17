@@ -1445,6 +1445,40 @@ d('an automatic renewal moves the alias with the certificate', () => {
     expect(knownHosts(), 'the new host was not anchored').toContain(`@cert-authority ${MOVED} ${caRecord(CA)}`)
   })
 
+  it('rewrites the stanza and the store when only the port changes', async () => {
+    // The plane's answer wins on every field it answers. `moved` is the
+    // host/user half; a port change has no CA to wait for and must still land
+    // in the stanza, or the alias keeps dialling yesterday's port with today's
+    // certificate.
+    await anInstalledAlias()
+    await renew(() => ({ ...sameResponse, port: 22 }))
+    const lines = readFileSync(configPath(), 'utf8').split('\n')
+    expect(lines, 'the stanza kept the old port').toContain('  Port 22')
+    expect(lines).not.toContain('  Port 2222')
+    expect(readAliasStore()['api.insta']).toMatchObject({ host: HOST, username: 'u-svc-1', port: 22 })
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe(MOVED_CERT + '\n')
+  })
+
+  it('repairs a stanza written before the Port line existed, even while the certificate is fresh', async () => {
+    // An alias set up by the previous CLI has no Port line and no port in its
+    // record, so it dials :22 -- closed -- on every connection. Its certificate
+    // is fresh, so nothing is due: the hook has to repair the stanza on its own,
+    // from the store, without minting.
+    installTheKeyCertWasIssuedFor()
+    const { deps: d } = deps({ installCA: undefined, installConfig: undefined })
+    await computeSSH('api', { setup: true }, d)
+    const cfgPath = configPath()
+    writeFileSync(cfgPath, readFileSync(cfgPath, 'utf8').split('\n').filter((l) => l !== '  Port 2222').join('\n'))
+    const { port: _dropped, ...legacy } = readAliasStore()['api.insta']!
+    writeAliasStore({ 'api.insta': legacy })
+    const certBefore = readFileSync(instaCertPath('api.insta'), 'utf8')
+
+    await renew(() => { throw new Error('the hook minted for a certificate that was not due') })
+
+    expect(readFileSync(cfgPath, 'utf8').split('\n'), 'the legacy stanza was not repaired').toContain('  Port 2222')
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8'), 'the fresh certificate was replaced').toBe(certBefore)
+  })
+
   it('does not touch the config when nothing in it changed', async () => {
     // OpenSSH is reading that file while the hook runs, and on Windows a
     // rename over an open file fails -- so a renewal that re-rendered the

@@ -760,8 +760,7 @@ import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
-  aliasFor, certifiesPublicKey, hasOwnedBlock, isSafeAlias, isSafeConfigValue, isSafeSSHHost, isSafeSSHUsername, isSafeTimestamp, isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, planCertAuthority, renderConfigBlock, revertCertAuthority, upsertConfigBlock, type HostEntry,
-} from './ssh-config.js'
+  aliasFor, certifiesPublicKey, hasOwnedBlock, isSafeAlias, isSafeConfigValue, isSafeSSHHost, isSafeSSHUsername, isSafeTimestamp, isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, planCertAuthority, renderConfigBlock, revertCertAuthority, upsertConfigBlock, type HostEntry, ownedBlock } from './ssh-config.js'
 
 /** Where this CLI keeps its own SSH material. Deliberately NOT ~/.ssh: we never
  *  touch a key the user already had, and a dedicated key pairs with
@@ -1335,6 +1334,35 @@ function withLockedFile<T>(
   }
 }
 
+/** The block ssh_config SHOULD carry for this store, rendered the one way. */
+function renderInstalledBlock(store: AliasStore): string {
+  return renderConfigBlock({
+    entries: hostEntries(store),
+    identityFile: instaKeyPath(),
+    knownHostsFile: userKnownHostsPath(),
+    ensureCertCommand: ENSURE_CERT_COMMAND,
+  })
+}
+
+/** Whether the installed block differs from what the store renders -- the ONE
+ *  predicate for "rewrite ssh_config". A host move, a port the plane changed,
+ *  and a stanza written before the Port line existed all show up here; a
+ *  renewal whose response changed nothing does not, which matters because
+ *  OpenSSH is reading the file while the hook runs and a rename over an open
+ *  file fails on Windows. No installed block = nothing to repair (setup owns
+ *  the first write). */
+function configBlockStale(store: AliasStore): boolean {
+  let existing: string
+  try {
+    existing = readFileSync(join(homedir(), '.ssh', 'config'), 'utf8')
+  } catch {
+    return false
+  }
+  const installed = ownedBlock(existing)
+  if (installed === undefined) return false
+  return installed.replace(/\n+$/, '') !== renderInstalledBlock(store).replace(/\n+$/, '')
+}
+
 function installConfigBlock(store: AliasStore): Undo {
   const cfg = join(homedir(), '.ssh', 'config')
   mkdirSync(dirname(cfg), { recursive: true, mode: 0o700 })
@@ -1346,12 +1374,7 @@ function installConfigBlock(store: AliasStore): Undo {
   // target says.
   const existedBefore = pathExists(cfg)
   const existing = readUserText(cfg)
-  const block = renderConfigBlock({
-    entries: hostEntries(store),
-    identityFile: instaKeyPath(),
-    knownHostsFile: userKnownHostsPath(),
-    ensureCertCommand: ENSURE_CERT_COMMAND,
-  })
+  const block = renderInstalledBlock(store)
   // Backed up: this is the file that decides whether the user can ssh anywhere
   // at all, and our block goes at the TOP of it.
   writeFileAtomicSync(cfg, upsertConfigBlock(existing, block), { mode: 0o600, backup: true })
@@ -1458,6 +1481,19 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
   let release: (() => void) | undefined
   try {
     if (!isSafeAlias(alias)) return
+    // Repair BEFORE the renewal gate, because the stanza can lag the store
+    // with no certificate due: an alias set up before the Port line existed
+    // dials :22 on every connection, and waiting for its certificate to age
+    // would leave it failing for up to the certificate's lifetime. The
+    // predicate is content drift, so the common case -- an up-to-date stanza --
+    // is one file read and a string compare, with no lock taken; only a stale
+    // stanza takes the alias-store lock, re-checks under it and rewrites.
+    if (configBlockStale(readAliasStore())) {
+      withAliasStoreLock(() => {
+        const store = readAliasStore()
+        if (store[alias] && configBlockStale(store)) installConfigBlock(store)
+      }, { waitMs: KNOWN_HOSTS_LOCK_WAIT_MS })
+    }
     if (!certNeedsRenewal(instaCertPath(alias))) return
 
     // An IDE opens several connections at once and `scp` adds more, so the
@@ -1517,9 +1553,16 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
         const held = before[alias]
         if (!held || held.projectId !== rec.projectId || held.serviceId !== rec.serviceId) return
         if (!certNeedsRenewal(instaCertPath(alias))) return
+        // The plane's answer wins, on every field it answers. `moved` is the
+        // host/user half and keeps its CA requirement below (a new host needs
+        // an anchor); the port has no such requirement but is part of the
+        // record all the same, and a legacy record without one gains it here
+        // so the stanza can carry the line.
+        const port = out.port ?? held.port ?? DEFAULT_SSH_PORT
         const moved = held.host !== out.host || held.username !== out.username
-        const store: AliasStore = moved
-          ? { ...before, [alias]: { ...held, host: out.host, username: out.username, port: out.port ?? held.port ?? DEFAULT_SSH_PORT } }
+        const recordChanged = moved || held.port !== port
+        const store: AliasStore = recordChanged
+          ? { ...before, [alias]: { ...held, host: out.host, username: out.username, port } }
           : before
         const installed = configBlockInstalled()
         const ca = out.caPublicKey
@@ -1547,9 +1590,11 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
         // host into a renewal that gives up -- one failed renewal and a
         // `--setup` to repair it, never a half-moved alias.
         const steps: Array<() => Undo | void> = []
-        if (moved) steps.push(() => { const back = snapshotForUndo(instaAliasStorePath()); writeAliasStore(store); return back })
+        if (recordChanged) steps.push(() => { const back = snapshotForUndo(instaAliasStorePath()); writeAliasStore(store); return back })
         if (ca !== undefined) steps.push(() => installCertAuthority(hostPatternFor(out.host), ca))
-        if (moved && installed) steps.push(() => installConfigBlock(store))
+        // Drift, not "moved": a changed port rewrites the stanza; an unchanged
+        // response leaves the file alone (see configBlockStale).
+        if (installed && configBlockStale(store)) steps.push(() => installConfigBlock(store))
         steps.push(() => out.staged.commit())
 
         // ONE section from reading the anchor to committing the certificate
@@ -1908,7 +1953,7 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
 
   if (opts.json) return printJson({ alias, host: out.host, username: out.username, port: out.port ?? DEFAULT_SSH_PORT, expiresAt: out.expiresAt, configured: installed })
   for (const line of sshAdvice({
-    alias, host: out.host, username: out.username, expiresAt: out.expiresAt, serviceName: svc.name,
+    alias, host: out.host, username: out.username, port: out.port ?? DEFAULT_SSH_PORT, expiresAt: out.expiresAt, serviceName: svc.name,
     configured: installed, identityFile: instaKeyPath(), certificateFile: instaCertPath(alias),
   })) emit(line)
 }
@@ -1924,11 +1969,11 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
  *  skipped step.
  */
 export function sshAdvice(r: {
-  alias: string; host: string; username: string; expiresAt: string; serviceName: string; configured: boolean
+  alias: string; host: string; username: string; port: number; expiresAt: string; serviceName: string; configured: boolean
   identityFile: string; certificateFile: string
 }): string[] {
   const head = r.configured
-    ? [`ssh ${r.alias}  →  ${r.username}@${r.host}`]
+    ? [`ssh ${r.alias}  →  ${r.username}@${r.host} (port ${r.port})`]
     : [
         // Every option here is load-bearing. The key lives at
         // ~/.insta/ssh/id_ed25519 and the certificate at <alias>-cert.pub;
@@ -1937,7 +1982,9 @@ export function sshAdvice(r: {
         // this command just issued -- it fails, having printed success.
         // IdentitiesOnly stops a loaded agent from spending the server's
         // MaxAuthTries on unrelated keys before ours is ever tried.
-        `ssh -i ${shQuote(r.identityFile)} -o CertificateFile=${shQuote(r.certificateFile)} -o IdentitiesOnly=yes ${shQuote(`${r.username}@${r.host}`)}`,
+        // -p is not optional: the gateway is on :2222 and :22 is closed, so a
+        // pasted command without it fails before the credential is ever tried.
+        `ssh -p ${r.port} -i ${shQuote(r.identityFile)} -o CertificateFile=${shQuote(r.certificateFile)} -o IdentitiesOnly=yes ${shQuote(`${r.username}@${r.host}`)}`,
         `  run \`insta compute ssh ${r.serviceName} --setup\` once for the shorter \`ssh ${r.alias}\`, automatic renewal, and scp/-L support`,
       ]
   return [...head, `  certificate valid until ${r.expiresAt}`]

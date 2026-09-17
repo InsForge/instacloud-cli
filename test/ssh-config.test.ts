@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import {
   renderConfigBlock, renderEnsureCertMatch, upsertConfigBlock, upsertCertAuthority,
   planCertAuthority, revertCertAuthority, certifiesPublicKey, parseCAPublicKey, hasOwnedBlock,
-  aliasFor, isSafeAlias, isSafeConfigValue, quoteConfigPath, BLOCK_BEGIN, BLOCK_END, CA_MARKER,
+  aliasFor, isSafeAlias, isSafeConfigValue, quoteConfigPath, BLOCK_BEGIN, BLOCK_END, CA_MARKER, ownedBlock,
 } from '../src/commands/ssh-config.js'
 
 const entry = (alias = 'api.insta', hostName = 'ssh.us-west-1.compute.example', user = 'svc-abc', port = 2222) => ({
@@ -25,7 +25,16 @@ const block = (entries = [entry()]) => renderConfigBlock({
 
 describe('the Port line', () => {
   it('writes the port the plane returned, whatever it is', () => {
-    expect(block([entry('api.insta', 'ssh.us-west-1.compute.example', 'svc-abc', 22)])).toContain('  Port 22')
+    // Whole-line, because `Port 22` is a substring of `Port 2222`: a renderer
+    // that ignored the plane and always wrote the default would pass a
+    // substring match -- exactly the regression this test exists to catch.
+    expect(block([entry('api.insta', 'ssh.us-west-1.compute.example', 'svc-abc', 22)]).split('\n')).toContain('  Port 22')
+  })
+  it('exposes the installed block, marker to marker, for drift comparison', () => {
+    const b = block()
+    expect(ownedBlock(upsertConfigBlock('Host *\n  User root\n', b))).toBe(b.replace(/\n+$/, ''))
+    expect(ownedBlock('Host *\n  User root\n')).toBeUndefined()
+    expect(ownedBlock(`${BLOCK_BEGIN}\nHost x\n`), 'an unterminated block must not be taken for one').toBeUndefined()
   })
   for (const bad of [0, -1, 70000, 22.5, NaN, undefined as unknown as number]) {
     it(`refuses to write an unusable port (${String(bad)})`, () => {
@@ -69,7 +78,7 @@ describe('ssh_config block', () => {
     expect(b).toContain('  User svc-abc')
     // WRITTEN, never defaulted: the gateway is on :2222 and an alias with no
     // Port line dialled the closed :22 with a perfectly good certificate.
-    expect(b).toContain('  Port 2222')
+    expect(b.split('\n')).toContain('  Port 2222')
   })
 
   // A certificate is issued for ONE service. A single shared cert file would
