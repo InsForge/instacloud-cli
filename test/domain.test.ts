@@ -9,7 +9,7 @@ const services = [
 const quote = { domainName: 'myapp.com', tld: 'com', purchasable: true, premium: false, priceCents: 1559, renewalPriceCents: 2399, currency: 'usd' }
 const order = { id: 'o1', domainName: 'myapp.com', years: 1, status: 'pending_payment', priceCents: 1559, renewalPriceCents: 2399, currency: 'usd', service: 'web', branch: 'main', checkoutUrl: 'https://checkout.test/o1', createdAt: 't', paidAt: null, registeredAt: null, failedReason: null }
 
-type Call = { method: string; path: string; body?: unknown }
+type Call = { method: string; path: string; body?: unknown; scope?: unknown }
 function deps(answers: Record<string, unknown> = {}, raw: { status: number; body: unknown } = { status: 200, body: { order, quote } }) {
   const calls: Call[] = []
   const api = {
@@ -20,7 +20,7 @@ function deps(answers: Record<string, unknown> = {}, raw: { status: number; body
       if (!hit) throw new Error(`unexpected ${method} ${path}`)
       return hit[1]
     },
-    rawRequest: async (method: string, path: string, body?: unknown) => { calls.push({ method, path, body }); return raw },
+    rawRequest: async (method: string, path: string, body?: unknown, scope?: unknown) => { calls.push({ method, path, body, scope }); return raw },
   }
   return { deps: { api, project: { projectId: 'p1', orgId: 'org1', branch: 'main' } } as unknown as DomainDeps, calls }
 }
@@ -67,9 +67,11 @@ describe('domain buy', () => {
     const { deps: d, calls } = deps()
     await domainBuy('myapp.com', { years: '2', open: false }, d)
     expect(calls).toHaveLength(1)
-    expect(calls[0]).toMatchObject({ method: 'POST', path: '/projects/p1/domains/orders' })
+    expect(calls[0]).toMatchObject({ method: 'POST', path: '/orgs/org1/domains/orders' })
     // toEqual, not toMatchObject: the point of this change is the fields that are NOT sent.
     expect(calls[0]!.body).toEqual({ domainName: 'myapp.com', years: 2 })
+    // The org route still signs for a project in agent mode; without it the platform reads no policy.
+    expect(calls[0]!.scope).toEqual({ projectId: 'p1' })
     expect(out()).toContain('myapp.com — $15.59 for 1 year, then $23.99/yr')
     expect(out()).toContain('https://checkout.test/o1')
     expect(out()).toContain('then attach it: insta domain attach myapp.com')
@@ -95,7 +97,7 @@ describe('domain buy', () => {
 })
 
 describe('domain attach', () => {
-  const inventory = { '/projects/p1/domains': { items: [{ domainName: 'myapp.com', status: 'registered', hostnames: [], expiresAt: null, autorenew: true }] } }
+  const inventory = { '/orgs/org1/domains': { items: [{ domainName: 'myapp.com', status: 'registered', hostnames: [], expiresAt: null, autorenew: true }] } }
   it('a bought name binds it and its www', async () => {
     const { deps: d, calls } = deps(inventory, { status: 200, body: { domainName: 'myapp.com', status: 'registered', hostnames: [{ hostname: 'myapp.com', state: 'pending', service: 'web' }, { hostname: 'www.myapp.com', state: 'pending', service: 'web' }] } })
     await domainAttach('myapp.com', { group: 'web' }, d)
@@ -120,7 +122,7 @@ describe('domain attach', () => {
   })
   // `buy` says to run this next; before the registrar answers the name is an order, and ours.
   it('a bought name still registering is refused as an order, not as someone else\'s domain', async () => {
-    const { deps: d, calls } = deps({ '/domains/orders': { items: [{ ...order, status: 'registering' }] }, '/projects/p1/domains': { items: [] } })
+    const { deps: d, calls } = deps({ '/domains/orders': { items: [{ ...order, status: 'registering' }] }, '/orgs/org1/domains': { items: [] } })
     await expect(domainAttach('MyApp.com', { group: 'web' }, d)).rejects.toThrow('exit 1')
     expect(stderr.join('')).toContain('myapp.com is not registered yet — its order is registering: insta domain status myapp.com')
     expect(calls.map((c) => c.method)).toEqual(['GET', 'GET'])
@@ -143,7 +145,7 @@ describe('domain list / status', () => {
       hostnames: [{ hostname: 'api.sub.com', state: 'failed', service: 'api', reason: 'dns publish failed' }] }
     const both = { domainName: 'both.com', status: 'attach_failed', expiresAt: null, autorenew: true,
       hostnames: [{ hostname: 'both.com', state: 'failed', service: 'web' }, { hostname: 'www.both.com', state: 'failed', service: 'web' }] }
-    const { deps: d } = deps({ '/projects/p1/domains': { items: [purchased, empty, moving, sub, both] } })
+    const { deps: d } = deps({ '/orgs/org1/domains': { items: [purchased, empty, moving, sub, both] } })
     await domainList({}, d)
     expect(out()).toContain('myapp.com  attaching  (expires 2027-09-10, auto-renews)')
     expect(out()).toContain('api.myapp.com  active → api')
@@ -158,19 +160,28 @@ describe('domain list / status', () => {
     expect(out()).toContain('nothing serving — insta domain attach both.com\n')
   })
   it('status shows the domain once it exists, else the order', async () => {
-    const { deps: d } = deps({ '/domains/orders': { items: [{ ...order, status: 'attaching' }] }, '/projects/p1/domains': { items: [purchased] } })
+    const { deps: d } = deps({ '/domains/orders': { items: [{ ...order, status: 'attaching' }] }, '/orgs/org1/domains': { items: [purchased] } })
     await domainStatus('MyApp.com', {}, d)
     expect(out()).not.toContain('order o1')
     expect(out()).toContain('api.myapp.com  active → api')
   })
   it('a canceled checkout says how to order again', async () => {
-    const { deps: d } = deps({ '/domains/orders': { items: [{ ...order, status: 'canceled', failedReason: 'checkout expired before payment' }] }, '/projects/p1/domains': { items: [] } })
+    const { deps: d } = deps({ '/domains/orders': { items: [{ ...order, status: 'canceled', failedReason: 'checkout expired before payment' }] }, '/orgs/org1/domains': { items: [] } })
     await domainStatus('myapp.com', {}, d)
     expect(out()).toContain('canceled — checkout expired before payment')
     expect(out()).toContain('order again: insta domain buy myapp.com')
   })
+  // `buy` and `attach` take no --org: they act on the linked project's org, so naming another one
+  // would send the reader to a command that acts somewhere else.
+  it('drops the follow-up commands when --org names an org they do not act on', async () => {
+    const routes = { '/domains/orders': { items: [{ ...order, status: 'canceled', failedReason: 'x' }] }, '/orgs/org9/domains': { items: [] } }
+    const { deps: d } = deps(routes)
+    await domainStatus('myapp.com', { org: 'org9' }, d)
+    expect(out()).toContain('canceled')
+    expect(out()).not.toContain('insta domain buy')
+  })
   it('status of a name never bought here fails plainly, --json included', async () => {
-    const { deps: d } = deps({ '/domains/orders': { items: [] }, '/projects/p1/domains': { items: [] } })
+    const { deps: d } = deps({ '/domains/orders': { items: [] }, '/orgs/org1/domains': { items: [] } })
     await expect(domainStatus('other.com', { json: true }, d)).rejects.toThrow('exit 1')
     expect(stderr.join('')).toContain('other.com was not bought through this org')
     expect(out()).toBe('')

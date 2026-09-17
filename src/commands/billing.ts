@@ -7,7 +7,10 @@ type OrgOpt = { org?: string }
 // Resolve the target org: explicit --org, else the linked project's org.
 export async function resolveOrgId(opts: OrgOpt): Promise<string> {
   if (opts.org) return opts.org
-  return (await requireProject()).orgId
+  // `ProjectConfig.orgId` is typed string but INSTA_PROJECT_ID resolves a project with no org.
+  const orgId = (await requireProject()).orgId
+  if (!orgId) die('INSTA_PROJECT_ID names no organization — set INSTA_ORG_ID, or pass --org <id>')
+  return orgId
 }
 
 export type BillingOverview = {

@@ -45,7 +45,10 @@ export type BuyOpts = { years?: string; open?: boolean; json?: boolean }
 export async function domainBuy(name: string, opts: BuyOpts, deps?: DomainDeps): Promise<void> {
   const years = whole('--years', opts.years)
   const { api, project: p } = await domainDeps(deps)
-  const res = await api.rawRequest('POST', `/projects/${p.projectId}/domains/orders`, { domainName: name, years })
+  const orgId = p.orgId || die('this project link names no organization — set INSTA_ORG_ID')
+  // The org route still signs for a PROJECT in agent mode: `domain.purchase` is read there, and a
+  // bootstrap session names none, so the platform refuses it.
+  const res = await api.rawRequest('POST', `/orgs/${orgId}/domains/orders`, { domainName: name, years }, { projectId: p.projectId })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const { order } = res.body as { order: Order }
@@ -66,12 +69,13 @@ export function ownerOf<T extends { domainName: string }>(host: string, owned: T
  */
 export async function domainAttach(host: string, opts: { branch?: string; group?: string; json?: boolean }, deps?: DomainDeps): Promise<void> {
   const { api, project: p } = await domainDeps(deps)
+  const orgId = p.orgId || die('this project link names no organization — set INSTA_ORG_ID')
   const name = host.trim().toLowerCase()
-  const { items } = await api.request<{ items: Purchased[] }>('GET', `/projects/${p.projectId}/domains`)
+  const { items } = await api.request<{ items: Purchased[] }>('GET', `/orgs/${orgId}/domains`)
   const owner = ownerOf(name, items)
   if (!owner) {
     // The domains list holds registered names only; a bought name still registering is an order.
-    const { items: orders } = await api.request<{ items: Order[] }>('GET', `/projects/${p.projectId}/domains/orders`)
+    const { items: orders } = await api.request<{ items: Order[] }>('GET', `/orgs/${orgId}/domains/orders`)
     const o = ownerOf(name, orders)
     if (o) die(`${o.domainName} is not registered yet — its order is ${o.status}: insta domain status ${o.domainName}`)
     die(`no domain this org bought covers ${name} — for a domain you own elsewhere: insta compute set-domain ${name}`)
@@ -91,10 +95,10 @@ export async function domainAttach(host: string, opts: { branch?: string; group?
 
 // ---- list / status ----
 
-function domainLines(d: Purchased): string[] {
+function domainLines(d: Purchased, linked = true): string[] {
   const out = [`${d.domainName}  ${d.status}${d.expiresAt ? `  (expires ${d.expiresAt.slice(0, 10)}${d.autorenew ? ', auto-renews' : ''})` : ''}`]
   // Vacuously true for a domain with no hostnames, which is every domain until something attaches.
-  if (d.hostnames.every((h) => h.state === 'failed')) {
+  if (linked && d.hostnames.every((h) => h.state === 'failed')) {
     const names = d.hostnames.map((h) => h.hostname)
     // Attaching the bought name itself re-attaches its www.
     const retry = names.includes(d.domainName) ? names.filter((h) => h !== `www.${d.domainName}`) : names
@@ -105,33 +109,32 @@ function domainLines(d: Purchased): string[] {
   return out
 }
 
-function orderStatusLines(o: Order): string[] {
+function orderStatusLines(o: Order, linked = true): string[] {
   const out = [`order ${o.id}: ${o.domainName} — ${o.status}${o.failedReason ? ` — ${o.failedReason}` : ''}`]
-  if (o.status === 'canceled') out.push(`  the checkout closed without payment — order again: insta domain buy ${o.domainName}`)
+  if (linked && o.status === 'canceled') out.push(`  the checkout closed without payment — order again: insta domain buy ${o.domainName}`)
   return out
 }
 
-export async function domainList(opts: { json?: boolean }, deps?: DomainDeps): Promise<void> {
-  const { api, project: p } = await domainDeps(deps)
-  const r = await api.request<{ items: Purchased[] }>('GET', `/projects/${p.projectId}/domains`)
+export async function domainList(opts: { org?: string; json?: boolean }, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
+  const r = await api.request<{ items: Purchased[] }>('GET', `/orgs/${orgId}/domains`)
   if (opts.json) return printJson(r)
   if (!r.items.length) return info('no domains bought through InstaCloud in this org (search: insta domain search <keyword>)')
-  for (const d of r.items) for (const line of domainLines(d)) info(line)
+  for (const d of r.items) for (const line of domainLines(d, !opts.org)) info(line)
 }
 
-export async function domainStatus(name: string, opts: { json?: boolean }, deps?: DomainDeps): Promise<void> {
-  const { api, project: p } = await domainDeps(deps)
+export async function domainStatus(name: string, opts: { org?: string; json?: boolean }, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
   const host = name.trim().toLowerCase()
-  // Both are the ORG's; the project in the path is the scope the agent policy is read at.
   const [{ items: domains }, { items: orders }] = await Promise.all([
-    api.request<{ items: Purchased[] }>('GET', `/projects/${p.projectId}/domains`),
-    api.request<{ items: Order[] }>('GET', `/projects/${p.projectId}/domains/orders`),
+    api.request<{ items: Purchased[] }>('GET', `/orgs/${orgId}/domains`),
+    api.request<{ items: Order[] }>('GET', `/orgs/${orgId}/domains/orders`),
   ])
   const domain = domains.find((d) => d.domainName === host) ?? null
   const order = orders.find((o) => o.domainName === host) ?? null
   if (!domain && !order) die(`${host} was not bought through this org`)
   if (opts.json) return printJson({ domain, order })
-  for (const line of domain ? domainLines(domain) : orderStatusLines(order!)) info(line)
+  for (const line of domain ? domainLines(domain, !opts.org) : orderStatusLines(order!, !opts.org)) info(line)
 }
 
 // ---- records ----
