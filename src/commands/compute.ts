@@ -4,6 +4,11 @@ import { resolveComputeServiceId, resolveSoleService, q, parseVolumeGib } from '
 
 type Opts = { branch?: string; group?: string; json?: boolean }
 
+// The service types that share compute's settings verbs (limits / volume / always-on) on the
+// platform: a "compute or managed-database" service. `status` is compute-only on the platform and
+// stays under resolveComputeServiceId (see managed-db.ts for the managed-DB status read).
+export type ManagedType = 'compute' | 'redis' | 'mysql' | 'mongodb'
+
 // ---- custom domains (bring your own hostname) ----
 //
 // A compute service's region is fixed at creation (`insta services add compute --region`), and a
@@ -579,19 +584,20 @@ export async function computeExec(
 
 // ---- always-on (opt out of scale-to-zero; all plans; billing is actual usage either way) ----
 
-export async function computeAlwaysOn(mode: string, serviceName: string | undefined, opts: LifeOpts): Promise<void> {
+export async function serviceAlwaysOn(type: ManagedType, mode: string, serviceName: string | undefined, opts: LifeOpts): Promise<void> {
   if (mode !== 'on' && mode !== 'off') throw new Error('mode must be on|off')
   const api = await ApiClient.load()
   const p = await requireProject()
   const branch = opts.branch ?? p.branch
   const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
-  const id = resolveComputeServiceId(services, serviceName)
-  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${id}/always-on`, { enabled: mode === 'on' })
+  const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, type, serviceName)
+  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${svc.id}/always-on`, { enabled: mode === 'on' })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const on = res.body.service?.always_on
-  info(`compute ${res.body.service?.name ?? id}: always-on ${on ? 'ENABLED — machines stay warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle'}`)
+  info(`${type} ${res.body.service?.name ?? svc.name}: always-on ${on ? 'ENABLED — machines stay warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle'}`)
 }
+export const computeAlwaysOn = (mode: string, serviceName: string | undefined, opts: LifeOpts): Promise<void> => serviceAlwaysOn('compute', mode, serviceName, opts)
 
 // ---- limits (the resource ceiling; paid plans) ----
 
@@ -627,12 +633,14 @@ export function parseCpu(raw: string): number {
 
 // Render the volume read. Pure, exported for tests (mirrors serviceListLine). Every plan may view;
 // only growth is paid — that gate is the backend's to enforce, so nothing here pre-blocks.
-export function volumeLines(name: string, volume: { sizeGib: number; mountPath: string } | null, cap: { volumeGib: number }): string[] {
+export function volumeLines(name: string, volume: { sizeGib: number; mountPath: string } | null, cap: { volumeGib: number }, type: ManagedType = 'compute'): string[] {
   if (!volume) return [
-    `compute ${name}: no volume attached (attach one: \`insta compute volume ${name} --size <gi>\` — it mounts at /data on the next deploy)`,
+    type === 'compute'
+      ? `compute ${name}: no volume attached (attach one: \`insta compute volume ${name} --size <gi>\` — it mounts at /data on the next deploy)`
+      : `${type} ${name}: no volume attached (attach one: \`insta ${type} volume ${name} --size <gi>\` — it mounts at the image's data directory)`,
   ]
   return [
-    `compute ${name}: volume ${volume.sizeGib}Gi at ${volume.mountPath}  (plan max ${cap.volumeGib}Gi)`,
+    `${type} ${name}: volume ${volume.sizeGib}Gi at ${volume.mountPath}  (plan max ${cap.volumeGib}Gi)`,
     '  billing is actual data stored — the size is a cap, not a price; grow with --size (grow-only), delete with --delete (destroys the data)',
   ]
 }
@@ -640,18 +648,18 @@ export function volumeLines(name: string, volume: { sizeGib: number; mountPath: 
 // Render the PUT result. Pure, exported for tests. `attached` comes from the backend and is what
 // tells a FIRST attach (no disk yet — it mounts on the next deploy) apart from a grow (the live
 // disk was already extended); the wire size is authoritative in both cases.
-export function volumeWriteLine(name: string, body: { volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }; attached?: boolean }): string {
+export function volumeWriteLine(name: string, body: { volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }; attached?: boolean }, type: ManagedType = 'compute'): string {
   if (body.attached) {
-    return `compute ${name}: volume ${body.volume.sizeGib}Gi attached — mounts at ${body.volume.mountPath} on the next deploy  (plan max ${body.cap.volumeGib}Gi)`
+    return `${type} ${name}: volume ${body.volume.sizeGib}Gi attached — mounts at ${body.volume.mountPath} on the next deploy  (plan max ${body.cap.volumeGib}Gi)`
   }
-  return `compute ${name}: volume grown to ${body.volume.sizeGib}Gi at ${body.volume.mountPath}  (plan max ${body.cap.volumeGib}Gi)`
+  return `${type} ${name}: volume grown to ${body.volume.sizeGib}Gi at ${body.volume.mountPath}  (plan max ${body.cap.volumeGib}Gi)`
 }
 
 // Render the DELETE result. Pure, exported for tests. Deleting is the only way off the volume
 // path (there is no detach), so the line says what came back with it: the two constraints the
 // volume imposed.
-export function volumeDeleteLine(name: string): string {
-  return `compute ${name}: volume deleted — the disk and its data are gone; suspend fast-wake and scale-out are back`
+export function volumeDeleteLine(name: string, type: ManagedType = 'compute'): string {
+  return `${type} ${name}: volume deleted — the disk and its data are gone; suspend fast-wake and scale-out are back`
 }
 
 // Map a DELETE .../volume failure. Pure, exported for tests. An older backend has no DELETE
@@ -678,7 +686,7 @@ type VolumeOpts = LifeOpts & { size?: string; mountPath?: string; delete?: boole
 // no undo; billing stops now). The paid/cap/machine-count gates all belong to the backend, whose
 // 403/400 messages carry the upgrade hints and must reach the user verbatim (the guard prints
 // ApiError messages as-is).
-export async function computeVolume(serviceName: string | undefined, opts: VolumeOpts): Promise<void> {
+export async function serviceVolume(type: ManagedType, serviceName: string | undefined, opts: VolumeOpts): Promise<void> {
   if (opts.delete && opts.mountPath !== undefined) throw new Error('--delete cannot be combined with --mount-path')
   if (opts.mountPath !== undefined && !opts.size) throw new Error('--mount-path requires --size when attaching a volume')
   if (opts.delete && opts.size) throw new Error('--delete cannot be combined with --size (one changes the volume, the other destroys it)')
@@ -686,48 +694,49 @@ export async function computeVolume(serviceName: string | undefined, opts: Volum
   const p = await requireProject()
   const branch = opts.branch ?? p.branch
   const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
-  const id = resolveComputeServiceId(services, serviceName)
+  const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, type, serviceName)
 
   if (opts.delete) {
     let res
-    try { res = await api.rawRequest('DELETE', `/projects/${p.projectId}/services/${id}/volume`) }
+    try { res = await api.rawRequest('DELETE', `/projects/${p.projectId}/services/${svc.id}/volume`) }
     catch (e) { throw volumeDeleteError(e) }
     if (handleApproval(res, opts.json)) return
     if (opts.json) return printJson(res.body)
-    info(volumeDeleteLine(res.body.service?.name ?? serviceName ?? id))
+    info(volumeDeleteLine(res.body.service?.name ?? svc.name, type))
     return
   }
 
   if (!opts.size) {
-    const r = await api.request('GET', `/projects/${p.projectId}/services/${id}/volume`)
+    const r = await api.request('GET', `/projects/${p.projectId}/services/${svc.id}/volume`)
     if (opts.json) return printJson(r)
-    for (const line of volumeLines(serviceName ?? id, r.volume, r.cap)) info(line)
+    for (const line of volumeLines(svc.name, r.volume, r.cap, type)) info(line)
     return
   }
 
   const sizeGib = parseVolumeGib(opts.size)
-  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${id}/volume`, { sizeGib, ...(opts.mountPath !== undefined ? { mountPath: opts.mountPath } : {}) })
+  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${svc.id}/volume`, { sizeGib, ...(opts.mountPath !== undefined ? { mountPath: opts.mountPath } : {}) })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
-  info(volumeWriteLine(res.body.service?.name ?? serviceName ?? id, res.body))
+  info(volumeWriteLine(res.body.service?.name ?? svc.name, res.body, type))
 }
+export const computeVolume = (serviceName: string | undefined, opts: VolumeOpts): Promise<void> => serviceVolume('compute', serviceName, opts)
 
 type LimitsOpts = LifeOpts & { cpu?: string; memory?: string }
 
 // Show or set a compute service's ceiling. With no --memory it PRINTS the current limits and the
 // plan cap (so `insta compute limits` is a safe read), which is also what a UI renders as a slider
 // with its plan-limit marker.
-export async function computeLimits(serviceName: string | undefined, opts: LimitsOpts): Promise<void> {
+export async function serviceLimits(type: ManagedType, serviceName: string | undefined, opts: LimitsOpts): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()
   const branch = opts.branch ?? p.branch
   const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
-  const id = resolveComputeServiceId(services, serviceName)
+  const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, type, serviceName)
 
   if (!opts.memory && !opts.cpu) {
-    const r = await api.request('GET', `/projects/${p.projectId}/services/${id}/limits`)
+    const r = await api.request('GET', `/projects/${p.projectId}/services/${svc.id}/limits`)
     if (opts.json) return printJson(r)
-    info(`compute ${serviceName ?? id}: ceiling ${r.limits.cpu} vCPU / ${fmtMb(r.limits.memoryMb)}  (plan max ${r.cap.cpu} vCPU / ${fmtMb(r.cap.memoryMb)})`)
+    info(`${type} ${svc.name}: ceiling ${r.limits.cpu} vCPU / ${fmtMb(r.limits.memoryMb)}  (plan max ${r.cap.cpu} vCPU / ${fmtMb(r.cap.memoryMb)})`)
     info('  billing is actual usage — the ceiling caps what the app may burn, it is not a price')
     return
   }
@@ -735,12 +744,13 @@ export async function computeLimits(serviceName: string | undefined, opts: Limit
 
   const body: Record<string, unknown> = { memoryMb: parseMemoryMb(opts.memory) }
   if (opts.cpu) body.cpu = parseCpu(opts.cpu)
-  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${id}/limits`, body)
+  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${svc.id}/limits`, body)
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const l = res.body.limits
-  info(`compute ${res.body.service?.name ?? id}: ceiling set to ${l.cpu} vCPU / ${fmtMb(l.memoryMb)}`)
+  info(`${type} ${res.body.service?.name ?? svc.name}: ceiling set to ${l.cpu} vCPU / ${fmtMb(l.memoryMb)}`)
 }
+export const computeLimits = (serviceName: string | undefined, opts: LimitsOpts): Promise<void> => serviceLimits('compute', serviceName, opts)
 
 // ---- ssh (interactive sessions) --------------------------------------------
 

@@ -139,7 +139,7 @@ describe('dbQuery (handler flow, injected api — no network)', () => {
     const { deps: d, calls } = deps([{ id: 'svc_pg', type: 'postgres', name: 'db' }])
     await expect(dbQuery('db', ['select 1'], {}, d)).rejects.toThrow('exit 1')
     expect(process.exitCode).toBe(1)
-    expect(err()).toMatch(/managed databases \(mysql\/redis\/mongodb\); postgres uses the SQL editor/)
+    expect(err()).toMatch(/managed databases \(mysql\/redis\/mongodb\); postgres uses `insta postgres url\|connect` \/ the SQL editor/)
     expect(calls.map((c) => c.method)).toEqual(['GET']) // never reached the POST
   })
 
@@ -168,8 +168,14 @@ describe('dbQuery (handler flow, injected api — no network)', () => {
     const { deps: d, calls } = deps(mysql)
     await expect(dbQuery('shop', [], {}, d)).rejects.toThrow('exit 1')
     expect(process.exitCode).toBe(1)
-    expect(err()).toMatch(/usage: insta db query/)
+    expect(err()).toContain('usage: insta <redis|mysql|mongodb> query')
     expect(calls).toEqual([]) // not even the service lookup ran
+  })
+
+  it('refuses a service of another engine and names the right group', async () => {
+    const { deps: d } = deps([{ id: 'm1', type: 'mysql', name: 'db' }])
+    await expect(dbQuery('db', ['PING'], {}, d, 'redis')).rejects.toThrow('exit 1')
+    expect(err()).toContain('db is a mysql service — use: insta mysql query db')
   })
 
   it('relays a 202 approval gate: exit 2, hint on stderr, stdout untouched (non-json)', async () => {
