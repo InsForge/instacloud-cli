@@ -80,7 +80,7 @@ export type DomainCmdCtx = { group?: string; branch?: string }
 const flags = (c: DomainCmdCtx = {}) =>
   `${c.group ? ` --group ${c.group}` : ''}${c.branch ? ` --branch ${c.branch}` : ''}`
 
-// After set-domain: exactly what to do next, from the records the platform returned — never a
+// After attach: exactly what to do next, from the records the platform returned — never a
 // hand-built template. No records = say so; a template here would send the customer publishing
 // values the plane never issued. Pure, exported for tests.
 export function domainGuidanceLines(r: DomainView, ctx: DomainCmdCtx = {}): string[] {
@@ -135,7 +135,7 @@ export function domainResolveLine(r: DomainView): { line: string; ready: boolean
   return { line: `  ${pad('resolves to', 12)}${r.origin}   (${region} router)   ok`, ready: true }
 }
 
-// check-domain: every stage, what each still needs, and where it routes. Pure, exported for tests.
+// check: every stage, what each still needs, and where it routes. Pure, exported for tests.
 export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string[] {
   if (r.status === 'not added') {
     return [`${r.hostname} is not attached to ${targetOf(r)} — attach it with: insta domain attach ${r.hostname}${flags(ctx)}`]
@@ -164,7 +164,7 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
     if (st === 'ok') stage('ownership', 'verified', '(TXT found)')
     else if (st === 'mismatch') { stage('ownership', 'mismatch', `TXT ${txt.name} has a different value — set it to ${txt.value}`); blockers.push('fix the ownership TXT') }
     else if (st === 'missing') { stage('ownership', 'pending', `add TXT ${txt.name} -> ${txt.value}`); blockers.push('add the ownership TXT') }
-    else { stage('ownership', 'unchecked', `TXT ${txt.name} -> ${txt.value} (the plane has not checked it yet — re-run check-domain)`); blockers.push('ownership unchecked') }
+    else { stage('ownership', 'unchecked', `TXT ${txt.name} -> ${txt.value} (the plane has not checked it yet — re-run insta domain check)`); blockers.push('ownership unchecked') }
   } else if (reportsOrigin(r)) {
     // The stage is drawn even with no record to draw it from: an omitted stage reads as "not
     // required", when in fact the platform told us nothing to publish. Only the plane
@@ -191,7 +191,7 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
     if (st === 'ok') stage(lbl, 'ok', `(points at ${d.value})`)
     else if (st === 'mismatch') { stage(lbl, 'mismatch', `${d.type} ${d.name} must point at ${d.value}`); blockers.push(`fix the ${d.type}`) }
     else if (st === 'missing') { stage(lbl, 'pending', `add ${d.type} ${d.name} -> ${d.value}`); blockers.push(`add the ${d.type}`) }
-    else { stage(lbl, 'unchecked', `${d.type} ${d.name} -> ${d.value} (not checked yet — re-run check-domain)`); blockers.push(`${d.type} unchecked`) }
+    else { stage(lbl, 'unchecked', `${d.type} ${d.name} -> ${d.value} (not checked yet — re-run insta domain check)`); blockers.push(`${d.type} unchecked`) }
   }
 
   // Everything else the platform returned — a Let's Encrypt validation CNAME, any extra record.
@@ -204,7 +204,7 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
     if (st === 'ok') stage(lbl, 'ok', where)
     else if (st === 'mismatch') { stage(lbl, 'mismatch', `${d.type} ${d.name} must point at ${d.value}`); blockers.push(`fix the ${d.type} ${d.name}`) }
     else if (st === 'missing') { stage(lbl, 'pending', `add ${where}`); blockers.push(`add the ${d.type} ${d.name}`) }
-    else { stage(lbl, 'unchecked', `${where} (not checked yet — re-run check-domain)`); blockers.push(`${d.type} ${d.name} unchecked`) }
+    else { stage(lbl, 'unchecked', `${where} (not checked yet — re-run insta domain check)`); blockers.push(`${d.type} ${d.name} unchecked`) }
   }
 
   const ssl = r.ssl ?? (r.configured ? 'active' : undefined)
@@ -240,7 +240,7 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
 
 // The platform's 409: the hostname is already bound elsewhere. Domains are never MOVED — the only
 // path is unbind there, then bind here — so the hint names the release step. Three shapes:
-//   owner named and present in this project → the exact remove-domain command;
+//   owner named and present in this project → the exact detach command;
 //   owner named but NOT in this project's services → it is held by a deleted (or other-project)
 //     service: an operator must release it (the plane has no self-serve orphan release yet);
 //   owner not named (today's plane) → the generic release instruction.
@@ -254,7 +254,7 @@ export function domainConflictMessage(host: string, e: ApiError, services: Compu
   const release = (group: string) => `insta domain detach ${host}${flags({ group, branch: ctx.branch })}`
   if (owner) {
     const here = services.find((s) => s.type === 'compute' && s.name === owner)
-    if (here) return `${host} is already attached to ${owner}${region ? ` (${region})` : here.region ? ` (${here.region})` : ''} — domains are not moved; release it first: ${release(owner)}, then re-run set-domain`
+    if (here) return `${host} is already attached to ${owner}${region ? ` (${region})` : here.region ? ` (${here.region})` : ''} — domains are not moved; release it first: ${release(owner)}, then re-run insta domain attach`
     return `${host} is already attached to ${owner}${region ? ` in ${region}` : ''}, which is not a service in this project — it is held by a deleted service (or one in another project); ask an operator to release the hostname before re-binding it`
   }
   return `${host} is already attached to another compute service — domains are not moved; release it there first (${release('<that service>')}) or, if that service was deleted, ask an operator to release the hostname`
