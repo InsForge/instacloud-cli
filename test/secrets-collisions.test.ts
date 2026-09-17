@@ -10,7 +10,8 @@
 import { EventEmitter } from 'node:events'
 import { describe, it, expect } from 'vitest'
 import {
-  assertServiceRef, branchHint, bundleQuery, collisionLines, fetchSecretBundle, secrets, secretsSet, secretsUnset, type Collision,
+  applyExitCode, applyServiceLines, applyVerdict, assertServiceRef, branchHint, bundleQuery, collisionLines, fetchSecretBundle, secrets, secretsSet,
+  secretsUnset, type ApplyServiceOutcome, type Collision,
 } from '../src/commands/secrets.js'
 import { bundleFetcher, childEnv, refusalLines, runWithSecrets } from '../src/commands/run.js'
 import { CliExit } from '../src/util.js'
@@ -19,12 +20,15 @@ const COLLISION: Collision[] = [
   { name: 'ADMIN_PASSWORD', services: ['compute/hermes', 'compute/claude-code', 'compute/codex'] },
 ]
 
-/** Records every request the command makes, and answers with one canned body. */
+/** Records every request the command makes (path in `calls`, body in `bodies`, same index), and
+ *  answers with one canned body. */
 function stubApi(body: unknown, status = 200) {
   const calls: string[] = []
+  const bodies: unknown[] = []
   return {
     calls,
-    rawRequest: async (m: string, p: string) => { calls.push(`${m} ${p}`); return { status, body } },
+    bodies,
+    rawRequest: async (m: string, p: string, reqBody?: unknown) => { calls.push(`${m} ${p}`); bodies.push(reqBody); return { status, body } },
   }
 }
 
@@ -207,10 +211,11 @@ describe('secrets', () => {
 })
 
 describe('secrets unset --service', () => {
-  it('sends the service query param, so only that service’s copy is deleted', async () => {
+  it('posts a delete entry scoped to that service, so only its copy is removed', async () => {
     const api = stubApi({ ok: true })
     await capture(() => secretsUnset('ADMIN_PASSWORD', { branch: 'dev', service: 'compute/hermes' }, { api, projectId: 'p1' }))
-    expect(api.calls).toEqual(['DELETE /projects/p1/secrets/ADMIN_PASSWORD?branch=dev&service=compute%2Fhermes'])
+    expect(api.calls).toEqual(['POST /projects/p1/apply'])
+    expect(api.bodies).toEqual([{ branch: 'dev', entries: [{ kind: 'delete', name: 'ADMIN_PASSWORD', branch: 'dev', service: 'compute/hermes' }] }])
   })
 
   // A service exists ON a branch, so the platform rejects service+no-branch. `secrets set` has
@@ -219,7 +224,7 @@ describe('secrets unset --service', () => {
     const api = stubApi({ ok: true })
     const { out } = await capture(() =>
       secretsUnset('ADMIN_PASSWORD', { service: 'compute/hermes' }, { api, projectId: 'p1', linkedBranch: 'dev' }))
-    expect(api.calls).toEqual(['DELETE /projects/p1/secrets/ADMIN_PASSWORD?branch=dev&service=compute%2Fhermes'])
+    expect(api.bodies).toEqual([{ branch: 'dev', entries: [{ kind: 'delete', name: 'ADMIN_PASSWORD', branch: 'dev', service: 'compute/hermes' }] }])
     expect(out).toBe('unset ADMIN_PASSWORD (compute/hermes, branch dev)\n')
   })
 
@@ -227,13 +232,186 @@ describe('secrets unset --service', () => {
     const api = stubApi({ ok: true })
     const { out } = await capture(() =>
       secretsUnset('ADMIN_PASSWORD', { service: 'compute/hermes', json: true }, { api, projectId: 'p1', linkedBranch: 'dev' }))
-    expect(JSON.parse(out)).toEqual({ ok: true, name: 'ADMIN_PASSWORD', branch: 'dev', service: 'compute/hermes' })
+    expect(JSON.parse(out)).toEqual({
+      ok: true, verdict: 'ok', name: 'ADMIN_PASSWORD', branch: 'dev', service: 'compute/hermes', entries: [], services: [],
+    })
   })
 
-  it('still deletes project-wide with no flags — no branch invented without --service', async () => {
+  it('still deletes project-wide with no flags — no branch on the entry, but the batch still names a deploy branch', async () => {
     const api = stubApi({ ok: true })
     await capture(() => secretsUnset('X', {}, { api, projectId: 'p1', linkedBranch: 'dev' }))
-    expect(api.calls).toEqual(['DELETE /projects/p1/secrets/X'])
+    expect(api.calls).toEqual(['POST /projects/p1/apply'])
+    expect(api.bodies).toEqual([{ branch: 'dev', entries: [{ kind: 'delete', name: 'X' }] }])
+  })
+
+  // The one thing a user most needs to see: which services were merely redeployed vs. STARTED
+  // (a stopped service coming back up, which costs money).
+  it('prints one line per service outcome, calling out started separately from redeployed', async () => {
+    const api = stubApi({ ok: true, services: [
+      { serviceId: 'svc-a', result: 'started' },
+      { serviceId: 'svc-b', result: 'deployed' },
+      { serviceId: 'svc-c', result: 'skipped', reason: 'no-image' },
+      { serviceId: 'svc-d', result: 'failed', reason: 'boom' },
+    ] })
+    try {
+      const { out } = await capture(() => secretsUnset('X', {}, { api, projectId: 'p1', linkedBranch: 'dev' }))
+      expect(out).toBe([
+        'unset X (project-wide)',
+        '  + svc-a started (was stopped — this now bills)',
+        '  ~ svc-b redeployed',
+        '  = svc-c (no-image)',
+        '  ! svc-d failed: boom',
+        '',
+      ].join('\n'))
+      // svc-d failed: the batch is no longer reported as an unconditional success (this is the P1 fix).
+      expect(process.exitCode).toBe(3)
+    } finally { process.exitCode = 0 }
+  })
+
+  it('exits 3 and warns on stderr when the removal landed but a service failed to deploy', async () => {
+    const api = stubApi({
+      entries: [{ name: 'X', written: true }],
+      services: [{ serviceId: 'svc-a', result: 'failed', reason: 'boom' }],
+    })
+    try {
+      const { err } = await capture(() => secretsUnset('X', {}, { api, projectId: 'p1', linkedBranch: 'dev' }))
+      expect(process.exitCode).toBe(3)
+      expect(err).toBe('warning: X is removed but not applied everywhere — retry the deploy for the services marked failed above\n')
+    } finally { process.exitCode = 0 }
+  })
+
+  it('exits 1 and reports an error when the entry itself was not removed', async () => {
+    const api = stubApi({ entries: [{ name: 'X', written: false }], services: [] })
+    try {
+      const { out, err } = await capture(() => secretsUnset('X', {}, { api, projectId: 'p1', linkedBranch: 'dev' }))
+      expect(process.exitCode).toBe(1)
+      expect(out).toContain('unset X')
+      expect(err).toBe('error: X was not removed\n')
+    } finally { process.exitCode = 0 }
+  })
+
+  it('a skip the platform never named as safe (e.g. unknown-service) still degrades the verdict', async () => {
+    const api = stubApi({
+      entries: [{ name: 'X', written: true }],
+      services: [{ serviceId: 'svc-a', result: 'skipped', reason: 'unknown-service' }],
+    })
+    try {
+      await capture(() => secretsUnset('X', {}, { api, projectId: 'p1', linkedBranch: 'dev' }))
+      expect(process.exitCode).toBe(3)
+    } finally { process.exitCode = 0 }
+  })
+})
+
+// The three outcomes design doc §5 draws for /apply.
+describe('applyVerdict / applyExitCode', () => {
+  const written = [{ name: 'X', written: true }]
+
+  it('is ok, exit 0, when every entry was written and no service failed', () => {
+    const services: ApplyServiceOutcome[] = [{ serviceId: 'svc-a', result: 'deployed' }]
+    expect(applyVerdict(written, services)).toBe('ok')
+    expect(applyExitCode('ok')).toBe(0)
+  })
+
+  // Every member of the platform's SkipReason union except 'unknown-service' is a correct outcome.
+  it.each(['no-image', 'other-branch', 'caller-deploying', 'skip-deploy'])(
+    'treats a %s skip as correct, not a failure',
+    (reason) => {
+      const services: ApplyServiceOutcome[] = [{ serviceId: 'svc-a', result: 'skipped', reason }]
+      expect(applyVerdict(written, services)).toBe('ok')
+    },
+  )
+
+  // The one SkipReason not named above: the service itself could not be resolved.
+  it('flags an unknown-service skip as degraded', () => {
+    const services: ApplyServiceOutcome[] = [{ serviceId: 'svc-a', result: 'skipped', reason: 'unknown-service' }]
+    expect(applyVerdict(written, services)).toBe('degraded')
+    expect(applyExitCode('degraded')).toBe(3)
+  })
+
+  it('is degraded, exit 3, when the write landed but a service failed to deploy', () => {
+    const services: ApplyServiceOutcome[] = [{ serviceId: 'svc-a', result: 'failed', reason: 'boom' }]
+    expect(applyVerdict(written, services)).toBe('degraded')
+    expect(applyExitCode('degraded')).toBe(3)
+  })
+
+  it('is not-written, exit 1, when an entry never landed — even if every service still deployed', () => {
+    const entries = [{ name: 'X', written: false }]
+    const services: ApplyServiceOutcome[] = [{ serviceId: 'svc-a', result: 'deployed' }]
+    expect(applyVerdict(entries, services)).toBe('not-written')
+    expect(applyExitCode('not-written')).toBe(1)
+  })
+})
+
+describe('secretsSet', () => {
+  it('posts a set entry to /apply instead of PUTting the old per-name route', async () => {
+    const api = stubApi({ services: [] })
+    await capture(() => secretsSet('FOO', 'bar', { branch: 'dev' }, { api, projectId: 'p1', linkedBranch: 'dev' }))
+    expect(api.calls).toEqual(['POST /projects/p1/apply'])
+    expect(api.bodies).toEqual([{ branch: 'dev', entries: [{ kind: 'set', name: 'FOO', value: 'bar', branch: 'dev' }] }])
+  })
+
+  it('a project-wide set (no --branch, no --service) still names a deploy branch at the top level', async () => {
+    const api = stubApi({ services: [] })
+    await capture(() => secretsSet('FOO', 'bar', {}, { api, projectId: 'p1', linkedBranch: 'dev' }))
+    expect(api.bodies).toEqual([{ branch: 'dev', entries: [{ kind: 'set', name: 'FOO', value: 'bar' }] }])
+  })
+
+  // Case 1: everything written, nothing failed — exit 0, ok:true, both halves still on stdout.
+  it('exits 0 and reports ok:true under --json when every entry was written and nothing failed', async () => {
+    const api = stubApi({
+      entries: [{ name: 'FOO', written: true }],
+      services: [{ serviceId: 'svc-a', result: 'deployed' }],
+    })
+    try {
+      const { out, err } = await capture(() => secretsSet('FOO', 'bar', { json: true }, { api, projectId: 'p1', linkedBranch: 'dev' }))
+      expect(process.exitCode).toBe(0)
+      expect(JSON.parse(out)).toEqual({
+        ok: true, verdict: 'ok', name: 'FOO', branch: null, service: null,
+        entries: [{ name: 'FOO', written: true }], services: [{ serviceId: 'svc-a', result: 'deployed' }],
+      })
+      expect(err).toBe('')
+    } finally { process.exitCode = 0 }
+  })
+
+  // Case 2: durable but not live everywhere — a distinct code, and do not resend the write.
+  it('exits 3 and warns on stderr when the value is saved but a service failed to deploy', async () => {
+    const api = stubApi({
+      entries: [{ name: 'FOO', written: true }],
+      services: [{ serviceId: 'svc-a', result: 'failed', reason: 'boom' }],
+    })
+    try {
+      const { out, err } = await capture(() => secretsSet('FOO', 'bar', {}, { api, projectId: 'p1', linkedBranch: 'dev' }))
+      expect(process.exitCode).toBe(3)
+      expect(out).toContain('set FOO')
+      expect(out).toContain('! svc-a failed: boom')
+      expect(err).toBe('warning: FOO is saved but not applied everywhere — retry the deploy for the services marked failed above, do not resend this value\n')
+    } finally { process.exitCode = 0 }
+  })
+
+  it('exits 3 under --json with ok:false, verdict "degraded", and both raw halves intact', async () => {
+    const api = stubApi({
+      entries: [{ name: 'FOO', written: true }],
+      services: [{ serviceId: 'svc-a', result: 'failed', reason: 'boom' }],
+    })
+    try {
+      const { out } = await capture(() => secretsSet('FOO', 'bar', { json: true }, { api, projectId: 'p1', linkedBranch: 'dev' }))
+      expect(process.exitCode).toBe(3)
+      expect(JSON.parse(out)).toEqual({
+        ok: false, verdict: 'degraded', name: 'FOO', branch: null, service: null,
+        entries: [{ name: 'FOO', written: true }], services: [{ serviceId: 'svc-a', result: 'failed', reason: 'boom' }],
+      })
+    } finally { process.exitCode = 0 }
+  })
+
+  // Case 3: the write itself never landed — a plain failure, this repo's existing exit-1 convention.
+  it('exits 1 and reports an error when the entry itself was not written', async () => {
+    const api = stubApi({ entries: [{ name: 'FOO', written: false }], services: [] })
+    try {
+      const { out, err } = await capture(() => secretsSet('FOO', 'bar', {}, { api, projectId: 'p1', linkedBranch: 'dev' }))
+      expect(process.exitCode).toBe(1)
+      expect(out).toContain('set FOO')
+      expect(err).toBe('error: FOO was not written\n')
+    } finally { process.exitCode = 0 }
   })
 })
 
