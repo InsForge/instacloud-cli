@@ -268,6 +268,19 @@ export function hasOwnedBlock(existing: string): boolean {
  *  and touch the file only when the two differ -- a stanza written before a
  *  keyword existed (the Port line) is the case, and "nothing changed in the
  *  response" is not the same question as "nothing would change in the file". */
+/** Whether nothing that OpenSSH would read precedes the owned block. OpenSSH
+ *  takes the FIRST obtained value for each keyword, so a `Host *` stanza -- or a
+ *  bare global `Port 22` -- above our block silently overrides the block's
+ *  Port, HostName, User and credential; that is why upsertConfigBlock writes
+ *  the block at the top. Comments and blank lines above it are harmless and do
+ *  not count. false when there is no owned block at all. */
+export function ownedBlockIsFirst(existing: string): boolean {
+  const lines = existing.split('\n')
+  const begin = lines.findIndex(isMarkerLine(BLOCK_BEGIN))
+  if (begin === -1) return false
+  return lines.slice(0, begin).every((l) => /^\s*(#.*)?$/.test(l))
+}
+
 export function ownedBlock(existing: string): string | undefined {
   const lines = existing.split('\n')
   const begin = lines.findIndex(isMarkerLine(BLOCK_BEGIN))

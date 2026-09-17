@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import {
   renderConfigBlock, renderEnsureCertMatch, upsertConfigBlock, upsertCertAuthority,
   planCertAuthority, revertCertAuthority, certifiesPublicKey, parseCAPublicKey, hasOwnedBlock,
-  aliasFor, isSafeAlias, isSafeConfigValue, quoteConfigPath, BLOCK_BEGIN, BLOCK_END, CA_MARKER, ownedBlock,
+  aliasFor, isSafeAlias, isSafeConfigValue, quoteConfigPath, BLOCK_BEGIN, BLOCK_END, CA_MARKER, ownedBlock, ownedBlockIsFirst,
 } from '../src/commands/ssh-config.js'
 
 const entry = (alias = 'api.insta', hostName = 'ssh.us-west-1.compute.example', user = 'svc-abc', port = 2222) => ({
@@ -29,6 +29,14 @@ describe('the Port line', () => {
     // that ignored the plane and always wrote the default would pass a
     // substring match -- exactly the regression this test exists to catch.
     expect(block([entry('api.insta', 'ssh.us-west-1.compute.example', 'svc-abc', 22)]).split('\n')).toContain('  Port 22')
+  })
+  it('knows whether anything OpenSSH reads sits above the block', () => {
+    const b = block()
+    expect(ownedBlockIsFirst(upsertConfigBlock('Host *\n  User root\n', b)), 'freshly upserted, the block is first').toBe(true)
+    expect(ownedBlockIsFirst(`# my notes\n\n${b}`), 'comments and blank lines above do not shadow').toBe(true)
+    expect(ownedBlockIsFirst(`Host *\n  Port 22\n${b}`), 'a Host stanza above shadows every keyword').toBe(false)
+    expect(ownedBlockIsFirst(`Port 22\n${b}`), 'a bare global directive above shadows too').toBe(false)
+    expect(ownedBlockIsFirst('Host *\n  User root\n'), 'no block at all is not "first"').toBe(false)
   })
   it('exposes the installed block, marker to marker, for drift comparison', () => {
     const b = block()

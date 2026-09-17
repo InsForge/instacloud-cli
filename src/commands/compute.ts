@@ -760,7 +760,7 @@ import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
-  aliasFor, certifiesPublicKey, hasOwnedBlock, isSafeAlias, isSafeConfigValue, isSafeSSHHost, isSafeSSHUsername, isSafeTimestamp, isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, planCertAuthority, renderConfigBlock, revertCertAuthority, upsertConfigBlock, type HostEntry, ownedBlock } from './ssh-config.js'
+  aliasFor, certifiesPublicKey, hasOwnedBlock, isSafeAlias, isSafeConfigValue, isSafeSSHHost, isSafeSSHUsername, isSafeTimestamp, isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, planCertAuthority, renderConfigBlock, revertCertAuthority, upsertConfigBlock, type HostEntry, ownedBlock, ownedBlockIsFirst } from './ssh-config.js'
 
 /** Where this CLI keeps its own SSH material. Deliberately NOT ~/.ssh: we never
  *  touch a key the user already had, and a dedicated key pairs with
@@ -1360,6 +1360,10 @@ function configBlockStale(store: AliasStore): boolean {
   }
   const installed = ownedBlock(existing)
   if (installed === undefined) return false
+  // Position is content too: a block that has slid below other configuration
+  // is shadowed keyword by keyword (first obtained value wins), whatever its
+  // text says. The rewrite puts it back where setup wrote it, at the top.
+  if (!ownedBlockIsFirst(existing)) return true
   return installed.replace(/\n+$/, '') !== renderInstalledBlock(store).replace(/\n+$/, '')
 }
 

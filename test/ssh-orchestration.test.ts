@@ -12,7 +12,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import { computeSSH, installCertAuthority, instaCertPath, instaAliasStorePath, instaKeyPath, writeAliasStore, readAliasStore, validateCertResponse, acquireLockFile, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate } from '../src/commands/compute.js'
-import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey } from '../src/commands/ssh-config.js'
+import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, BLOCK_BEGIN,
+} from '../src/commands/ssh-config.js'
 import { canSymlink } from './support/can-symlink.js'
 
 // Redirect the whole ~/.insta and ~/.ssh tree into a temp dir.
@@ -1477,6 +1478,21 @@ d('an automatic renewal moves the alias with the certificate', () => {
 
     expect(readFileSync(cfgPath, 'utf8').split('\n'), 'the legacy stanza was not repaired').toContain('  Port 2222')
     expect(readFileSync(instaCertPath('api.insta'), 'utf8'), 'the fresh certificate was replaced').toBe(certBefore)
+  })
+
+  it('moves a block that slid below other configuration back to the top', async () => {
+    // OpenSSH takes the first obtained value per keyword, so a `Host *` that
+    // ended up above our block -- a dotfiles tool, a hand edit -- overrides its
+    // Port, HostName and User with the text of the block untouched. Position is
+    // part of what "installed correctly" means, so the hook repairs it.
+    await anInstalledAlias()
+    const cfgPath = configPath()
+    const block = readFileSync(cfgPath, 'utf8')
+    writeFileSync(cfgPath, `Host *\n  Port 22\n${block}`)
+    await renew(() => sameResponse)
+    const after = readFileSync(cfgPath, 'utf8')
+    expect(after.startsWith(BLOCK_BEGIN), 'the block was left below the shadowing stanza').toBe(true)
+    expect(after, 'the user\'s own stanza was lost').toContain('Host *\n  Port 22')
   })
 
   it('does not touch the config when nothing in it changed', async () => {
