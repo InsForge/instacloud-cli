@@ -182,9 +182,8 @@ export function renderConfigBlock(o: ConfigBlockOpts): string {
       // IdentitiesOnly is not tidiness. SSH offers public keys ONE AT A TIME,
       // so a user with several keys is identified non-deterministically -- the
       // server sees whichever key happened to be offered first, which may not be
-      // the one carrying our certificate. exe.dev calls this heisen-connect.
-      // Without this line a developer with a full ssh-agent gets intermittent,
-      // unexplainable auth failures.
+      // the one carrying our certificate. Without this line a developer with a
+      // full ssh-agent gets intermittent, unexplainable auth failures.
       '  IdentitiesOnly yes',
     )
     // Connection multiplexing collapses scp, an IDE's several connections and a
@@ -380,11 +379,10 @@ function isEcdsaBody(curve: Buffer, point: Buffer, wantCurve: string, pointLen: 
 /** Exactly ONE OpenSSH public-key record: `<type> <base64>` with an optional
  *  comment, and nothing else -- no second line, no leading directive.
  *
- *  `renderCertAuthority` only trimmed, so an embedded newline in the CA value
- *  smuggled additional known_hosts lines past it. Parsing to the three fields
- *  we will actually write, and rebuilding the line from THOSE, means a value
- *  either is one key record or is refused; there is no third outcome where
- *  part of it is honoured. */
+ *  Parsing to the three fields we will actually write, and rebuilding the line
+ *  from THOSE, means a value either is one key record or is refused; there is
+ *  no third outcome where part of it is honoured (an embedded newline would
+ *  otherwise smuggle additional known_hosts lines through). */
 export function parseCAPublicKey(value: unknown): { type: string; blob: string } {
   if (typeof value !== 'string') throw new Error('the platform returned no ssh certificate authority key')
   const line = value.trim()
@@ -397,22 +395,18 @@ export function parseCAPublicKey(value: unknown): { type: string; blob: string }
   if (!/^[A-Za-z0-9+/]+={0,3}$/.test(blob) || blob.length < 32) {
     throw new Error('refusing a certificate authority key whose body is not base64')
   }
-  // The blob's OWN type must agree with the text field. Base64-shaped is not
-  // the same as "is a key": an anchor built from a mislabelled or arbitrary
-  // blob installs silently and then fails at connect time, where the message
-  // points at known_hosts rather than at the response that produced it.
-  // The WHOLE blob, not just its first field. A first-field check rejects
-  // arbitrary base64 and still accepts a correct type name followed by noise --
-  // and an anchor built from that installs silently, then fails at connect
-  // time, where the message points at known_hosts rather than at the response
-  // that produced it.
+  // The blob's OWN type must agree with the text field, and the WHOLE blob is
+  // checked, not just its first field: a first-field check rejects arbitrary
+  // base64 and still accepts a correct type name followed by noise -- and an
+  // anchor built from that installs silently, then fails at connect time,
+  // where the message points at known_hosts rather than at the response that
+  // produced it.
   const fields = sshBlobFields(blob)
   if (!fields || fields.length < 2 || fields[0]!.toString('utf8') !== type) {
     throw new Error(`refusing a certificate authority key whose body does not match its type ${JSON.stringify(type.slice(0, 32))}`)
   }
-  // And the fields must be the ones THIS type has. ed25519 was the only type
-  // held to its shape at first, so a correct RSA or ECDSA type name followed by
-  // any well-formed fields passed -- see CA_KEY_SHAPES.
+  // And the fields must be the ones THIS type has (see CA_KEY_SHAPES): a
+  // correct RSA or ECDSA type name followed by any well-formed fields must not pass.
   if (!shape(fields)) {
     throw new Error(`refusing a certificate authority key whose body is not the shape of ${JSON.stringify(type.slice(0, 32))}`)
   }
@@ -713,8 +707,7 @@ export type CertAuthorityPlan = {
 export function revertCertAuthority(current: string, plan: CertAuthorityPlan): string {
   const kept = current.split('\n').filter((l) => l.trimEnd() !== plan.line)
   // Only the ONE trailing blank the split leaves behind a final newline. A
-  // blank line before that is the user's -- trailing blanks included, which a
-  // loop popping every empty tail line was deleting on the failure path.
+  // blank line before that is the user's -- trailing blanks included.
   if (kept.length > 0 && kept[kept.length - 1] === '') kept.pop()
   // Only the anchors that are genuinely gone: a concurrent install may already
   // have re-added one, and a duplicate anchor is not a failure mode. Each goes

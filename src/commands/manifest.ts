@@ -21,8 +21,7 @@ export type ManifestResource = {
  *
  * `kind` is the platform's internal resource kind, and for compute it is always 'fly' — 'fly' is
  * the compute SEAT, occupied by the microvm plane on any environment that has cut over. Printing
- * it is how `insta manifest` came to tell users and agents that a microvm-backed service ran on
- * Fly (staging, 2026-08-25: `fly(api)` for a row serving from warm pod insta-warm-00178a-16).
+ * it tells users and agents that a microvm-backed service runs on Fly.
  *
  * So for compute rows the label is the platform's explicit `provider`, and when that is absent --
  * an older platform, or a row whose provider the platform itself could not determine -- we fall

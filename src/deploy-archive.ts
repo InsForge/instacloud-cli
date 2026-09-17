@@ -11,9 +11,8 @@ export function archiveBuildSpec(hasDockerfile: boolean): ArchiveBuildSpec {
 }
 
 // ONE digest, over the uploaded bytes: it is both the id the object is stored under and the value
-// the build worker checks the bytes it fetched against. Splitting the two so the id could be
-// canonical across runtimes is what let a Node-packed object be claimed by a Bun-packed digest;
-// the compressor is deterministic instead, so one digest is canonical AND addresses the bytes.
+// the build worker checks the bytes it fetched against. The compressor is deterministic, so one
+// digest is canonical across runtimes AND addresses the bytes.
 export type ArchiveRef = { archiveSha256: string; build: ArchiveBuildSpec }
 
 type Api = Pick<ApiClient, 'rawRequest'>

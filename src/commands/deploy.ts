@@ -56,9 +56,9 @@ async function discoverLane(api: Pick<ApiClient, 'rawRequest'>, projectId: strin
     if (!known.includes(tag)) {
       die(`this platform answered with a source-build lane this CLI does not know (${JSON.stringify(tag)}) — upgrade with \`insta upgrade\``)
     }
-    // The tag alone is not the contract: each branch carries a payload this code then trusts.
-    // An `archive` with malformed limits fell back to local defaults, so the CLI would enforce
-    // caps the SERVER does not have, and a `none` with no reason died with `undefined`.
+    // The tag alone is not the contract: each branch carries a payload this code then trusts, so
+    // it is validated too — an `archive` with malformed limits must not fall back to local
+    // defaults the SERVER does not enforce, and a `none` must carry its reason.
     if (tag === 'archive') {
       const l = (lane as { limits?: Record<string, unknown> }).limits
       const positive = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v > 0
@@ -133,7 +133,7 @@ export function dockerfileExposedPort(dockerfile: string): number | undefined {
 // This message is for the target that still REQUIRES a Dockerfile: a Fly-backed service, where a
 // directory deploy builds the Dockerfile in the directory and dies without one. On insta-compute
 // the archive lane carries the directory to the gateway and nixpacks builds it, so this dead end is
-// no longer universal. It names every way forward instead of the bare "add one".
+// not universal. It names every way forward instead of the bare "add one".
 //
 // It deliberately does NOT say "save the Dockerfile `insta build --explain` prints": that file is
 // not standalone — it COPYs `.nixpacks/nixpkgs-<hash>.nix` support files nixpacks writes beside it,

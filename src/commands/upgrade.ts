@@ -9,9 +9,8 @@
 // `resolveLatest()`, reading npm's `latest` dist-tag, the same thing `npx insta@latest` and
 // `npm i -g insta` resolve. Both the background check and `insta upgrade` go through it, and the
 // binary channel then installs THAT version by tag (INSTA_VERSION=v<latest>) rather than asking
-// GitHub independently for /releases/latest. Two independent resolvers is how the two paths came
-// to disagree; they have drifted before (v0.0.46 was merged but never tagged, so it exists on
-// neither npm nor GitHub).
+// GitHub independently for /releases/latest. Two independent resolvers is how the two paths
+// drift apart: a version can be merged but never tagged, so it exists on neither npm nor GitHub.
 //
 // A CACHE MUST NOT LIE. ~/.insta/update-check.json is a cache of that one answer, never a second
 // source. Every path that learns the real latest rewrites it (including a successful upgrade),
@@ -386,7 +385,7 @@ export async function autoupdate(mode?: string): Promise<void> {
  *  `upgrade`/`autoupdate` are the update machinery itself. Every `__` command
  *  is internal machinery rather than a user at a prompt, and the rule is
  *  written as a PREFIX so the next such command inherits it instead of
- *  rediscovering it -- which is exactly how this was missed:
+ *  rediscovering it:
  *  `__ssh-ensure-cert` is run by OpenSSH while it PARSES ssh_config, on every
  *  ssh, scp, `ssh -G` and IDE connection, so a nudge here is written straight
  *  into the ssh session's stderr and an auto-upgrade spawns a detached process

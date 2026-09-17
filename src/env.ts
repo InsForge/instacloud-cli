@@ -3,7 +3,7 @@
 // `prod` and `staging` are SEPARATE deployments — different regions, different databases, different
 // Better Auth instances — not one backend behind two names. api.instacloud.com is
 // insta-platform-prod-alb (us-east-2); api.staging.instacloud.com is insta-beta-api-lb (us-west-1).
-// The practical consequence, learned the hard way when beta-api was retired: a session minted by
+// The practical consequence: a session minted by
 // one environment can NEVER authenticate against the other, and its refresh token must never be
 // POSTed there. So every environment switch drops the stored session (see config.ts).
 //
@@ -22,8 +22,7 @@ export type EnvHosts = {
   // The ref MUST use the `#ref` fragment form. `owner/repo@thing` looks like a ref but the skills
   // tool parses `@` as a SKILL-NAME FILTER, silently leaving the source on the default branch —
   // and its progress line still echoes "Source: …insta-skills.git @thing", so it reads as if the
-  // ref took effect. Verified by installing both forms and diffing the result: `#docs/staging-env`
-  // produced that branch's cli-reference.md, `@docs/staging-env` produced main's.
+  // ref took effect.
   skills: string
 }
 

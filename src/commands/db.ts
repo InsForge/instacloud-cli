@@ -9,9 +9,7 @@ type Opts = { branch?: string; group?: string; json?: boolean }
 // Toggle a postgres service between scale-to-zero (the default: instance suspends when idle,
 // cold-starts on the next connection) and always-on (instance stays warm; idle RAM bills at
 // actual usage). Thin wrapper over PATCH /database/settings {scaleToZero} — insta-db-backed
-// postgres only. Legacy Neon path: Neon is no longer used by any environment (postgres is 100%
-// insta-db) and this code is retained, not live — Neon-backed services managed their own
-// autosuspend and the platform returned an error for them.
+// postgres only.
 export async function dbAlwaysOn(mode: string, opts: Opts): Promise<void> {
   if (mode !== 'on' && mode !== 'off') throw new Error('mode must be on|off')
   const api = await ApiClient.load()
@@ -51,10 +49,8 @@ export function fmtMib(mib: number): string {
 // The read outcome, as a seam. rawRequest THROWS ApiError on any status >= 400 (api.ts — it only
 // differs from request in returning {status,body} below 400, for 202 branching), so the soft
 // no-instance case and the friendly wrapping must live in a catch, not in status branching on the
-// return value — branches on res.status >= 400 after rawRequest are unreachable. That soft case is
-// the legacy Neon path: Neon is no longer used by any environment; the handling is retained, not
-// live. Takes the client as an argument so tests drive it with a stub, per this repo's pure-seam
-// convention.
+// return value — branches on res.status >= 400 after rawRequest are unreachable. Takes the client
+// as an argument so tests drive it with a stub, per this repo's pure-seam convention.
 export type DbInstanceRead = { kind: 'ok'; body: any } | { kind: 'no-instance' }
 
 export async function fetchDbInstance(
@@ -66,9 +62,8 @@ export async function fetchDbInstance(
     const res = await api.rawRequest('GET', `/projects/${projectId}/database/instance${suffix}`)
     return { kind: 'ok', body: res.body }
   } catch (e) {
-    // The platform answers a provider-shaped 502 for services with no manageable instance
-    // (the legacy Neon path — Neon is no longer used by any environment; this branch is retained,
-    // not live): a soft case, not a failure. Everything else stays an error — an expired
+    // The platform answers a provider-shaped 502 for services with no manageable instance:
+    // a soft case, not a failure. Everything else stays an error — an expired
     // token must not render as "no ceiling set" — but wrapped so the user sees what failed.
     if (e instanceof ApiError && e.status === 502) return { kind: 'no-instance' }
     if (e instanceof ApiError) throw new Error(`reading the instance failed (${e.status}): ${e.message}`)
@@ -124,9 +119,6 @@ export async function dbLimits(opts: Opts & { cpu?: string; memory?: string }): 
   info(`postgres ${opts.group ?? 'default'}: ceiling set to ${cpu} / ${mem}`)
 }
 
-// Render the instance's volume from a database/instance read. Pure, exported for tests. Reads the
-// CANONICAL volume* names only — storageSize/storageGiB are deprecated aliases the platform drops
-// next release, so depending on them here would be a scheduled breakage.
 // Bytes → human units, one decimal above KiB. Local because the metrics payload is the only
 // bytes-denominated read in this file (fmtMib serves the MiB-denominated resize path).
 export function fmtBytes(n: number): string {
@@ -183,6 +175,9 @@ export async function dbStats(opts: Opts): Promise<void> {
   for (const line of dbStatsLines(opts.group ?? 'default', res.body)) info(line)
 }
 
+// Render the instance's volume from a database/instance read. Pure, exported for tests. Reads the
+// CANONICAL volume* names only — storageSize/storageGiB are deprecated aliases the platform drops
+// next release, so depending on them here would be a scheduled breakage.
 export function dbVolumeLines(group: string, body: any): string[] {
   const gib = typeof body?.volumeGib === 'number' ? `${body.volumeGib}Gi` : (typeof body?.volumeSize === 'string' ? body.volumeSize : undefined)
   if (gib === undefined) return [`postgres ${group}: provider reported no volume size`]

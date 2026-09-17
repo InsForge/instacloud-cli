@@ -1,5 +1,5 @@
 // PostToolUse hook: reads a tool-use event on stdin (Claude Code / Codex), scans every string
-// surface for credential exposure, and appends findings to ./.insta/audit.jsonl. Ported from firth.
+// surface for credential exposure, and appends findings to ./.insta/audit.jsonl.
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'

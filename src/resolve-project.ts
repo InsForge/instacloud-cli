@@ -1,8 +1,8 @@
 // "One command, just works": when a command needs a project and the directory isn't linked
 // (and no INSTA_PROJECT_ID is set), resolve it instead of lecturing about `project link` —
 // one project auto-selects silently, several get a one-keystroke picker, and either way the
-// choice is SAVED so this happens at most once per directory. (Railway prompts every unlinked
-// machine; we persist the answer and, via the committed link file, share it with the team.)
+// choice is SAVED so this happens at most once per directory, and the committed link file shares
+// it with the team.
 import { createInterface } from 'node:readline/promises'
 import type { ProjectConfig } from './config.js'
 

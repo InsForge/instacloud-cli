@@ -10,7 +10,6 @@ import { parseManifestYaml, MANIFEST_FILE, type TemplateManifest } from './templ
 export type GitHubTarget = { owner: string; repo: string; refAndPath: string }
 
 const GITHUB_HOST = /^(?:https?:\/\/)?(?:www\.)?github\.com\//i
-// An explicit address: a scheme, or an scp-style user@host:path. Never a local path.
 // A scheme (with or without its slashes) or an scp-style user@host:path. The slashes are optional
 // because `https:/github.com/o/r`, a URL that lost one, must be named as a bad address rather than
 // resolved as a directory called `https:`. Two or more scheme characters are required so a Windows
@@ -49,7 +48,7 @@ function decodedSegments(parts: string[], target: string): string[] {
 
 /** Parse a github.com URL into owner, repo and the still-unsplit ref+path tail.
  *  null = not URL-shaped, so the caller's local-directory and registry modes still get a look.
- *  A URL-shaped target that is not a github.com repository URL throws (spec 4.1). */
+ *  A URL-shaped target that is not a github.com repository URL throws. */
 export function parseGitHubTemplateUrl(target: string): GitHubTarget | null {
   if (!GITHUB_HOST.test(target)) {
     // Name a non-GitHub address for what it is; let everything else reach local/registry mode.
@@ -131,7 +130,7 @@ function releaseChild(child: ReturnType<SpawnFn>): void {
   try { child.unref() } catch { /* already gone */ }
 }
 
-/** spawnFn is injected so the timeout path is testable without a network (spec FAQ 7.15). */
+/** spawnFn is injected so the timeout path is testable without a network. */
 export function makeGitRunner(spawnFn: SpawnFn = nodeSpawn): GitRunner {
   return (args, opts) =>
     new Promise((resolve) => {
@@ -228,7 +227,7 @@ export function splitRefAndPath(refAndPath: string, refs: Map<string, string>): 
 
 /** One round trip answers two questions: the default branch, and where the ref ends. The commit
  *  is NOT taken from here — an annotated tag lists its tag object, and a branch can move before
- *  the clone. fetchGitHubTemplate reads it from the checkout instead (spec FAQ 7.10). */
+ *  the clone. fetchGitHubTemplate reads it from the checkout instead. */
 export async function resolveGitHubRef(t: GitHubTarget, run: GitRunner): Promise<ResolvedRef> {
   // HEAD is listed EXPLICITLY: adding refspecs otherwise drops the symref line that names the
   // default branch (measured on this repo: 375 refs unfiltered, 188 with the filter, and no
@@ -291,7 +290,7 @@ export async function fetchGitHubTemplate(
   const dir = mkdtempSync(join(tmpdir(), 'insta-tpl-gh-'))
   try {
     // The short name, not resolved.qualifiedRef: `--branch` rejects a fully-qualified ref, and
-    // git's own short-name tie-break already agrees with splitRefAndPath (spec FAQ 7.14).
+    // git's own short-name tie-break already agrees with splitRefAndPath.
     const cloned = await run(
       ['clone', '--depth', '1', '--quiet', '--branch', resolved.ref, repoUrl(target), dir],
       { timeoutMs: CLONE_TIMEOUT_MS },
@@ -301,7 +300,7 @@ export async function fetchGitHubTemplate(
     if (cloned.code !== 0) throw new Error(unreadableRepoMessage(target, cloned.stderr))
 
     // The deployed commit is the one in the checkout: an annotated tag's listing entry is its tag
-    // object, and a branch can move between ls-remote and here (spec FAQ 7.10).
+    // object, and a branch can move between ls-remote and here.
     const head = await run(['-C', dir, 'rev-parse', 'HEAD'], { timeoutMs: LS_REMOTE_TIMEOUT_MS })
     // Same three outcomes the other two calls distinguish, so a timeout or a missing git here is
     // not reported as an unreadable repository.

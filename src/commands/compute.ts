@@ -70,7 +70,7 @@ const recordsOf = (r: DomainView) => r.dns ?? []
 // How a printed follow-up command must be spelled so it reaches the SAME service on the SAME
 // branch the user just acted on. Without these, a suggested command run in a multi-service project
 // dies on the very ambiguity error this feature exists to raise, and a --branch invocation would
-// silently check the linked branch instead (cubic P2 ×2).
+// silently check the linked branch instead.
 export type DomainCmdCtx = { group?: string; branch?: string }
 const flags = (c: DomainCmdCtx = {}) =>
   `${c.group ? ` --group ${c.group}` : ''}${c.branch ? ` --branch ${c.branch}` : ''}`
@@ -96,8 +96,7 @@ export function domainGuidanceLines(r: DomainView, ctx: DomainCmdCtx = {}): stri
 // Whether this provider reports an edge routing target AT ALL. The compute plane's domain view
 // always carries an `ssl` status, so a plane answer without `origin` is a daemon too old to report
 // where the hostname resolves — we cannot confirm routing, and must not call it serving. A Fly
-// answer carries no `ssl` and has no per-hostname origin concept, so its own verdict stands
-// (r2d2 round 1 Critical: "no target reported" was previously treated as ready for both).
+// answer carries no `ssl` and has no per-hostname origin concept, so its own verdict stands.
 const reportsOrigin = (r: DomainView) => r.ssl !== undefined
 
 // Where the hostname actually resolves — the region-specific origin the plane requested vs what
@@ -151,9 +150,8 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
   // A record is settled only when the platform says `ok` — or, for a provider that reports no
   // per-record status at all (Fly), when it vouched for the whole set with `configured`. missing,
   // mismatch and never-checked are each outstanding and each add a blocker. Applying this to only
-  // the ownership TXT and the FIRST routing record was the bug (r2d2 round 3): every other record
-  // rendered from `configured` alone and blocked nothing, so an apex whose AAAA was missing, or a
-  // still-pending validation record, could ride under a `serving https://…` line.
+  // some records lets an apex whose AAAA is missing, or a still-pending validation record, ride
+  // under a `serving https://…` line.
   const verdictOf = (d: DomainView['dns'][number]) => d.status ?? (r.configured ? 'ok' : 'unchecked')
 
   if (txt) {
@@ -164,7 +162,7 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
     else { stage('ownership', 'unchecked', `TXT ${txt.name} -> ${txt.value} (the plane has not checked it yet — re-run check-domain)`); blockers.push('ownership unchecked') }
   } else if (reportsOrigin(r)) {
     // The stage is drawn even with no record to draw it from: an omitted stage reads as "not
-    // required", when in fact the platform told us nothing to publish (cubic P2). Only the plane
+    // required", when in fact the platform told us nothing to publish. Only the plane
     // proves ownership by TXT, so only a plane answer missing one is a problem.
     stage('ownership', 'unknown', 'the platform returned no ownership TXT for this domain — nothing to publish yet; ask an operator')
     blockers.push('no ownership TXT from the platform')
@@ -173,10 +171,10 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
   }
 
   if (routing.length === 0) {
-    // No routing record for the hostname — whatever ELSE came back. Keying this on an entirely
-    // empty record set was the bug (r2d2 round 2): a payload carrying only the ownership TXT
-    // skipped the stage and added no blocker, so a `configured: true` answer with a live cert and
-    // a confirmed origin printed `serving` for a hostname with nothing pointing at us.
+    // No routing record for the hostname — whatever ELSE came back. Keyed on an entirely empty
+    // record set, a payload carrying only the ownership TXT skips the stage and adds no blocker,
+    // so a `configured: true` answer with a live cert and a confirmed origin prints `serving`
+    // for a hostname with nothing pointing at us.
     stage('cname', 'unknown', 'the platform returned no routing record for this domain — nothing to publish yet; ask an operator')
     blockers.push('no routing record from the platform')
   }
@@ -212,7 +210,7 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
 
   const resolve = domainResolveLine(r)
   out.push(resolve.line)
-  // An error STATE is a blocker whether or not the plane sent a reason with it (cubic P2): a row
+  // An error STATE is a blocker whether or not the plane sent a reason with it: a row
   // that says `error` has not been observed serving, and saying otherwise is the blackhole lie.
   if (r.status === 'error') {
     stage('error', r.status, r.errorReason || '(the plane reported an error state with no reason)')
@@ -229,7 +227,7 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
   // `serving` is claimed only when every stage above agreed: the provider says configured, the
   // routing target is confirmed, and NOTHING is outstanding. A blocker beside a `configured: true`
   // answer means the record set and the verdict disagree — report the disagreement, never paper
-  // over it with a URL the user would then trust (cubic P1).
+  // over it with a URL the user would then trust.
   if (r.configured && blockers.length === 0) stage('serving', `https://${r.hostname}`, '')
   else stage('serving', 'not yet', blockers.length ? `(${blockers.join(', ')})` : `(${r.status})`)
   return out
@@ -247,7 +245,7 @@ export function domainConflictMessage(host: string, e: ApiError, services: Compu
   const owner = m?.[1] && m[1] !== 'another' ? m[1] : undefined
   const region = m?.[2]
   // The release command must name the OWNER's group, and the branch the user is working on — a
-  // command that defaults back to the linked branch would release nothing (cubic P2).
+  // command that defaults back to the linked branch would release nothing.
   const release = (group: string) => `insta compute remove-domain ${host}${flags({ group, branch: ctx.branch })}`
   if (owner) {
     const here = services.find((s) => s.type === 'compute' && s.name === owner)
@@ -267,7 +265,7 @@ export async function domainTarget(api: DomainApi, projectId: string, branch: st
 
 // The API surface these three verbs use, so the command-level flow — preflight service lookup,
 // explicit `group` on every call, --json passthrough, 409 mapping — is testable without a network
-// mock (r2d2 round 1 Suggestion). Production passes a real ApiClient.
+// mock. Production passes a real ApiClient.
 export type DomainApi = Pick<ApiClient, 'request' | 'rawRequest'>
 export type DomainDeps = { api: DomainApi; project: { projectId: string; orgId?: string; branch?: string } }
 export async function domainDeps(deps?: DomainDeps): Promise<DomainDeps> {
@@ -380,14 +378,6 @@ export async function computeStatus(serviceName: string | undefined, opts: LifeO
 
 // ---- exec (one-shot command; no interactive shell/PTY) ----
 
-// `insta compute exec [service] -- <command> [args…]`: the command must reach the platform
-// byte-for-byte and can itself contain dashes or another `--`, so it can't be a normal commander
-// positional — with `service` optional, commander flattens everything past the literal `--` into
-// one operand list and has no way to tell "no service, command starts here" apart from "service IS
-// the first command token". Splitting argv on the first literal `--` after `compute exec`
-// ourselves, before commander ever parses it, removes the ambiguity; this is the only place in the
-// whole CLI a bare `--` has this meaning, so nothing else is affected. Exported for a direct,
-// network-free unit test — this split is the seam most likely to regress.
 /** The options `insta compute exec` declares — the one source of truth. index.ts builds the
  *  commander command from this list, and the payload scan below uses it to know where the CLI's
  *  own arguments stop. Adding an option here reaches both. */
@@ -664,9 +654,9 @@ export function volumeDeleteLine(name: string): string {
   return `compute ${name}: volume deleted — the disk and its data are gone; suspend fast-wake and scale-out are back`
 }
 
-// Map a DELETE .../volume failure. Pure, exported for tests (r2d2 review rounds 1+2: this is the
-// close-call branch worth pinning). An older backend has no DELETE route, and what its 404 looks
-// like depends on who answered: the real platform (Fastify, no custom notFound handler) sends its
+// Map a DELETE .../volume failure. Pure, exported for tests. An older backend has no DELETE
+// route, and what its 404 looks like depends on who answered: the real platform (Fastify, no
+// custom notFound handler) sends its
 // default body {"message":"Route DELETE:/… not found","error":"Not Found"} → ApiError message
 // "Not Found"; a proxy or bodyless 404 leaves ApiError's own "HTTP 404" fallback. BOTH are the
 // generic route-miss shape and mean version skew, not a bug — parroting them would send the user
@@ -1090,9 +1080,7 @@ export type StagedCertificate = { commit: () => void; discard: () => void }
  * So the authority is `ssh-keygen -L`, run against a temporary file, and the
  * real file is only replaced once it passes. Spawning it here costs nothing
  * new: certNeedsRenewal already runs the same binary on this same path, every
- * time a certificate exists. (An earlier round declined this on the grounds
- * that a subprocess did not belong on the renewal path -- that reasoning was
- * simply wrong about what the path already does.)
+ * time a certificate exists.
  *
  * A missing ssh-keygen is a REFUSAL, not a pass: it means we cannot confirm,
  * and an unconfirmable certificate must not displace one that works. Nothing
@@ -1780,11 +1768,10 @@ function processAlive(pid: number): boolean {
  *  move or remove the lock, so there is no window in which the file is
  *  missing for something to slip in through.
  *
- *  And the takeover NEVER UNLINKS THE PATH. The first version verified the
- *  token, unlinked the lock and created its own, and nothing tied that unlink
- *  to the inode it had verified: a holder releasing in between let a third
- *  process create a fresh lock at the path, which the breaker then deleted.
- *  Here the breaker writes its token INTO the inode the two names share.
+ *  And the takeover NEVER UNLINKS THE PATH: an unlink-then-create is not tied
+ *  to the inode that was verified, so a holder releasing in between lets a
+ *  third process create a fresh lock at the path, which the breaker then
+ *  deletes. Here the breaker writes its token INTO the inode the two names share.
  *  `path` keeps its inode throughout, so there is no moment at which the lock
  *  at `path` can have become somebody else's between the check and the act:
  *  the holder judged dead cannot release, every other breaker is behind the
@@ -1830,10 +1817,9 @@ function breakStaleLock(path: string, stale: string, mine: string): boolean {
 }
 
 /** Side-effect seams, following the `TrackDeps` convention used by telemetry.
- *  Present so the ORDER of operations is testable: the two defects this seam
- *  exists for -- minting before the collision check, and advertising a command
- *  that cannot use the credential -- are both invisible to a test of any single
- *  step, and both shipped past unit tests of every piece. */
+ *  Present so the ORDER of operations is testable: minting before the collision
+ *  check, or advertising a command that cannot use the credential, is invisible
+ *  to a test of any single step. */
 export type SSHDeps = {
   mint?: typeof mintCert
   /** The public key to have certified. The real one derives it from the

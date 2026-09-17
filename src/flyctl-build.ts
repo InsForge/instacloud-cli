@@ -1,10 +1,9 @@
 // Build a source directory into an image and push it to Fly's registry, using a short-lived,
 // app-scoped deploy token minted by the platform (the CLI never holds a standing Fly credential).
-// Shells out to `flyctl deploy --build-only --push` (remote builder). Ported from firth.
+// Shells out to `flyctl deploy --build-only --push` (remote builder).
 import { spawn } from 'node:child_process'
 import { existsSync, writeFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
-import { info } from './util.js'
 
 export type BuildRunner = (
   cmd: string,
@@ -94,7 +93,7 @@ export async function ensureFlyctl(): Promise<void> {
       return
     }
     if (process.platform === 'linux') {
-      // A fresh Linux machine (CI containers included — insta-e2e run 31284364163) has no flyctl
+      // A fresh Linux machine (CI containers included) has no flyctl
       // and no brew; without this branch `insta deploy <dir>` dead-ends on a hand-install of a
       // third-party CLI. Official installer, pinned into ~/.fly; the current process extends its
       // own PATH because the installer's shell-profile edit can't reach an already-running process.
