@@ -33,41 +33,56 @@ export type ProjectConfig = { projectId: string; orgId: string; branch: string }
 // INSTA_API_URL wins below.
 const DEFAULT_API = ENVS[DEFAULT_ENV].api
 
-export async function readGlobal(): Promise<GlobalConfig> {
-  // Precedence, most explicit first:
-  //   1. INSTA_API_URL  — a literal URL. Overrides the persisted apiUrl, not just the default,
-  //      otherwise the env var is silently ignored as soon as any login has written a config file.
-  //      It also outranks INSTA_ENV: a hand-written URL is the more specific instruction, and it
-  //      is the only way to reach a host no environment name covers (insta-oss, a preview).
-  //   2. INSTA_ENV      — a named environment (see env.ts), resolved to its api host.
-  //   3. the persisted apiUrl, written by `insta login --env|--api-url` or `insta env use`.
-  //   4. DEFAULT_API.
-  const envApi = process.env.INSTA_API_URL
-  const named = envFromEnvVar()
-  const override = envApi ?? (named ? ENVS[named].api : undefined)
-  try {
-    const parsed = JSON.parse(await readFile(GLOBAL_FILE, 'utf8')) as GlobalConfig
-    const persisted = parsed.apiUrl ?? DEFAULT_API
-    // An override that points at a DIFFERENT deployment than the stored session was minted for
-    // must not carry that session along. `env use` already drops it on an explicit switch; without
-    // this, `INSTA_ENV=staging insta …` on a prod-logged-in machine sends prod's bearer to staging
-    // and then — on the 401 — POSTs prod's REFRESH token to staging's /auth/refresh (api.ts), which
-    // is the cross-deployment credential leak env.ts's header calls out as never allowed.
-    //
-    // In-memory only: the file keeps the real login, so unsetting the override restores it. A
-    // custom host (insta-oss, a preview) is treated the same way — its session is equally foreign.
-    if (override && normalizeUrl(override) !== normalizeUrl(persisted)) {
-      const scrubbed: GlobalConfig = { ...parsed, apiUrl: override }
-      delete scrubbed.accessToken
-      delete scrubbed.refreshToken
-      delete scrubbed.user
-      delete scrubbed.agentCredential
-      return scrubbed
-    }
-    return { ...parsed, apiUrl: override ?? persisted }
-  } catch {
-    return { apiUrl: override ?? DEFAULT_API }
+// The runtime `--api-url` flag, set by index.ts's preAction hook before any action loads config.
+// Process-local, never persisted: a debugging override must not rewrite the machine's login.
+let cliApiUrlOverride: string | undefined
+export function setApiUrlOverride(url: string | undefined): void {
+  cliApiUrlOverride = url
+}
+
+/** Which control plane this process talks to, and which stored session (if any) may travel with
+ *  it. Pure: `parsed` is the persisted file (null when absent or unreadable), `env` the process
+ *  environment, `cliOverride` the runtime flag. Precedence, most explicit first:
+ *    1. --api-url (runtime flag) — this invocation only.
+ *    2. INSTA_API_URL — a literal URL. Overrides the persisted apiUrl, not just the default,
+ *       otherwise the env var is silently ignored as soon as any login has written a config file.
+ *       It also outranks INSTA_ENV: a hand-written URL is the more specific instruction, and it
+ *       is the only way to reach a host no environment name covers (insta-oss, a preview).
+ *    3. INSTA_ENV — a named environment (see env.ts), resolved to its api host.
+ *    4. the persisted apiUrl, written by `insta login --env|--api-url` or `insta env use`.
+ *    5. DEFAULT_API.
+ *
+ *  An override that points at a DIFFERENT deployment than the stored session was minted for must
+ *  not carry that session along. `env use` already drops it on an explicit switch; without this,
+ *  `INSTA_ENV=staging insta …` on a prod-logged-in machine sends prod's bearer to staging and then
+ *  — on the 401 — POSTs prod's REFRESH token to staging's /auth/refresh (api.ts), which is the
+ *  cross-deployment credential leak env.ts's header calls out as never allowed. In-memory only:
+ *  the file keeps the real login, so unsetting the override restores it. A custom host (insta-oss,
+ *  a preview) is treated the same way — its session is equally foreign. */
+export function pickApiUrl(parsed: GlobalConfig | null, env: NodeJS.ProcessEnv, cliOverride?: string): GlobalConfig {
+  const named = envFromEnvVar(env.INSTA_ENV)
+  const override = cliOverride ?? env.INSTA_API_URL ?? (named ? ENVS[named].api : undefined)
+  if (!parsed) return { apiUrl: override ?? DEFAULT_API }
+  const persisted = parsed.apiUrl ?? DEFAULT_API
+  if (override && normalizeUrl(override) !== normalizeUrl(persisted)) {
+    const scrubbed: GlobalConfig = { ...parsed, apiUrl: override }
+    delete scrubbed.accessToken
+    delete scrubbed.refreshToken
+    delete scrubbed.user
+    delete scrubbed.agentCredential
+    return scrubbed
   }
+  return { ...parsed, apiUrl: override ?? persisted }
+}
+
+export async function readGlobal(): Promise<GlobalConfig> {
+  let parsed: GlobalConfig | null
+  try {
+    parsed = JSON.parse(await readFile(GLOBAL_FILE, 'utf8')) as GlobalConfig
+  } catch {
+    parsed = null
+  }
+  return pickApiUrl(parsed, process.env, cliApiUrlOverride)
 }
 
 /** The environment the CLI is currently pointed at, plus everything derived from it. `env` is null
