@@ -56,7 +56,7 @@ curl -fsSL agents.instacloud.com | sh
 
 Pin a version with `INSTA_VERSION=v0.0.22`; change the install directory with
 `INSTA_INSTALL_DIR`. While the CLI is pre-1.0 it updates itself on new releases. Turn that
-off with `insta autoupdate off`.
+off with `insta config autoupdate off`.
 
 ## Quickstart
 
@@ -72,7 +72,7 @@ insta deploy .
 
 `project create` makes an empty project and links the current directory. Services are
 opt-in, so you add only what you need. `secrets` writes the current branch's user-defined
-secrets to `./.env` (the postgres connection string is read with `insta db url`). `deploy .`
+secrets to `./.env` (the postgres connection string is read with `insta postgres url`). `deploy .`
 builds the directory remotely and ships it to the branch's compute
 service, with no local Docker. Whether it needs a `Dockerfile` depends on where the
 service runs: on insta-compute it is optional, and a directory without one is built
@@ -119,7 +119,7 @@ the two branches diverge independently. A project is capped at 10 branches.
 only. Provider-minted service credentials (`DATABASE_URL`, `BUCKET_NAME`,
 `AWS_ACCESS_KEY_ID`, …) are not in that bundle — they reach compute through explicit
 `insta secrets bind` rules, and the postgres connection string is read directly with
-`insta db url` (or `insta db connect` for a psql session).
+`insta postgres url` (or `insta postgres connect` for a psql session).
 
 Secrets can be scoped per compute service, so several services may each define the same name — and
 a flat bundle cannot carry two values for one name. Such a name is **withheld** from the bundle and
@@ -133,8 +133,8 @@ it as `insta run --service compute/<name>` to inject exactly what that one servi
 
 Agent requests are governed by the project's `agent-policy`; human requests use normal RBAC.
 Where the agent policy says `approve`, the command stops and prints an approval id for a human
-admin to grant with `insta approvals approve <id>`. The agent then retries the unchanged request.
-Run `insta --agent agent-policy get --json` for stored overrides, `defaultRules`, `effectiveRules`,
+admin to grant with `insta agent approvals approve <id>`. The agent then retries the unchanged request.
+Run `insta --agent agent policy get --json` for stored overrides, `defaultRules`, `effectiveRules`,
 `bootstrapRules` and `ruleNotes`. Rules distinguish no affected branches (`project`), unprotected
 branches and protected branches. They describe policy, not authorization: RBAC, session checks,
 actual affected resources and compound actions still apply. An empty override object does not
@@ -143,7 +143,7 @@ mean rules are unavailable. Text output also lists effective rules. The old `pol
 
 ### Agents get the same surface
 
-`insta manifest` prints an agent-legible view of every branch and its URLs. `insta agent
+`insta agent manifest` prints an agent-legible view of every branch and its URLs. `insta agent
 setup` installs the InstaCloud skill and registers the remote MCP server for the coding
 agents on the machine — and, when running from the npx cache with no durable `insta` on
 PATH, first installs the CLI itself globally.
@@ -256,7 +256,7 @@ The `insta` skill and its task guides live in
 [InsForge/instacloud-skills](https://github.com/InsForge/instacloud-skills). `insta agent setup`
 installs it user-globally for every coding agent on the machine. `insta project create` and
 `insta project link` additionally install the stack skills (Tigris, Better Auth) into the
-project, along with the `insta observe` credential-audit hook. Postgres needs no stack
+project, along with the `insta agent observe` credential-audit hook. Postgres needs no stack
 skill — it's plain Postgres, reached directly via `DATABASE_URL`.
 
 ## Contributing

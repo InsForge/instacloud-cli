@@ -10,7 +10,7 @@
 #   (equivalent to piping this script with:  sh -s -- --agents; add -y for a hard non-interactive run)
 #
 # Flags:
-#   --agents       after installing, run `insta agent setup` (`setup agent` on older CLIs) (skills for Claude Code/Codex/Cursor/…)
+#   --agents       after installing, run `insta agent setup` — or `setup agent` on older CLIs — installing skills for Claude Code/Codex/Cursor/…
 #   -y             non-interactive
 #   --staging      target the staging deployment (shorthand for --env staging)
 #   --env <name>   target a named deployment: prod (default) | staging
@@ -241,9 +241,10 @@ if [ "$AGENTS" = "1" ]; then
   [ "$YES" = "1" ] && YFLAG="-y"
   SETUP_ERR="${TMPDIR:-/tmp}/insta-setup-err.$$"
   # CLI releases after 0.0.79 spell it `insta agent setup`; older binaries only know `setup agent`.
-  # Probe the installed binary rather than parse a version: `agent --help` exits 0 only where the
-  # group exists. Remove this probe once every install target is a release with `agent setup`.
-  if "$INSTALL_DIR/$BIN" agent --help >/dev/null 2>&1; then SETUP_CMD="agent setup"; else SETUP_CMD="setup agent"; fi
+  # Probe the ROOT help for an `agent` command group. Not `agent --help`: commander prints the root
+  # help and exits 0 for ANY unknown command when --help is present, so that never discriminates.
+  # The pattern needs the trailing space/EOL so the old `agent-policy` row cannot match.
+  if "$INSTALL_DIR/$BIN" --help 2>/dev/null | grep -qE '^ +agent( |$)'; then SETUP_CMD="agent setup"; else SETUP_CMD="setup agent"; fi
   if "$INSTALL_DIR/$BIN" $SETUP_CMD $YFLAG $SETUP_ENV_ARGS 2>"$SETUP_ERR"; then
     cat "$SETUP_ERR" >&2
   else
