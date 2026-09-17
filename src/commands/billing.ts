@@ -65,10 +65,10 @@ export function billingLines(s: BillingOverview, org?: string): string[] {
           ? `⚠  org suspended — subscription payment did not go through; settle it in \`insta billing portal${flag}\``
           : ended
             ? s.tier === 'enterprise'
-              // Per-deal, and `billing upgrade` cannot create one: naming a self-serve tier here
+              // Per-deal, and `billing subscribe` cannot create one: naming a self-serve tier here
               // would move them off the plan they negotiated.
               ? '⚠  org suspended — the subscription ended; contact support to restore this plan'
-              // Their OWN tier, not a hardcoded one: suggesting `upgrade pro` to a Team org
+              // Their OWN tier, not a hardcoded one: suggesting `subscribe pro` to a Team org
               // resubscribes it onto the wrong plan.
               : `⚠  org suspended — the subscription ended; resubscribe with \`insta billing subscribe ${s.tier}${flag}\``
             // Deliberately claims nothing about the subscription: `incomplete` reaches here too,

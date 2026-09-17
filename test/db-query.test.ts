@@ -183,7 +183,7 @@ describe('dbQuery (handler flow, injected api — no network)', () => {
     const { deps: d } = deps(mysql, { status: 202, body })
     await dbQuery('shop', ['select 1'], {}, d) // handleApproval returns, no throw
     expect(process.exitCode).toBe(2)
-    expect(err()).toMatch(/approval required for db.query — run: insta agent approvals approve appr_1/)
+    expect(err()).toMatch(/approval required for db\.query — run: insta agent approvals approve appr_1/)
     expect(out()).toBe('')
   })
 

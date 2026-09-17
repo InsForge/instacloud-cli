@@ -214,7 +214,7 @@ describe('resolveSoleService (storage)', () => {
     expect(resolveSoleService(two, 'storage', 'assets').id).toBe('c')
     expect(() => resolveSoleService(two, 'storage')).toThrow(/multiple storage services — specify one: files, assets/)
   })
-  it('errors when the branch has no storage service, pointing at `services add`', () => {
+  it('errors when the branch has no storage service, pointing at `service add`', () => {
     expect(() => resolveSoleService([one[0]!], 'storage')).toThrow(/insta service add storage <name>/)
     expect(() => resolveSoleService(two, 'storage', 'nope')).toThrow(/storage service not found: nope/)
   })
