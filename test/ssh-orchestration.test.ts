@@ -12,7 +12,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import { computeSSH, installCertAuthority, instaCertPath, instaAliasStorePath, instaKeyPath, writeAliasStore, readAliasStore, validateCertResponse, acquireLockFile, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate } from '../src/commands/compute.js'
-import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey } from '../src/commands/ssh-config.js'
+import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, BLOCK_BEGIN,
+} from '../src/commands/ssh-config.js'
 import { canSymlink } from './support/can-symlink.js'
 
 // Redirect the whole ~/.insta and ~/.ssh tree into a temp dir.
@@ -309,6 +310,16 @@ d('what the plane returns is checked before anything is written', () => {
   it('accepts the ordinary response it exists to pass through', () => {
     expect(validateCertResponse(good)).toMatchObject({ host: good.host, username: good.username })
   })
+
+  it('passes the port through when the plane says one, and tolerates a plane that predates it', () => {
+    expect(validateCertResponse({ ...good, port: 22 })).toMatchObject({ port: 22 })
+    expect(validateCertResponse(good).port).toBeUndefined()
+  })
+  for (const [what, port] of [['a string', '2222'], ['zero', 0], ['a fraction', 22.5], ['out of range', 70000]] as const) {
+    it(`refuses a port that is ${what} rather than guessing`, () => {
+      expect(() => validateCertResponse({ ...good, port })).toThrow(/unusable ssh port/)
+    })
+  }
 
   it('accepts a response with no CA key, which only --setup needs', () => {
     expect(() => validateCertResponse({ ...good, caPublicKey: undefined })).not.toThrow()
@@ -1433,6 +1444,55 @@ d('an automatic renewal moves the alias with the certificate', () => {
     expect(readAliasStore()['api.insta']).toMatchObject({ host: MOVED, username: 'u-moved' })
     expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe(MOVED_CERT + '\n')
     expect(knownHosts(), 'the new host was not anchored').toContain(`@cert-authority ${MOVED} ${caRecord(CA)}`)
+  })
+
+  it('rewrites the stanza and the store when only the port changes', async () => {
+    // The plane's answer wins on every field it answers. `moved` is the
+    // host/user half; a port change has no CA to wait for and must still land
+    // in the stanza, or the alias keeps dialling yesterday's port with today's
+    // certificate.
+    await anInstalledAlias()
+    await renew(() => ({ ...sameResponse, port: 22 }))
+    const lines = readFileSync(configPath(), 'utf8').split('\n')
+    expect(lines, 'the stanza kept the old port').toContain('  Port 22')
+    expect(lines).not.toContain('  Port 2222')
+    expect(readAliasStore()['api.insta']).toMatchObject({ host: HOST, username: 'u-svc-1', port: 22 })
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe(MOVED_CERT + '\n')
+  })
+
+  it('repairs a stanza written before the Port line existed, even while the certificate is fresh', async () => {
+    // An alias set up by the previous CLI has no Port line and no port in its
+    // record, so it dials :22 -- closed -- on every connection. Its certificate
+    // is fresh, so nothing is due: the hook has to repair the stanza on its own,
+    // from the store, without minting.
+    installTheKeyCertWasIssuedFor()
+    const { deps: d } = deps({ installCA: undefined, installConfig: undefined })
+    await computeSSH('api', { setup: true }, d)
+    const cfgPath = configPath()
+    writeFileSync(cfgPath, readFileSync(cfgPath, 'utf8').split('\n').filter((l) => l !== '  Port 2222').join('\n'))
+    const { port: _dropped, ...legacy } = readAliasStore()['api.insta']!
+    writeAliasStore({ 'api.insta': legacy })
+    const certBefore = readFileSync(instaCertPath('api.insta'), 'utf8')
+
+    await renew(() => { throw new Error('the hook minted for a certificate that was not due') })
+
+    expect(readFileSync(cfgPath, 'utf8').split('\n'), 'the legacy stanza was not repaired').toContain('  Port 2222')
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8'), 'the fresh certificate was replaced').toBe(certBefore)
+  })
+
+  it('moves a block that slid below other configuration back to the top', async () => {
+    // OpenSSH takes the first obtained value per keyword, so a `Host *` that
+    // ended up above our block -- a dotfiles tool, a hand edit -- overrides its
+    // Port, HostName and User with the text of the block untouched. Position is
+    // part of what "installed correctly" means, so the hook repairs it.
+    await anInstalledAlias()
+    const cfgPath = configPath()
+    const block = readFileSync(cfgPath, 'utf8')
+    writeFileSync(cfgPath, `Host *\n  Port 22\n${block}`)
+    await renew(() => sameResponse)
+    const after = readFileSync(cfgPath, 'utf8')
+    expect(after.startsWith(BLOCK_BEGIN), 'the block was left below the shadowing stanza').toBe(true)
+    expect(after, 'the user\'s own stanza was lost').toContain('Host *\n  Port 22')
   })
 
   it('does not touch the config when nothing in it changed', async () => {

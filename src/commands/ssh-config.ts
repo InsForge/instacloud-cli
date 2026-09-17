@@ -100,6 +100,10 @@ export type HostEntry = {
   hostName: string
   /** Remote user the certificate is issued for. */
   user: string
+  /** The gateway's public port. WRITTEN, never left to ssh's default of 22:
+   *  the lane listens on :2222 (:22 waits for a compliance exception), and an
+   *  alias without a Port line dialled a closed port with a valid certificate. */
+  port: number
   /** Absolute path to this alias's certificate. One per alias: a cert is issued
    *  for ONE service, so a shared cert file cannot serve two of them. */
   certificateFile: string
@@ -150,12 +154,14 @@ export function renderConfigBlock(o: ConfigBlockOpts): string {
     // file verbatim from an API response.
     if (!isSafeConfigValue(e.hostName)) throw new Error(`refusing to write an unsafe ssh HostName into ssh_config: ${JSON.stringify(e.hostName)}`)
     if (!isSafeConfigValue(e.user)) throw new Error(`refusing to write an unsafe ssh User into ssh_config: ${JSON.stringify(e.user)}`)
+    if (!Number.isInteger(e.port) || e.port < 1 || e.port > 65535) throw new Error(`refusing to write an unusable ssh Port into ssh_config: ${JSON.stringify(e.port)}`)
     lines.push(
       `Host ${e.alias}`,
       // Without HostName and User the alias is not routing at all: ssh resolves
       // `api.insta` in DNS and logs in as the local OS username.
       `  HostName ${e.hostName}`,
       `  User ${e.user}`,
+      `  Port ${e.port}`,
       `  IdentityFile ${quoteConfigPath(o.identityFile)}`,
       `  CertificateFile ${quoteConfigPath(e.certificateFile)}`,
       // WRITTEN, not left to the default, and this is the one keyword where
@@ -254,6 +260,34 @@ export function upsertConfigBlock(existing: string, block: string): string {
  *  edited down to half a block is still a file we own a block in. */
 export function hasOwnedBlock(existing: string): boolean {
   return existing.split('\n').some(isMarkerLine(BLOCK_BEGIN))
+}
+
+/** Whether nothing that OpenSSH would read precedes the owned block. OpenSSH
+ *  takes the FIRST obtained value for each keyword, so a `Host *` stanza -- or a
+ *  bare global `Port 22` -- above our block silently overrides the block's
+ *  Port, HostName, User and credential; that is why upsertConfigBlock writes
+ *  the block at the top. Comments and blank lines above it are harmless and do
+ *  not count. false when there is no owned block at all. */
+export function ownedBlockIsFirst(existing: string): boolean {
+  const lines = existing.split('\n')
+  const begin = lines.findIndex(isMarkerLine(BLOCK_BEGIN))
+  if (begin === -1) return false
+  return lines.slice(0, begin).every((l) => /^\s*(#.*)?$/.test(l))
+}
+
+/** The installed owned block, BEGIN through END marker inclusive, exactly as it
+ *  sits in the file; undefined when there is none (or an unterminated one). It
+ *  exists so a writer can compare what IS installed with what it WOULD render
+ *  and touch the file only when the two differ -- a stanza written before a
+ *  keyword existed (the Port line) is the case, and "nothing changed in the
+ *  response" is not the same question as "nothing would change in the file". */
+export function ownedBlock(existing: string): string | undefined {
+  const lines = existing.split('\n')
+  const begin = lines.findIndex(isMarkerLine(BLOCK_BEGIN))
+  if (begin === -1) return undefined
+  const end = lines.findIndex((l, n) => n > begin && isMarkerLine(BLOCK_END)(l))
+  if (end === -1) return undefined
+  return lines.slice(begin, end + 1).join('\n')
 }
 
 /** A marker is a WHOLE LINE, never a substring of one.
