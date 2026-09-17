@@ -73,7 +73,7 @@ describe('set-domain flow', () => {
     // The owner (`web`) IS a service in this project, so the message can name the exact command.
     const { deps: d } = deps({ post: new ApiError(409, 'app.customer.com is already attached to web in us-west; remove it there first') })
     await expect(setDomain('app.customer.com', { group: 'api', branch: 'preview' }, d)).rejects.toThrow(
-      /domains are not moved; release it first: insta compute remove-domain app\.customer\.com --group web --branch preview/,
+      /domains are not moved; release it first: insta domain detach app\.customer\.com --group web --branch preview/,
     )
   })
 

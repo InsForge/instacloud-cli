@@ -94,7 +94,7 @@ export function domainGuidanceLines(r: DomainView, ctx: DomainCmdCtx = {}): stri
   const nameW = Math.max(...records.map((d) => d.name.length))
   out.push('add these DNS records at your DNS provider:')
   for (const d of records) out.push(`  ${pad(d.type, 6)} ${pad(d.name, nameW)} -> ${d.value}`)
-  out.push(`then: insta compute check-domain ${r.hostname}${flags(ctx)}`)
+  out.push(`then: insta domain check ${r.hostname}${flags(ctx)}`)
   return out
 }
 
@@ -138,7 +138,7 @@ export function domainResolveLine(r: DomainView): { line: string; ready: boolean
 // check-domain: every stage, what each still needs, and where it routes. Pure, exported for tests.
 export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string[] {
   if (r.status === 'not added') {
-    return [`${r.hostname} is not attached to ${targetOf(r)} — attach it with: insta compute set-domain ${r.hostname}${flags(ctx)}`]
+    return [`${r.hostname} is not attached to ${targetOf(r)} — attach it with: insta domain attach ${r.hostname}${flags(ctx)}`]
   }
   const records = recordsOf(r)
   const out = [`${r.hostname} -> ${targetOf(r)}`]
@@ -251,7 +251,7 @@ export function domainConflictMessage(host: string, e: ApiError, services: Compu
   const region = m?.[2]
   // The release command must name the OWNER's group, and the branch the user is working on — a
   // command that defaults back to the linked branch would release nothing.
-  const release = (group: string) => `insta compute remove-domain ${host}${flags({ group, branch: ctx.branch })}`
+  const release = (group: string) => `insta domain detach ${host}${flags({ group, branch: ctx.branch })}`
   if (owner) {
     const here = services.find((s) => s.type === 'compute' && s.name === owner)
     if (here) return `${host} is already attached to ${owner}${region ? ` (${region})` : here.region ? ` (${here.region})` : ''} — domains are not moved; release it first: ${release(owner)}, then re-run set-domain`

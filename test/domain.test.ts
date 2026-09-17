@@ -111,12 +111,15 @@ describe('domain attach', () => {
     expect(out()).toContain('docs.myapp.com will attach to web')
     expect(out()).not.toContain('www.myapp.com')
   })
-  it('a hostname under no bought name is refused before any service lookup', async () => {
-    const { deps: d, calls } = deps({ '/domains/orders': { items: [] }, ...inventory })
-    await expect(domainAttach('api.other.com', { group: 'web' }, d)).rejects.toThrow('exit 1')
-    expect(stderr.join('')).toContain('no domain this org bought covers api.other.com')
-    expect(stderr.join('')).toContain('insta compute set-domain api.other.com')
-    expect(calls.map((c) => c.method)).toEqual(['GET', 'GET'])
+  // Same verb for a domain owned elsewhere: no bought name covers it → the bring-your-own path,
+  // POST /compute/domain, and the DNS records to publish are printed as the next step.
+  it('a hostname under no bought name takes the bring-your-own path', async () => {
+    const byo = { hostname: 'api.other.com', flyApp: 'app-web', configured: false, status: 'pending', dns: [{ type: 'CNAME', name: 'api.other.com', value: 'web.edge.instacloud.com' }] }
+    const { deps: d, calls } = deps({ '/domains/orders': { items: [] }, ...inventory }, { status: 200, body: byo })
+    await domainAttach('api.other.com', { group: 'web' }, d)
+    expect(calls.at(-1)).toMatchObject({ method: 'POST', path: '/projects/p1/compute/domain', body: { hostname: 'api.other.com', branch: 'main', group: 'web' } })
+    expect(out()).toContain('CNAME  api.other.com -> web.edge.instacloud.com')
+    expect(out()).toContain('then: insta domain check api.other.com --group web')
   })
   // `buy` says to run this next; before the registrar answers the name is an order, and ours.
   it('a bought name still registering is refused as an order, not as someone else\'s domain', async () => {
