@@ -7,11 +7,11 @@ import { fileURLToPath } from 'node:url'
 import {
   renderConfigBlock, renderEnsureCertMatch, upsertConfigBlock, upsertCertAuthority,
   planCertAuthority, revertCertAuthority, certifiesPublicKey, parseCAPublicKey, hasOwnedBlock,
-  aliasFor, isSafeAlias, isSafeConfigValue, quoteConfigPath, BLOCK_BEGIN, BLOCK_END, CA_MARKER,
+  aliasFor, isSafeAlias, isSafeConfigValue, quoteConfigPath, BLOCK_BEGIN, BLOCK_END, CA_MARKER, ownedBlock, ownedBlockIsFirst,
 } from '../src/commands/ssh-config.js'
 
-const entry = (alias = 'api.insta', hostName = 'ssh.us-west-1.compute.example', user = 'svc-abc') => ({
-  alias, hostName, user, certificateFile: `/home/dev/.insta/ssh/${alias}-cert.pub`,
+const entry = (alias = 'api.insta', hostName = 'ssh.us-west-1.compute.example', user = 'svc-abc', port = 2222) => ({
+  alias, hostName, user, port, certificateFile: `/home/dev/.insta/ssh/${alias}-cert.pub`,
 })
 
 const KNOWN_HOSTS = '/home/dev/.ssh/known_hosts'
@@ -21,6 +21,34 @@ const block = (entries = [entry()]) => renderConfigBlock({
   identityFile: '/home/dev/.insta/ssh/id_ed25519',
   knownHostsFile: KNOWN_HOSTS,
   ensureCertCommand: 'insta compute ssh --ensure-cert',
+})
+
+describe('the Port line', () => {
+  it('writes the port the plane returned, whatever it is', () => {
+    // Whole-line, because `Port 22` is a substring of `Port 2222`: a renderer
+    // that ignored the plane and always wrote the default would pass a
+    // substring match -- exactly the regression this test exists to catch.
+    expect(block([entry('api.insta', 'ssh.us-west-1.compute.example', 'svc-abc', 22)]).split('\n')).toContain('  Port 22')
+  })
+  it('knows whether anything OpenSSH reads sits above the block', () => {
+    const b = block()
+    expect(ownedBlockIsFirst(upsertConfigBlock('Host *\n  User root\n', b)), 'freshly upserted, the block is first').toBe(true)
+    expect(ownedBlockIsFirst(`# my notes\n\n${b}`), 'comments and blank lines above do not shadow').toBe(true)
+    expect(ownedBlockIsFirst(`Host *\n  Port 22\n${b}`), 'a Host stanza above shadows every keyword').toBe(false)
+    expect(ownedBlockIsFirst(`Port 22\n${b}`), 'a bare global directive above shadows too').toBe(false)
+    expect(ownedBlockIsFirst('Host *\n  User root\n'), 'no block at all is not "first"').toBe(false)
+  })
+  it('exposes the installed block, marker to marker, for drift comparison', () => {
+    const b = block()
+    expect(ownedBlock(upsertConfigBlock('Host *\n  User root\n', b))).toBe(b.replace(/\n+$/, ''))
+    expect(ownedBlock('Host *\n  User root\n')).toBeUndefined()
+    expect(ownedBlock(`${BLOCK_BEGIN}\nHost x\n`), 'an unterminated block must not be taken for one').toBeUndefined()
+  })
+  for (const bad of [0, -1, 70000, 22.5, NaN, undefined as unknown as number]) {
+    it(`refuses to write an unusable port (${String(bad)})`, () => {
+      expect(() => block([{ ...entry(), port: bad }])).toThrow(/unusable ssh Port/)
+    })
+  }
 })
 
 describe('ssh_config block', () => {
@@ -56,6 +84,9 @@ describe('ssh_config block', () => {
     expect(b).toContain('Host api.insta')
     expect(b).toContain('  HostName ssh.us-west-1.compute.example')
     expect(b).toContain('  User svc-abc')
+    // WRITTEN, never defaulted: the gateway is on :2222 and an alias with no
+    // Port line dialled the closed :22 with a perfectly good certificate.
+    expect(b.split('\n')).toContain('  Port 2222')
   })
 
   // A certificate is issued for ONE service. A single shared cert file would
@@ -308,7 +339,7 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
       alias: 'api.insta',
       hostName: 'ssh.us-west-1.compute.example',
       user: 'svc-abc',
-      certificateFile: `${SPACED}/api.insta-cert.pub`,
+      port: 2222, certificateFile: `${SPACED}/api.insta-cert.pub`,
     }],
     identityFile: `${SPACED}/id_ed25519`,
   })
@@ -362,7 +393,7 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
     const g = effective('api.insta', rendered({
       entries: [{
         alias: 'api.insta', hostName: 'ssh.us-west-1.compute.example', user: 'svc-abc',
-        certificateFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\api.insta-cert.pub',
+        port: 2222, certificateFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\api.insta-cert.pub',
       }],
       identityFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\id_ed25519',
       knownHostsFile: 'C:\\Users\\Jun Wen\\.ssh\\known_hosts',
@@ -406,7 +437,7 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
       alias: 'api.insta',
       hostName: 'ssh.us-west-1.compute.example',
       user: 'svc-abc',
-      certificateFile: `${PERCENT}/api.insta-cert.pub`,
+      port: 2222, certificateFile: `${PERCENT}/api.insta-cert.pub`,
     }],
     identityFile: `${PERCENT}/id_ed25519`,
   })
@@ -998,7 +1029,7 @@ describe('paths are quoted, because a home directory may contain a space', () =>
         alias: 'api.insta',
         hostName: 'ssh.example.com',
         user: 'svc-abc',
-        certificateFile: '/Users/Jun Wen/.insta/ssh/api.insta-cert.pub',
+        port: 2222, certificateFile: '/Users/Jun Wen/.insta/ssh/api.insta-cert.pub',
       }],
       identityFile: '/Users/Jun Wen/.insta/ssh/id_ed25519',
       knownHostsFile: '/Users/Jun Wen/.ssh/known_hosts',
@@ -1188,7 +1219,7 @@ describe('a Windows path is normalised, not escaped away', () => {
     const out = renderConfigBlock({
       entries: [{
         alias: 'api.insta', hostName: 'ssh.example.com', user: 'svc-abc',
-        certificateFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\api.insta-cert.pub',
+        port: 2222, certificateFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\api.insta-cert.pub',
       }],
       identityFile: 'C:\\Users\\Jun Wen\\.insta\\ssh\\id_ed25519',
       knownHostsFile: 'C:\\Users\\Jun Wen\\.ssh\\known_hosts',
