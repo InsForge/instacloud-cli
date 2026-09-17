@@ -4,25 +4,25 @@ import { ApiClient, ApiError, requireProject } from '../api.js'
 import { info, printJson, handleApproval, relayExitCode } from '../util.js'
 import { parseVolumeGib, q, resolveSoleService } from './services.js'
 
-type Opts = { branch?: string; group?: string; json?: boolean }
+type Opts = { branch?: string; json?: boolean }
 
 // Toggle a postgres service between scale-to-zero (the default: instance suspends when idle,
 // cold-starts on the next connection) and always-on (instance stays warm; idle RAM bills at
 // actual usage). Thin wrapper over PATCH /database/settings {scaleToZero} — insta-db-backed
 // postgres only.
-export async function dbAlwaysOn(mode: string, opts: Opts): Promise<void> {
+export async function dbAlwaysOn(mode: string, service: string | undefined, opts: Opts): Promise<void> {
   if (mode !== 'on' && mode !== 'off') throw new Error('mode must be on|off')
   const api = await ApiClient.load()
   const p = await requireProject()
   const qs = new URLSearchParams()
   const branch = opts.branch ?? p.branch
   if (branch) qs.set('branch', branch)
-  if (opts.group) qs.set('group', opts.group)
+  if (service) qs.set('group', service)
   const res = await api.rawRequest('PATCH', `/projects/${p.projectId}/database/settings${qs.toString() ? `?${qs}` : ''}`, { scaleToZero: mode !== 'on' })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const s2z = res.body?.scaleToZero
-  info(`postgres ${opts.group ?? 'default'}: always-on ${s2z === false ? 'ENABLED — instance stays warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle (default; first connection after idle cold-starts)'}`)
+  info(`postgres ${service ?? 'default'}: always-on ${s2z === false ? 'ENABLED — instance stays warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle (default; first connection after idle cold-starts)'}`)
 }
 
 // Validated pass-throughs for the provider's quantity strings. The insta-db resize API takes
@@ -74,19 +74,19 @@ export async function fetchDbInstance(
 // Show or set a postgres service's resource ceiling (insta-db-backed only). Paid plans — the
 // ceiling is the tier lever now that billing follows actual usage. Moves both directions:
 // unlike storage it is a cgroup limit, not a provisioned volume.
-export async function dbLimits(opts: Opts & { cpu?: string; memory?: string }): Promise<void> {
+export async function dbLimits(service: string | undefined, opts: Opts & { cpu?: string; memory?: string }): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()
   const qs = new URLSearchParams()
   const branch = opts.branch ?? p.branch
   if (branch) qs.set('branch', branch)
-  if (opts.group) qs.set('group', opts.group)
+  if (service) qs.set('group', service)
   const suffix = qs.toString() ? `?${qs}` : ''
 
   if (!opts.cpu && !opts.memory) {
     const read = await fetchDbInstance(api, p.projectId, suffix)
     if (read.kind === 'no-instance') {
-      info(`postgres ${opts.group ?? 'default'}: no manageable instance (this service manages its own resources)`)
+      info(`postgres ${service ?? 'default'}: no manageable instance (this service manages its own resources)`)
       return
     }
     if (opts.json) return printJson(read.body)
@@ -94,10 +94,10 @@ export async function dbLimits(opts: Opts & { cpu?: string; memory?: string }): 
     const mib = read.body?.memoryMib
     if (typeof cpuMilli === 'number' && typeof mib === 'number') {
       const cpu = cpuMilli % 1000 === 0 ? `${cpuMilli / 1000}` : `${cpuMilli}m`
-      info(`postgres ${opts.group ?? 'default'}: ceiling ${cpu} vCPU / ${fmtMib(mib)}`)
+      info(`postgres ${service ?? 'default'}: ceiling ${cpu} vCPU / ${fmtMib(mib)}`)
       info('  billing is actual usage — the ceiling caps what the database may burn, it is not a price')
     } else {
-      info(`postgres ${opts.group ?? 'default'}: provider reported no ceiling — set one with --cpu/--memory`)
+      info(`postgres ${service ?? 'default'}: provider reported no ceiling — set one with --cpu/--memory`)
     }
     return
   }
@@ -116,7 +116,7 @@ export async function dbLimits(opts: Opts & { cpu?: string; memory?: string }): 
   if (opts.json) return printJson(res.body)
   const cpu = typeof res.body?.cpuMilli === 'number' ? `${res.body.cpuMilli / 1000} vCPU` : (opts.cpu ?? 'unchanged')
   const mem = typeof res.body?.memoryMib === 'number' ? fmtMib(res.body.memoryMib) : (opts.memory ?? 'unchanged')
-  info(`postgres ${opts.group ?? 'default'}: ceiling set to ${cpu} / ${mem}`)
+  info(`postgres ${service ?? 'default'}: ceiling set to ${cpu} / ${mem}`)
 }
 
 // Bytes → human units, one decimal above KiB. Local because the metrics payload is the only
@@ -163,16 +163,16 @@ export function dbStatsLines(group: string, body: any): string[] {
 // anywhere, and the code that handled it is retained, not live. Neon-backed: the platform read
 // over a direct SQL connection, so a one-shot call could wake a suspended endpoint — acceptable
 // for an explicit command, which is why nothing here polls.
-export async function dbStats(opts: Opts): Promise<void> {
+export async function dbStats(service: string | undefined, opts: Opts): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()
   const qs = new URLSearchParams()
   const branch = opts.branch ?? p.branch
   if (branch) qs.set('branch', branch)
-  if (opts.group) qs.set('group', opts.group)
+  if (service) qs.set('group', service)
   const res = await api.rawRequest('GET', `/projects/${p.projectId}/database/metrics${qs.toString() ? `?${qs}` : ''}`)
   if (opts.json) return printJson(res.body)
-  for (const line of dbStatsLines(opts.group ?? 'default', res.body)) info(line)
+  for (const line of dbStatsLines(service ?? 'default', res.body)) info(line)
 }
 
 // Render the instance's volume from a database/instance read. Pure, exported for tests. Reads the
@@ -193,23 +193,23 @@ export function dbVolumeLines(group: string, body: any): string[] {
 // is available on every plan; growth is paid and grow-only — both gates are the backend's to
 // enforce, so nothing here pre-blocks: its 403/400 messages carry the upgrade hints and are wrapped
 // with context but kept verbatim.
-export async function dbVolume(opts: Opts & { size?: string }): Promise<void> {
+export async function dbVolume(service: string | undefined, opts: Opts & { size?: string }): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()
   const qs = new URLSearchParams()
   const branch = opts.branch ?? p.branch
   if (branch) qs.set('branch', branch)
-  if (opts.group) qs.set('group', opts.group)
+  if (service) qs.set('group', service)
   const suffix = qs.toString() ? `?${qs}` : ''
 
   if (!opts.size) {
     const read = await fetchDbInstance(api, p.projectId, suffix)
     if (read.kind === 'no-instance') {
-      info(`postgres ${opts.group ?? 'default'}: no manageable instance (this service manages its own storage)`)
+      info(`postgres ${service ?? 'default'}: no manageable instance (this service manages its own storage)`)
       return
     }
     if (opts.json) return printJson(read.body)
-    for (const line of dbVolumeLines(opts.group ?? 'default', read.body)) info(line)
+    for (const line of dbVolumeLines(service ?? 'default', read.body)) info(line)
     return
   }
 
@@ -224,12 +224,12 @@ export async function dbVolume(opts: Opts & { size?: string }): Promise<void> {
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const vg = res.body?.volumeGib
-  info(`postgres ${opts.group ?? 'default'}: volume ${typeof vg === 'number' ? `grown to ${vg}Gi` : `set to ${sizeGib}Gi`}`)
+  info(`postgres ${service ?? 'default'}: volume ${typeof vg === 'number' ? `grown to ${vg}Gi` : `set to ${sizeGib}Gi`}`)
 }
 
 export type DbUrlResolution = { serviceName: string; url: string }
 
-// Resolve the postgres service (sole, or --group) and its connection string. Two reads: the
+// Resolve the postgres service (sole, or the named one) and its connection string. Two reads: the
 // branch's services list names the service; GET /services/:id/credentials (gated secrets.read)
 // carries the value. Provider-minted credentials are canonical within their source service
 // (DATABASE_URL) and deliberately absent from the general `insta secrets` bundle, so this is the
@@ -244,27 +244,27 @@ export async function resolveDbUrl(
   },
   projectId: string,
   branch: string | undefined,
-  group: string | undefined,
+  service: string | undefined,
   json?: boolean,
 ): Promise<DbUrlResolution | null> {
   const { services } = await api.request('GET', `/projects/${projectId}/services${q(branch)}`)
-  const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, 'postgres', group)
+  const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, 'postgres', service)
   const res = await api.rawRequest('GET', `/projects/${projectId}/services/${svc.id}/credentials`)
   if (handleApproval(res, json)) return null
   const url = res.body?.credentials?.DATABASE_URL
   if (typeof url !== 'string' || !url) {
-    throw new Error(`postgres ${svc.name} has no DATABASE_URL credential yet — still provisioning? (\`insta services list\` shows status)`)
+    throw new Error(`postgres ${svc.name} has no DATABASE_URL credential yet — still provisioning? (\`insta service list\` shows status)`)
   }
   return { serviceName: svc.name, url }
 }
 
 // Print the postgres connection string: the bare DSN on stdout, nothing else — pipe-friendly
-// (`psql "$(insta db url)"`), like `storage get --json` keeps stdout parseable.
-export async function dbUrl(opts: Opts): Promise<void> {
+// (`psql "$(insta postgres url)"`), like `storage get --json` keeps stdout parseable.
+export async function dbUrl(service: string | undefined, opts: Opts): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()
   const branch = opts.branch ?? p.branch
-  const r = await resolveDbUrl(api, p.projectId, branch, opts.group, opts.json)
+  const r = await resolveDbUrl(api, p.projectId, branch, service, opts.json)
   if (!r) return
   if (opts.json) return printJson({ service: r.serviceName, branch: branch ?? null, url: r.url })
   process.stdout.write(r.url + '\n')
@@ -303,7 +303,7 @@ export async function connectWithPsql(url: string, spawnImpl: typeof spawn = spa
     const child = spawnImpl('psql', [], { stdio: 'inherit', env })
     child.on('error', (e: NodeJS.ErrnoException) =>
       reject(e.code === 'ENOENT'
-        ? new Error('psql not found on PATH — install the postgres client, or print the DSN with `insta db url`')
+        ? new Error('psql not found on PATH — install the postgres client, or print the DSN with `insta postgres url`')
         : e))
     // Signal death reports code null — map to the conventional 128+signo (full table from
     // os.constants) so the advertised exit-status passthrough holds for Ctrl-C'd/killed sessions.
@@ -315,11 +315,11 @@ export async function connectWithPsql(url: string, spawnImpl: typeof spawn = spa
 // Open an interactive psql session on the postgres service. The DSN never touches disk or argv
 // history beyond the child process. Exits with psql's own exit code (agents rely on this, as
 // with `compute exec`).
-export async function dbConnect(opts: Opts): Promise<void> {
+export async function dbConnect(service: string | undefined, opts: Opts): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()
   const branch = opts.branch ?? p.branch
-  const r = await resolveDbUrl(api, p.projectId, branch, opts.group, opts.json)
+  const r = await resolveDbUrl(api, p.projectId, branch, service, opts.json)
   if (!r) return
   // stderr: stdout belongs to psql (the `insta run` rule).
   process.stderr.write(`psql → postgres/${r.serviceName}${branch ? ` (branch ${branch})` : ''} — a suspended instance wakes on connect, so the first prompt can take a few seconds\n`)

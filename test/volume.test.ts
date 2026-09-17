@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest'
 import { parseVolumeGib, servicesAddRequestBody, servicesAdd, serviceListLine } from '../src/commands/services.js'
 import { volumeLines, volumeWriteLine, volumeDeleteLine, volumeDeleteError, computeVolume } from '../src/commands/compute.js'
 import { ApiError } from '../src/api.js'
-import { dbVolumeLines } from '../src/commands/db.js'
+import { dbVolumeLines } from '../src/commands/postgres.js'
 
 describe('parseVolumeGib', () => {
   it('parses whole Gi, with or without a suffix', () => {

@@ -23,7 +23,7 @@ import { deploy } from './commands/deploy.js'
 import { build } from './commands/build.js'
 import * as computeCmd from './commands/compute.js'
 import * as githubCmd from './commands/github.js'
-import * as dbCmd from './commands/db.js'
+import * as dbCmd from './commands/postgres.js'
 import * as dbQueryCmd from './commands/db-query.js'
 import * as storageCmd from './commands/storage.js'
 import { manifest } from './commands/manifest.js'
@@ -300,24 +300,24 @@ compute.command('volume [service]').description("Show, attach, grow, or delete a
 const db = program.command('db').description('Postgres service controls (url / connect / limits / volume / always-on / scale-to-zero) + managed-DB query (mysql/redis/mongodb)')
 db.command('url').description('Print the postgres connection string (DSN) — bare on stdout for piping, e.g. `psql "$(insta db url)"` (gated: secrets.read). Provider credentials are not in `insta secrets` — this is the command that yields the DSN')
   .option('--json').option('--branch <branch>', 'branch (default: current)').option('--group <g>', 'postgres service name (default: the sole/default one)')
-  .action(guard((o) => dbCmd.dbUrl(o)))
+  .action(guard((o) => dbCmd.dbUrl(o.group, o)))
 db.command('connect').description("Open an interactive psql session on the postgres service (needs psql on PATH; gated: secrets.read). A suspended instance wakes on connect — the first prompt can take a few seconds. Exits with psql's own exit code")
   .option('--branch <branch>', 'branch (default: current)').option('--group <g>', 'postgres service name (default: the sole/default one)')
-  .action(guard((o) => dbCmd.dbConnect(o)))
+  .action(guard((o) => dbCmd.dbConnect(o.group, o)))
 db.command('limits').description("Show or set a postgres service's resource ceiling (any plan within the free cap, paid above it; insta-db-backed only). Moves both directions")
   .option('--cpu <n>', "vCPU ceiling, e.g. 2 or 2500m").option('--memory <size>', "memory ceiling, e.g. 4Gi")
   .option('--json').option('--branch <branch>', 'branch (default: current)').option('--group <g>', 'postgres service name (default: the sole/default one)')
-  .action(guard((o) => dbCmd.dbLimits(o)))
+  .action(guard((o) => dbCmd.dbLimits(o.group, o)))
 db.command('stats').description("Postgres stats snapshot: connections vs the server's max (active count), cache hit rate, database size. insta-db-backed services answer without waking a suspended instance")
   .option('--json').option('--branch <branch>', 'branch (default: current)').option('--group <g>', 'postgres service name (default: the sole/default one)')
-  .action(guard((o) => dbCmd.dbStats(o)))
+  .action(guard((o) => dbCmd.dbStats(o.group, o)))
 db.command('always-on <mode>').description('Set a postgres service always-on (mode: on|off). on = instance stays warm, no cold starts; off = default scale-to-zero (idle instance suspends; first connection cold-starts). insta-db-backed services only')
   .option('--json').option('--branch <branch>', 'branch (default: current)').option('--group <g>', 'postgres service name (default: the sole/default one)')
-  .action(guard((mode, o) => dbCmd.dbAlwaysOn(mode, o)))
+  .action(guard((mode, o) => dbCmd.dbAlwaysOn(mode, o.group, o)))
 db.command('volume').description("Show or grow a postgres service's provisioned volume (block disk; insta-db-backed only). No --size: print size and the plan cap (any plan). --size grows it (paid plans; grow-only — a provisioned disk cannot shrink). Billing is actual data stored — the size is a cap, not a price")
   .option('--size <gi>', 'new size in whole Gi, e.g. 10 (must be ≥ the current size)')
   .option('--json').option('--branch <branch>', 'branch (default: current)').option('--group <g>', 'postgres service name (default: the sole/default one)')
-  .action(guard((o) => dbCmd.dbVolume(o)))
+  .action(guard((o) => dbCmd.dbVolume(o.group, o)))
 db.command('query <service> [args...]').description('Run a query/command against a managed database (mysql/redis/mongodb) via the console exec API. mysql/mongodb take one quoted statement; redis takes a pre-tokenized argv (e.g. `GET mykey`). Not for postgres — use `insta db url|connect` / the SQL editor')
   .option('--database <db>', 'mongodb only — the database to run against (default admin)')
   .option('--branch <branch>', 'branch (default: current)')

@@ -39,9 +39,9 @@ describe('parseMemoryMb', () => {
 // Review round 2: both jwfing and cubic independently flagged the bare Number() on --cpu (NaN
 // serializes to null on the wire) and the unvalidated db strings. These pin the new seams.
 import { parseCpu, fmtMb } from '../src/commands/compute.js'
-import { fetchDbInstance } from '../src/commands/db.js'
+import { fetchDbInstance } from '../src/commands/postgres.js'
 import { ApiError } from '../src/api.js'
-import { parseDbCpu, parseDbMemory, fmtMib } from '../src/commands/db.js'
+import { parseDbCpu, parseDbMemory, fmtMib } from '../src/commands/postgres.js'
 
 describe('parseCpu (compute --cpu override)', () => {
   it('accepts exactly the provider grid the help text advertises', () => {

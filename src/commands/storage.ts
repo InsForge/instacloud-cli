@@ -7,7 +7,7 @@ import { pipeline } from 'node:stream/promises'
 import { ApiClient, requireProject } from '../api.js'
 import { info, printJson, handleApproval } from '../util.js'
 import { q, resolveSoleService } from './services.js'
-import { fmtBytes } from './db.js' // the repo's tested bytes formatter — don't grow a third copy
+import { fmtBytes } from './postgres.js' // the repo's tested bytes formatter — don't grow a third copy
 
 type Common = { branch?: string; service?: string; json?: boolean }
 
