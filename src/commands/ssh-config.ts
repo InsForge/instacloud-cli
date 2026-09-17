@@ -262,12 +262,6 @@ export function hasOwnedBlock(existing: string): boolean {
   return existing.split('\n').some(isMarkerLine(BLOCK_BEGIN))
 }
 
-/** The installed owned block, BEGIN through END marker inclusive, exactly as it
- *  sits in the file; undefined when there is none (or an unterminated one). It
- *  exists so a writer can compare what IS installed with what it WOULD render
- *  and touch the file only when the two differ -- a stanza written before a
- *  keyword existed (the Port line) is the case, and "nothing changed in the
- *  response" is not the same question as "nothing would change in the file". */
 /** Whether nothing that OpenSSH would read precedes the owned block. OpenSSH
  *  takes the FIRST obtained value for each keyword, so a `Host *` stanza -- or a
  *  bare global `Port 22` -- above our block silently overrides the block's
@@ -281,6 +275,12 @@ export function ownedBlockIsFirst(existing: string): boolean {
   return lines.slice(0, begin).every((l) => /^\s*(#.*)?$/.test(l))
 }
 
+/** The installed owned block, BEGIN through END marker inclusive, exactly as it
+ *  sits in the file; undefined when there is none (or an unterminated one). It
+ *  exists so a writer can compare what IS installed with what it WOULD render
+ *  and touch the file only when the two differ -- a stanza written before a
+ *  keyword existed (the Port line) is the case, and "nothing changed in the
+ *  response" is not the same question as "nothing would change in the file". */
 export function ownedBlock(existing: string): string | undefined {
   const lines = existing.split('\n')
   const begin = lines.findIndex(isMarkerLine(BLOCK_BEGIN))
