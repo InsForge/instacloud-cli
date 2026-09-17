@@ -128,7 +128,7 @@ const svc = program.command('service').aliases(['services', 'svc']).description(
 // (resolve-service.ts). Picking Docker Image also fills in --image/--port from the answers.
 svc.command('add [type] [name]').description('Provision a service on demand (assigns a default domain for postgres/compute); with no type/name, a terminal picks from the service kinds')
   .option('--branch <branch>', 'target branch (default: current)')
-  .option('--region <region>', 'region for postgres/compute/managed databases, e.g. us-east (see `insta regions`)')
+  .option('--region <region>', 'region for postgres/compute/managed databases, e.g. us-east (see `insta config regions`)')
   .option('--public', 'storage only: serve the bucket with anonymous public-read (default private)')
   .option('--image <url>', 'compute only: run this container image at creation')
   .option('--port <n>', 'compute only: port the image listens on (default 8080)')
@@ -414,7 +414,7 @@ tpl.command('info <code>').description('Show a template: version, upstream pin, 
   .option('--json').action(guard((code, o) => template.templateInfo(code, o)))
 tpl.command('deploy <code-or-dir-or-url>').description('Deploy a template onto a branch — a registry code, a local directory containing insta.template.yaml (a path-looking target is always read as a directory), or a github.com URL (https://github.com/<owner>/<repo>[/tree/<ref>[/<dir>]]) whose manifest is fetched with your own git credentials. Missing required variables are prompted for on a terminal; generator-backed (secret:N) and defaulted ones are resolved by the platform')
   .option('--branch <b>', 'target branch (default: current)')
-  .option('--region <region>', 'region for every service the template creates, e.g. us-east (see `insta regions`)')
+  .option('--region <region>', 'region for every service the template creates, e.g. us-east (see `insta config regions`)')
   .option('--set <NAME=value>', 'set a template variable (repeatable)', (v: string, prev: string[]) => [...prev, v], [] as string[])
   .option('-y, --yes', 'non-interactive: missing required variables fail with a --set list instead of prompting')
   .option('--json')

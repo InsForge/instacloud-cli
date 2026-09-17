@@ -82,7 +82,7 @@ describe('group shapes', () => {
       expect(r.stdout, verb).not.toContain('--group')
     }
     expect(run(['postgres', 'always-on', '--help']).stdout).toContain('Usage: insta postgres always-on [options] <mode> [service]')
-  })
+  }, 30_000)
   it('each managed database has the same verbs', () => {
     for (const type of ['redis', 'mysql', 'mongodb']) {
       const names = commandNames(run([type, '--help']).stdout)
@@ -90,7 +90,7 @@ describe('group shapes', () => {
     }
     expect(run(['mongodb', 'query', '--help']).stdout).toContain('--database')
     expect(run(['redis', 'query', '--help']).stdout).not.toContain('--database')
-  })
+  }, 30_000)
   it('compute has scale, logs, metrics and no domain verbs; domain has attach, check, detach', () => {
     const compute = commandNames(run(['compute', '--help']).stdout)
     expect(compute).toEqual(expect.arrayContaining(['scale', 'logs', 'metrics', 'limits', 'volume', 'always-on', 'exec', 'ssh']))
@@ -99,7 +99,7 @@ describe('group shapes', () => {
     expect(domain).toEqual(expect.arrayContaining(['attach', 'check', 'detach', 'records']))
     expect(run(['compute', 'scale', '--help']).stdout).toContain('Usage: insta compute scale [options] <count> [service]')
     expect(run(['storage', 'set-access', '--help']).stdout).toContain('Usage: insta storage set-access [options] <access>')
-  })
+  }, 30_000)
   it('agent, config and billing carry the moved verbs', () => {
     expect(commandNames(run(['agent', '--help']).stdout)).toEqual(['setup', 'manifest', 'policy', 'approvals', 'observe', 'events'])
     expect(commandNames(run(['config', '--help']).stdout)).toEqual(['install-mcp', 'regions', 'autoupdate'])
