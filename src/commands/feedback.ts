@@ -43,7 +43,7 @@ const FEEDBACK_ENDPOINT =
   'https://feedback.instacloud.com/v1/feedback'
 const FEEDBACK_INGEST_TOKEN = process.env.INSTA_FEEDBACK_TOKEN || 'insta-feedback-public-v1'
 // 15s gives the backend's scale-to-zero cold start room to answer (the ingest service waits out
-// the DB wake and persists, so a report can land after the old 10s deadline gave up on it).
+// the DB wake and persists, so a report can land after a shorter deadline gave up on it).
 // An expired deadline is reported as UNCONFIRMED, not failed — the report may well be stored.
 const FEEDBACK_TIMEOUT_MS = 15_000
 const MAX_FILE_BYTES = 256 * 1024
@@ -188,7 +188,7 @@ export type SubmitResult =
   | { status: 'unconfirmed'; error: string }
   | { status: 'error'; error: string }
 
-/** One POST, 10s timeout, zero retries — feedback is a side quest and must never hang the CLI.
+/** One POST, one bounded attempt (FEEDBACK_TIMEOUT_MS), zero retries — feedback is a side quest and must never hang the CLI.
  *  Transport and server failures come back as a result, not an exception: the caller downgrades
  *  them to a warning so a broken feedback backend can't fail the user's actual task. */
 export async function submit(payload: Record<string, unknown>, fetchImpl: typeof fetch): Promise<SubmitResult> {

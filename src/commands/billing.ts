@@ -99,10 +99,8 @@ export async function billing(opts: OrgOpt & { json?: boolean }): Promise<void> 
 
 // insta billing upgrade <tier> — start a Stripe Checkout to subscribe the org to a paid tier.
 export async function billingUpgrade(tier: string, opts: OrgOpt & { open?: boolean; json?: boolean }): Promise<void> {
-  // pro|team, matching what POST /orgs/:orgId/billing/checkout actually accepts. This said
-  // pro|enterprise, which was wrong both ways: `team` is a real self-serve tier and was refused
-  // here, and `enterprise` is per-deal and 400s at the server. The suspension hint above now names
-  // the org's own tier, so a Team org was being sent to a command that rejected it.
+  // pro|team, matching what POST /orgs/:orgId/billing/checkout accepts: `team` is a real
+  // self-serve tier, and `enterprise` is per-deal and 400s at the server.
   if (tier !== 'pro' && tier !== 'team') die('tier must be pro|team')
   const api = await ApiClient.load()
   const orgId = await resolveOrgId(opts)

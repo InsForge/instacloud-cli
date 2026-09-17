@@ -95,8 +95,8 @@ export function resolveThroughSymlink(path: string): string {
 const MAX_SYMLINK_HOPS = 40
 
 /** How to launch the default browser for `url` on `platform`. Pure so the Windows encoding is
- *  testable. On Windows NO shell may ever parse the URL: cmd.exe splits at bare `&` (which #138
- *  fixed by quoting) but ALSO expands `%…%` sequences even inside quotes, and a percent-encoded
+ *  testable. On Windows NO shell may ever parse the URL: cmd.exe splits at bare `&` (quoting
+ *  fixes that) but ALSO expands `%…%` sequences even inside quotes, and a percent-encoded
  *  OAuth redirect (`http%3A%2F%2F127.0.0.1…`) is nothing but such sequences. So the launch goes
  *  through PowerShell's -EncodedCommand: a pure-ASCII script travels as base64(UTF-16LE) — no
  *  argument parsing anywhere — and the URL itself rides as a second base64 payload INSIDE that
@@ -110,11 +110,10 @@ export function openUrlSpawn(
   systemRoot: string = process.env.SYSTEMROOT ?? process.env.windir ?? 'C:\\Windows',
 ): { cmd: string; args: string[] } {
   if (platform === 'win32') {
-    // The URL never appears in PowerShell SOURCE at all: it travels as base64 inside the script
-    // and is decoded by .NET at runtime. Interpolating it into a quoted literal is not enough —
-    // PowerShell honors smart quotes (U+2018–U+201B) as string delimiters too, so ASCII-only
-    // escaping still leaves a breakout. The script below is pure ASCII by construction (the
-    // base64 alphabet), so no byte of any URL can terminate anything.
+    // Interpolating the URL into a quoted literal is not enough — PowerShell honors smart quotes
+    // (U+2018–U+201B) as string delimiters too, so ASCII-only escaping still leaves a breakout.
+    // The script below is pure ASCII by construction (the base64 alphabet), so no byte of any
+    // URL can terminate anything.
     const urlB64 = Buffer.from(url, 'utf8').toString('base64')
     const script = `Start-Process ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${urlB64}')))`
     return {
@@ -145,8 +144,7 @@ export function openUrl(url: string): boolean {
 
 export class CliExit extends Error {
   constructor() {
-    // Preserve the observable error used by direct command-unit tests that previously mocked
-    // process.exit(1) by throwing `Error('exit 1')`.
+    // Command-unit tests assert this exact message.
     super('exit 1')
     this.name = 'CliExit'
   }

@@ -5,9 +5,8 @@ import { ApiClient, requireProject } from '../api.js'
 import { info, printJson, serializeEnv, handleApproval, die } from '../util.js'
 
 // One env name that several services each define. The bundle is a flat map, so it cannot carry
-// three values for one name — the platform reports the ambiguity here instead of picking a winner
-// (which it used to do implicitly: newest row wins, so a hand-set value read back as another
-// service's). `services` are "<type>/<name>" strings.
+// three values for one name — the platform reports the ambiguity here instead of picking a winner.
+// `services` are "<type>/<name>" strings.
 export type Collision = { name: string; services: string[] }
 
 /** The bundle read, exactly as the platform answers it. */
@@ -172,7 +171,7 @@ const BENIGN_SKIP_REASONS = new Set(['no-image', 'other-branch', 'caller-deployi
 
 export type ApplyVerdict = 'ok' | 'degraded' | 'not-written'
 
-// Design doc §5's three outcomes: an unwritten entry is a hard failure; a written entry with a
+// Three outcomes: an unwritten entry is a hard failure; a written entry with a
 // failed or unexplained-skip service is durable but not fully live; anything else is success.
 export function applyVerdict(entries: ApplyEntryOutcome[], services: ApplyServiceOutcome[]): ApplyVerdict {
   if (entries.some((e) => !e.written)) return 'not-written'

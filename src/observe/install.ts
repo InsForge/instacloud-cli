@@ -1,5 +1,5 @@
 // Install the observe hook into a project's agent harness (Claude Code / Codex) and materialize
-// the standalone hook + scanner into ./.insta/observe. Ported from firth (.firth -> .insta).
+// the standalone hook + scanner into ./.insta/observe.
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'

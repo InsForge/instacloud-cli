@@ -158,7 +158,7 @@ export function validateManifest(m: TemplateManifest): string[] {
     }
     if (svc.type === 'web' && !svc.healthcheck) problems.push(`${where}: web services must declare a healthcheck path`)
     if (svc.healthcheck && !String(svc.healthcheck).startsWith('/')) problems.push(`${where}: healthcheck must be an absolute path (start with /)`)
-    // Sizing is the platform's, capped for the org's plan (insta-platform#357). Same answers the
+    // Sizing is the platform's, capped for the org's plan. Same answers the
     // publish endpoint gives, said here so an author does not upload to find out. Read as unknown:
     // the type above admits only what is SUPPORTED, and the document is a cast over YAML.parse, so
     // a refused shape arrives as a value that type does not describe.

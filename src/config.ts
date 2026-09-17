@@ -29,9 +29,8 @@ export type GlobalConfig = {
 
 export type ProjectConfig = { projectId: string; orgId: string; branch: string }
 
-// The cloud API default. Uses the instacloud.com brand domain (matches the agents.instacloud.com
-// onboarding), NOT the legacy beta-api.insta.insforge.dev host — same backend, branded domain.
-// Only affects fresh installs: a persisted apiUrl (from a prior login) or INSTA_API_URL wins below.
+// The cloud API default. Only affects fresh installs: a persisted apiUrl (from a prior login) or
+// INSTA_API_URL wins below.
 const DEFAULT_API = ENVS[DEFAULT_ENV].api
 
 export async function readGlobal(): Promise<GlobalConfig> {
@@ -182,7 +181,7 @@ export type ForeignLink = {
 
 /** The link that applies to `cwd`, and whether it was made against a DIFFERENT control plane. A
  *  project id means nothing on another control plane (cloud, staging and every insta-oss box each
- *  have their own), and the CLI used to reuse a link against whatever API it was pointed at. */
+ *  have their own). */
 export async function resolveProjectLink(cwd = process.cwd()): Promise<{ link: ProjectConfig; foreign?: ForeignLink } | null> {
   // Linkless targeting (CI / one-offs / agents): INSTA_PROJECT_ID resolves the project with no
   // link file, and beats one when both exist — an explicit parameter outranks ambient state.
@@ -203,8 +202,8 @@ export async function resolveProjectLink(cwd = process.cwd()): Promise<{ link: P
   } catch {
     return null
   }
-  // No sidecar — a link from before this existed, or a teammate who just cloned — resolves as it
-  // always did: there is nothing to say which control plane it belongs to.
+  // No sidecar (a teammate who just cloned): nothing says which control plane the link belongs
+  // to, so it resolves unchecked.
   const record = await readLinkPlane(root)
   if (record) {
     const current = safeUrl((await readGlobal()).apiUrl)

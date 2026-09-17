@@ -95,9 +95,8 @@ export function servicesAddRequestBody(type: string, name: string, branch: strin
     type, name, ...(branch ? { branch } : {}), public: !!opts.public,
     ...(opts.image ? { image: opts.image } : {}), ...(opts.port ? { port: parsePort(opts.port) } : {}),
     ...(opts.region ? { region: opts.region } : {}),
-    // Sent whenever the flag was given, false included: compute is born always-on by default
-    // (insta-platform #385, 2026-09-07), so `--no-always-on` must reach the API as an explicit
-    // false. Omitted means the platform default.
+    // Sent whenever the flag was given, false included: compute is born always-on by default,
+    // so `--no-always-on` must reach the API as an explicit false. Omitted means the platform default.
     ...(opts.alwaysOn !== undefined ? { alwaysOn: opts.alwaysOn } : {}),
     ...(opts.volume !== undefined ? { volumeGib: parseVolumeGib(opts.volume) } : {}),
     ...(opts.mountPath !== undefined ? { volumeMountPath: opts.mountPath } : {}),

@@ -100,8 +100,7 @@ function printDimensions(dims: Dim[]): void {
 // insta usage — usage across the 5 billing dimensions (cpu/memory/volume/egress/storage) for the
 // current billing cycle. Shows the whole ORG by default (with a per-project breakdown); pass --proj
 // [id] for a single project (the linked one, or a given id). Billed dimensions, not raw provider
-// meters. (Historical: those were fly/neon meters — Neon is no longer used by any environment,
-// though the adapter code is retained, not live.)
+// meters.
 export async function usage(opts: { from?: string; to?: string; json?: boolean; proj?: string | boolean }): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()

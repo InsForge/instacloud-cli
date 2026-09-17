@@ -22,7 +22,7 @@ import { envUse } from './env.js'
 import { installAgentConfigs } from './mcp.js'
 import { detectChannel, type Channel } from './upgrade.js'
 
-export { resolveSpawnable, whichOnPath } from '../spawn.js'
+export { resolveSpawnable } from '../spawn.js'
 
 // The `skills` tool we shell out to prints a clack UI: a frame-by-frame clone spinner, an
 // "Installing to all N agents" banner, a full N-line install-path box, and a third-party
@@ -67,7 +67,7 @@ export function parseInstalledAgents(output: string): { count: number; names: st
     // The tool boxes each line ("│    → ~/.claude/skills/insta   │"), so don't anchor to EOL.
     // Separator-agnostic: on Windows the tool prints C:\Users\…\.claude\skills\insta — a
     // forward-slash-only match found nothing there, collapsing the summary to a nameless
-    // "Agents set up" (user report).
+    // "Agents set up".
     const m = plain.match(/→\s*(\S+)[\\/]skills[\\/][A-Za-z0-9_-]+/)
     if (m && m[1]) paths.add(m[1])
   }
@@ -286,7 +286,7 @@ export function requireMcpRegistration(status: McpStatus): boolean {
 /** The environment `setup agent` should target, and whether the machine must be switched to it
  *  first. Pure — decides only; the caller performs the switch.
  *
- *  The contract (CLI ≥ 0.0.38): the public one-liner `npx -y insta setup agent` means PRODUCTION,
+ *  The contract: the public one-liner `npx -y insta setup agent` means PRODUCTION,
  *  full stop — a leftover `insta env use staging` from last month must not silently give a new
  *  onboarding run staging skills. Staging is an explicit ask: `--env staging` (or $INSTA_ENV).
  *  Two deliberate exceptions leave the machine alone:
@@ -476,7 +476,7 @@ export async function setupAgent(
   // --project / --create: bind this directory to a project inside the SAME process. Never split
   // this back into `setup agent && insta project <cmd>` as one paste: no shell joiner survives
   // every Windows shell, and in shells without bracketed paste the queued second line is eaten
-  // as the answer to the login prompt above (console PR #290). Both need the session: without
+  // as the answer to the login prompt above. Both need the session: without
   // one the manual command is the hint, never a hang; a failure (bad id, no access, name taken)
   // is a REAL error — binding a project is the entire point of the flag — so it sets the exit
   // code instead of pretending setup succeeded.

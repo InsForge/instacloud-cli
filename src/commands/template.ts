@@ -371,7 +371,7 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
     manifest = fetched.manifest
     source = fetched.source
     vars = collectManifestVariables(manifest)
-    // Spec 4.4: exactly ONE line in front of today's output. A second "deploying template …" line
+    // Exactly ONE line in front of today's output. A second "deploying template …" line
     // would read as a duplicate of the "deploying template <code> to branch <branch>" line below,
     // so the manifest's code@version rides on this one instead.
     if (!quiet) {

@@ -67,9 +67,8 @@ export class ApiClient {
 
   // Returns parsed body for status < 400 (incl. 202); throws ApiError otherwise.
   async request<T = any>(method: string, path: string, body?: unknown, opts: RequestOpts = {}): Promise<T> {
-    const res = await this.raw(method, path, body, opts.auth ?? true, opts)
+    const res = await this.rawRequest(method, path, body, opts)
     if (agentMode() && res.status === 202 && res.body?.status === 'approval_required') throw new AgentApprovalRequired(res.body)
-    if (res.status >= 400) throw new ApiError(res.status, res.body?.error ?? `HTTP ${res.status}`, res.body)
     return res.body as T
   }
 
@@ -91,11 +90,12 @@ export class ApiClient {
   private async fetch(method: string, path: string, body: unknown, auth: boolean, scope: RequestOpts = {}): Promise<RawResult> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Insta-Hints': '1', 'User-Agent': USER_AGENT }
     if (auth && this.cfg.accessToken) headers.Authorization = `Bearer ${this.cfg.accessToken}`
-    if (auth && scope.evidence !== false) Object.assign(headers, await agentHeaders(this, method, path, body === undefined ? '' : JSON.stringify(body), scope))
+    const payload = body === undefined ? undefined : JSON.stringify(body)
+    if (auth && scope.evidence !== false) Object.assign(headers, await agentHeaders(this, method, path, payload ?? '', scope))
     const res = await this.fetchImpl(this.apiUrl + path, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: payload,
       signal: scope.signal,
     })
     const text = await res.text()
