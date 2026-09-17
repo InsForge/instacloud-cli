@@ -1,4 +1,4 @@
-// The `insta logs` window flags: --from/--to accept unix seconds or ISO-8601, --since is relative
+// The per-resource `logs` window flags: --from/--to accept unix seconds or ISO-8601, --since is relative
 // sugar, and junk must die locally instead of reaching the platform as NaN. Pure helpers, same
 // throwing-parser pattern as parseTimeoutSec / parseCpu.
 import { describe, it, expect } from 'vitest'

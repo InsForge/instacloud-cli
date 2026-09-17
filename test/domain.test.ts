@@ -77,7 +77,7 @@ describe('domain buy', () => {
   it('a gated order prints the approval hint on stderr and exits 2', async () => {
     const { deps: d } = deps({}, { status: 202, body: { status: 'approval_required', approvalId: 'ap1', action: 'domain.purchase' } })
     await domainBuy('myapp.com', {}, d)
-    expect(stderr.join('')).toContain('insta approvals approve ap1')
+    expect(stderr.join('')).toContain('insta agent approvals approve ap1')
     expect(process.exitCode).toBe(2)
     expect(out()).toBe('')
   })

@@ -81,7 +81,7 @@ export function applyRule(policy: Record<string, any>, out: Record<string, any>,
   // old one. Nothing below applies there.
   if (!catalog) return { ...policy, branchDeveloperRules: { ...(policy.branchDeveloperRules ?? {}), [action]: decision } }
   const entry = catalog.find(e => e.action === action)
-  if (!entry) throw new Error(`unknown action: ${action}\nrun: insta agent-policy get --json`)
+  if (!entry) throw new Error(`unknown action: ${action}\nrun: insta agent policy get --json`)
   if (!entry.editable) throw new Error(`${action} is a fixed policy invariant and cannot be overridden`)
   // Snapshot taken from the resolved unprotected-branch view, which is the context these rules
   // apply to; protected branches stay a separate, fixed denial.

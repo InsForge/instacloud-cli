@@ -2,7 +2,7 @@
 // release installer; npm via `npm i -g`). A background version check (detached, cached in
 // ~/.insta/update-check.json) powers an update nudge — and, since the CLI is young and moves
 // fast, AUTO-UPDATE IS ON BY DEFAULT: when a newer version is known, a quiet upgrade runs in the
-// background. `insta autoupdate off` (or INSTA_NO_AUTOUPDATE=1) disables that, leaving just the
+// background. `insta config autoupdate off` (or INSTA_NO_AUTOUPDATE=1) disables that, leaving just the
 // stderr nudge.
 //
 // ONE SOURCE OF TRUTH. "What is the latest insta?" is answered in exactly one place —
@@ -366,7 +366,7 @@ export async function backgroundCheck(current: string, deps: CheckDeps = {}): Pr
   return 'auto'
 }
 
-// `insta autoupdate [on|off]` — toggle / show the auto-update preference (default: on).
+// `insta config autoupdate [on|off]` — toggle / show the auto-update preference (default: on).
 export async function autoupdate(mode?: string): Promise<void> {
   const cfg = await readGlobal()
   if (mode === 'on' || mode === 'off') {
@@ -375,7 +375,7 @@ export async function autoupdate(mode?: string): Promise<void> {
     return
   }
   const enabled = cfg.autoUpdate !== false && !process.env.INSTA_NO_AUTOUPDATE
-  info(`autoupdate: ${enabled ? 'on' : 'off'} (default on while the CLI is pre-1.0 — \`insta autoupdate off\` to disable)`)
+  info(`autoupdate: ${enabled ? 'on' : 'off'} (default on while the CLI is pre-1.0 — \`insta config autoupdate off\` to disable)`)
 }
 
 // Called once at CLI start-up. Never blocks: reads the cache synchronously, prints at most one
@@ -411,7 +411,7 @@ export function maybeUpdate(current: string, argv: string[]): void {
   } else if (action === 'auto') {
     writeCache({ ...cache!, lastAutoAt: now })
     respawnDetached(['upgrade'])
-    console.error(`↑ auto-updating insta ${current} → ${cache!.latest} in the background (\`insta autoupdate off\` to disable)`)
+    console.error(`↑ auto-updating insta ${current} → ${cache!.latest} in the background (\`insta config autoupdate off\` to disable)`)
   }
 }
 

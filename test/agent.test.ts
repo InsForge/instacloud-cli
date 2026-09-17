@@ -27,7 +27,7 @@ it('never sends a project request as human when agent session is missing', async
   configureAgent({ source: 'cli-detected', client: 'codex' })
   const fetcher = vi.fn()
   const api = new ApiClient({ apiUrl: 'https://test.invalid', accessToken: 'user' }, fetcher)
-  await expect(api.request('POST', '/projects/p/services', { type: 'compute' })).rejects.toThrow(/insta setup agent/)
+  await expect(api.request('POST', '/projects/p/services', { type: 'compute' })).rejects.toThrow(/insta agent setup/)
   expect(fetcher).not.toHaveBeenCalled()
 })
 it('stores private material with ignore/permissions and signs exact request fields from nested directories', async () => {
@@ -95,7 +95,7 @@ it('signs a project-owned request that lacks /projects/ in its path with the nam
   expect(fetcher).toHaveBeenCalledOnce()
   expect((fetcher.mock.calls[0] as any[])[1].headers['Insta-Agent-Session']).toBe('ags_test')
   // A session for another project is still refused: the scope is a selector, not a bypass.
-  await expect(api.request('GET', '/template-deployments/d1', undefined, { projectId: 'other' })).rejects.toThrow(/insta setup agent/)
+  await expect(api.request('GET', '/template-deployments/d1', undefined, { projectId: 'other' })).rejects.toThrow(/insta agent setup/)
 })
 it('an agent-minted key sends the bearer alone and needs no session', async () => {
   // No .insta/agent-session.json anywhere near cwd — agentCredential must skip enrollment regardless.

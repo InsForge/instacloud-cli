@@ -1,4 +1,4 @@
-// `insta compute limits` / `insta db limits` — the ceiling controls that replace spec picking.
+// `insta compute limits` / `insta postgres limits` — the ceiling controls that replace spec picking.
 // The parsing seam is what these pin: a user types "1gb", the API takes MB, and getting that
 // conversion wrong sets a ceiling an order of magnitude off in either direction.
 import { describe, it, expect } from 'vitest'

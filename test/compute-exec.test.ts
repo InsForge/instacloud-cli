@@ -299,7 +299,7 @@ describe('applyExecResult', () => {
   it('202: exits 2 with the human approval hint on stderr, stdout untouched (non-json)', () => {
     applyExecResult({ status: 202, body: { status: 'approval_required', action: 'deploy', approvalId: 'appr_1' } })
     expect(process.exitCode).toBe(2)
-    expect(stderr.join('')).toMatch(/approval required for deploy — run: insta approvals approve appr_1/)
+    expect(stderr.join('')).toMatch(/approval required for deploy — run: insta agent approvals approve appr_1/)
     expect(stdout.join('')).toBe('')
   })
 

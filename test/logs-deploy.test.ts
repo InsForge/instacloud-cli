@@ -1,4 +1,4 @@
-// `insta logs --deploy` targets /deploy-events and renders each machine event as one line.
+// `insta compute logs --deploy` (and the equivalent on redis/mysql/mongodb) targets /deploy-events and renders each machine event as one line.
 import { describe, it, expect } from 'vitest'
 import { deployEventsPath, deployEventLine } from '../src/commands/metrics.js'
 

@@ -21,7 +21,7 @@ export function canonicalTarget(path: string): string {
   const url = new URL(path, 'https://platform.invalid')
   return url.pathname + url.search
 }
-const guidance = 'agent session missing, expired, or for another project/environment — run `insta setup agent`'
+const guidance = 'agent session missing, expired, or for another project/environment — run `insta agent setup`'
 
 export async function issueAgentSession(api: SessionApi, projectId?: string): Promise<Session> {
   const pair = generateKeyPairSync('ed25519')
@@ -35,7 +35,7 @@ export async function issueAgentSession(api: SessionApi, projectId?: string): Pr
 export async function saveAgentSession(session: Session, cwd = process.cwd()): Promise<void> {
   const root = await findProjectRoot(cwd) ?? cwd
   const rel = '.insta/agent-session.json'
-  if (alreadyTracked(root, [rel]).length) throw new Error('agent-session.json is tracked by Git; untrack it before running insta setup agent')
+  if (alreadyTracked(root, [rel]).length) throw new Error('agent-session.json is tracked by Git; untrack it before running insta agent setup')
   ensureGitignore(root, [rel], '# Local agent credentials')
   const dir = join(root, '.insta')
   await mkdir(dir, { recursive: true })

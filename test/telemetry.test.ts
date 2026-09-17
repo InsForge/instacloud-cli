@@ -85,14 +85,14 @@ describe('redaction', () => {
   it('drops allowlisted values that do not have the declared shape', () => {
     expect(redactOptions({ port: 'yesterday', limit: '100', region: 'New York', org: 'acme', project: 'proj_1', env: 'stagng', memory: '512mb' }))
       .toEqual({ port: '[REDACTED]', limit: '100', region: '[REDACTED]', org: '[REDACTED]', project: 'proj_1', env: '[REDACTED]', memory: '512mb' })
-    expect(redactArgs('services add', ['lambda', 'x'])).toEqual(['[REDACTED]', '[REDACTED]'])
+    expect(redactArgs('service add', ['lambda', 'x'])).toEqual(['[REDACTED]', '[REDACTED]'])
     expect(redactArgs('env use', ['stagng'])).toEqual(['[REDACTED]'])
     expect(redactArgs('env use', ['STAGING'])).toEqual(['STAGING'])
     expect(redactOptions({ env: 'Prod' })).toEqual({ env: 'Prod' })
-    expect(redactArgs('approvals approve', ['appr_1'])).toEqual(['appr_1'])
-    expect(redactArgs('approvals approve', ['please'])).toEqual(['[REDACTED]'])
-    expect(redactArgs('metrics', ['db'])).toEqual(['db'])
-    expect(redactArgs('metrics', ['prod-db'])).toEqual(['[REDACTED]'])
+    expect(redactArgs('agent approvals approve', ['appr_1'])).toEqual(['appr_1'])
+    expect(redactArgs('agent approvals approve', ['please'])).toEqual(['[REDACTED]'])
+    expect(redactArgs('postgres metrics', ['prod-db'])).toEqual(['[REDACTED]'])
+    expect(redactArgs('compute logs', ['api'])).toEqual(['[REDACTED]'])
   })
 
   it('drops --set assignments whole, names included', () => {
@@ -100,9 +100,9 @@ describe('redaction', () => {
   })
 
   it('keeps positionals only where the command declares an id or enum', () => {
-    expect(redactArgs('services add', ['postgres', 'main'])).toEqual(['postgres', '[REDACTED]'])
-    expect(redactArgs('services scale', ['compute', 'api', '3', 'us-east'])).toEqual(['compute', '[REDACTED]', '3', 'us-east'])
-    expect(redactArgs('agent-policy rule set', ['deploy', 'approve'])).toEqual(['deploy', 'approve'])
+    expect(redactArgs('service add', ['postgres', 'main'])).toEqual(['postgres', '[REDACTED]'])
+    expect(redactArgs('compute scale', ['3', 'api'])).toEqual(['3', '[REDACTED]'])
+    expect(redactArgs('agent policy rule set', ['deploy', 'approve'])).toEqual(['deploy', 'approve'])
     expect(redactArgs('run', ['/Users/jane/bin/dev.sh', 'x'])).toEqual(['[REDACTED]', '[REDACTED]'])
     expect(redactArgs('branch create', ['feat/acme-pilot'])).toEqual(['[REDACTED]'])
     expect(redactArgs('secrets set', ['DB_PASSWORD', 's3cret'])).toEqual(['[REDACTED]', '[REDACTED]'])

@@ -66,7 +66,7 @@ describe('prepareSource — lane dispatch', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     try {
       await expect(prepareSource(api, 'p1', srcDir(false), 'main', {}, noRun)).rejects.toThrow()
-      expect(stderr.mock.calls.map((c) => String(c[0])).join('')).toMatch(/compute group not found: default.*--group <name>.*insta services add compute/)
+      expect(stderr.mock.calls.map((c) => String(c[0])).join('')).toMatch(/compute group not found: default.*--group <name>.*insta service add compute/)
       expect(paths).not.toContain('POST /projects/p1/deploy-token')
     } finally { stderr.mockRestore() }
   })

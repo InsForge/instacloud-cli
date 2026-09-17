@@ -11,7 +11,7 @@ export type ManagedType = 'compute' | 'redis' | 'mysql' | 'mongodb'
 
 // ---- custom domains (bring your own hostname) ----
 //
-// A compute service's region is fixed at creation (`insta services add compute --region`), and a
+// A compute service's region is fixed at creation (`insta service add compute --region`), and a
 // custom hostname routes in the router of the region that OWNS the service. So the region is
 // DETECTED from the service, never chosen for the domain — the customer's DNS is one region-agnostic
 // CNAME target either way — and every line below names it so the user knows where traffic lands.
@@ -43,7 +43,7 @@ export function resolveDomainTarget(services: ComputeRow[], host: string, group?
     if (isWorker(svc)) throw new Error(`${svc.name} is a worker (port 0) — it has no HTTP endpoint, so ${host} cannot serve from it`)
     return svc
   }
-  if (compute.length === 0) throw new Error('no compute service in this project (add one with `insta services add compute <name>`)')
+  if (compute.length === 0) throw new Error('no compute service in this project (add one with `insta service add compute <name>`)')
   if (compute.length === 1) {
     const only = compute[0]!
     if (isWorker(only)) throw new Error(`${only.name} is a worker (port 0) — it has no HTTP endpoint, so ${host} cannot serve from it`)
@@ -481,7 +481,7 @@ export function resolveExecFallback(
   const [head, ...rest] = payload
   if (head === undefined) return { serviceName: undefined, command: [] }
   if (!services.some((service) => service.type === 'compute' && service.name === head)) {
-    note(`note: no \`--\` separator was found and \`${head}\` is not a compute service, so it was read as the command. If \`${head}\` was the service, check the name with \`insta services list\`.`)
+    note(`note: no \`--\` separator was found and \`${head}\` is not a compute service, so it was read as the command. If \`${head}\` was the service, check the name with \`insta service list\`.`)
     return { serviceName: undefined, command: payload }
   }
   // `head` really is a service, so whatever follows it cannot be the command's first token.

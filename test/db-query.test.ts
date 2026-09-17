@@ -1,4 +1,4 @@
-// `insta db query` seams — the pure renderers plus the handler flow through an injected api seam
+// `insta <redis|mysql|mongodb> query` seams — the pure renderers plus the handler flow through an injected api seam
 // (the DomainDeps convention), so nothing here reaches a backend (mirrors db-stats.test.ts /
 // compute-domain-flow.test.ts).
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
@@ -183,7 +183,7 @@ describe('dbQuery (handler flow, injected api — no network)', () => {
     const { deps: d } = deps(mysql, { status: 202, body })
     await dbQuery('shop', ['select 1'], {}, d) // handleApproval returns, no throw
     expect(process.exitCode).toBe(2)
-    expect(err()).toMatch(/approval required for db\.query — run: insta approvals approve appr_1/)
+    expect(err()).toMatch(/approval required for db.query — run: insta agent approvals approve appr_1/)
     expect(out()).toBe('')
   })
 

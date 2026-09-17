@@ -46,7 +46,7 @@ describe('servicesAddRequestBody --volume', () => {
 describe('servicesAdd --volume validation (throws before any network/config access)', () => {
   it('rejects --volume for a non-compute type, pointing at the db command instead', async () => {
     await expect(servicesAdd('postgres', 'db', { volume: '10' })).rejects.toThrow(/--volume is only valid for compute services/)
-    await expect(servicesAdd('storage', 'bkt', { volume: '10' })).rejects.toThrow(/insta db volume --size/)
+    await expect(servicesAdd('storage', 'bkt', { volume: '10' })).rejects.toThrow(/insta postgres volume --size/)
   })
   it('rejects junk sizes locally instead of deferring to the server', async () => {
     await expect(servicesAdd('compute', 'api', { volume: '1.5' })).rejects.toThrow(/invalid volume size/)

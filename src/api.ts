@@ -138,7 +138,7 @@ export async function requireProject(deps: RequireProjectDeps = {}): Promise<Pro
   // flipped it again. Only an explicit `insta project link` may replace a link.
   if (r?.foreign) die(foreignLinkMessage(r.foreign))
   if (r) return r.link
-  if (agentMode()) die('agent mode requires a linked project — run `insta setup agent --project <id>`')
+  if (agentMode()) die('agent mode requires a linked project — run `insta agent setup --project <id>`')
   if (deps.autoResolve) return deps.autoResolve()
   // One command, just works: unlinked ≠ error. Resolve the project (auto when there's one,
   // one-keystroke picker when several) and persist the choice so this happens once per dir.

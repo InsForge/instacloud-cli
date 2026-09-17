@@ -1,4 +1,4 @@
-// `insta services add` with no type (or no name): the kinds are otherwise only discoverable by
+// `insta service add` with no type (or no name): the kinds are otherwise only discoverable by
 // guessing wrong and reading `type must be postgres|storage|compute|redis|mysql|mongodb`, so missing arguments answer
 // "what can I add?" instead. The list mirrors the dashboard's Add Service menu (frontend
 // `add-service-button.tsx`) — Docker Image sits BESIDE Empty Service, not under it, because
@@ -65,8 +65,8 @@ export function suggestServiceName(ref: string): string {
 
 /** The non-interactive command for a kind — what an agent should run instead of being asked. */
 export function kindCommand(k: ServiceKind): string {
-  if (k.needsImage) return `insta services add compute <name> --image <ref> --port <n>`
-  return `insta services add ${k.type} ${k.defaultName}`
+  if (k.needsImage) return `insta service add compute <name> --image <ref> --port <n>`
+  return `insta service add ${k.type} ${k.defaultName}`
 }
 
 /** The kind list, one line each — what a terminal picks from and an agent reads. */
@@ -83,7 +83,7 @@ export function missingArgsMessage(type?: string): string {
 }
 
 /**
- * Fill in whatever `insta services add` was not given. An unknown type passes straight through so
+ * Fill in whatever `insta service add` was not given. An unknown type passes straight through so
  * `assertType` — not this — reports it, keeping one wording for a bad type everywhere. Flags that
  * were already supplied are never asked for again.
  */

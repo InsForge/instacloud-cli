@@ -208,7 +208,7 @@ export function info(msg: string): void {
 export function handleApproval(res: { status: number; body: any }, json?: boolean): boolean {
   if (res.status === 202 && res.body?.status === 'approval_required') {
     if (json) printJson(res.body)
-    process.stderr.write(`approval required for ${res.body.action} — run: insta approvals approve ${res.body.approvalId}\n`)
+    process.stderr.write(`approval required for ${res.body.action} — run: insta agent approvals approve ${res.body.approvalId}\n`)
     process.exitCode = 2
     return true
   }
@@ -217,14 +217,17 @@ export function handleApproval(res: { status: number; body: any }, json?: boolea
 
 export type NextAction = { op: string; reason: string; args?: Record<string, unknown>; gated?: boolean }
 
-// Neutral op → an `insta` command string. Unknown ops fall back to reason-only (no crash).
+// Neutral op → an `insta` command string. Unknown ops fall back to reason-only (no crash). The
+// platform names an observability target with its component word (`db` for postgres); the CLI
+// groups by service type, so the target becomes the parent command.
+const targetGroup = (a: Record<string, unknown>): string => (a.target === 'db' ? 'postgres' : String(a.target ?? 'compute'))
 const OP_COMMAND: Record<string, (a: Record<string, unknown>) => string> = {
-  'service.add': (a) => `insta services add ${a.type ?? '<type>'} ${a.name ?? '<name>'}`,
+  'service.add': (a) => `insta service add ${a.type ?? '<type>'} ${a.name ?? '<name>'}`,
   deploy: (a) => `insta deploy${a.branch ? ` --branch ${a.branch}` : ''}`,
   'secrets.set': (a) => `insta secrets set ${a.name ?? '<NAME>'} ${a.value ?? '<value>'}`,
-  metrics: (a) => `insta metrics ${a.target ?? 'compute'}`,
-  logs: (a) => `insta logs ${a.target ?? 'compute'}`,
-  'approvals.approve': (a) => `insta approvals approve ${a.approvalId ?? '<id>'}`,
+  metrics: (a) => `insta ${targetGroup(a)} metrics`,
+  logs: (a) => `insta ${targetGroup(a)} logs`,
+  'approvals.approve': (a) => `insta agent approvals approve ${a.approvalId ?? '<id>'}`,
 }
 
 // Pure — builds the printable lines (unit-tested). Empty input → [].

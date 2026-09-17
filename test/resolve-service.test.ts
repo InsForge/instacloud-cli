@@ -1,4 +1,4 @@
-// `insta services add` used to answer a missing type with commander's "missing required argument",
+// `insta service add` used to answer a missing type with commander's "missing required argument",
 // which never says what the types are. Resolution: both args given → untouched (no prompt anywhere
 // near the fast path); TTY → the dashboard's Add Service kinds, then a name (and for Docker Image,
 // the ref first and the port after); no TTY → the kind list as an error, because nothing was
@@ -97,15 +97,15 @@ test('no TTY: throws, and the message lists every kind with its command', async 
   await expect(resolveServiceArgs(undefined, undefined, deps({ tty: false }))).rejects.toThrow(/what to add/)
   const msg = missingArgsMessage()
   for (const k of SERVICE_KINDS) expect(msg).toContain(k.label)
-  expect(msg).toContain('insta services add postgres main-db')
-  expect(msg).toContain('insta services add redis cache')
-  expect(msg).toContain('insta services add mysql mysql-db')
-  expect(msg).toContain('insta services add mongodb mongo-db')
+  expect(msg).toContain('insta service add postgres main-db')
+  expect(msg).toContain('insta service add redis cache')
+  expect(msg).toContain('insta service add mysql mysql-db')
+  expect(msg).toContain('insta service add mongodb mongo-db')
   expect(msg).toContain('--image <ref>')
 })
 
 test('no TTY with a type: asks for the missing half, not the whole list', () => {
-  expect(missingArgsMessage('storage')).toBe('name the service:  insta services add storage assets')
+  expect(missingArgsMessage('storage')).toBe('name the service:  insta service add storage assets')
 })
 
 test('unknown type: passed through for assertType to report, prompts untouched', async () => {
@@ -116,10 +116,10 @@ test('unknown type: passed through for assertType to report, prompts untouched',
 test('kind lines stay one per kind and carry a runnable command', () => {
   const lines = serviceKindLines()
   expect(lines).toHaveLength(SERVICE_KINDS.length)
-  expect(lines.join('\n')).toContain('insta services add storage assets')
-  expect(lines.join('\n')).toContain('insta services add redis cache')
-  expect(lines.join('\n')).toContain('insta services add mysql mysql-db')
-  expect(lines.join('\n')).toContain('insta services add mongodb mongo-db')
+  expect(lines.join('\n')).toContain('insta service add storage assets')
+  expect(lines.join('\n')).toContain('insta service add redis cache')
+  expect(lines.join('\n')).toContain('insta service add mysql mysql-db')
+  expect(lines.join('\n')).toContain('insta service add mongodb mongo-db')
 })
 
 // Same rules as the dashboard's helpers, so a ref names the service identically in both.

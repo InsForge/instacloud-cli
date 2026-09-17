@@ -114,7 +114,7 @@ describe('handleApproval', () => {
 
   it('202: returns true, hint on stderr, stdout untouched, exit code 2', () => {
     expect(handleApproval(gated)).toBe(true)
-    expect(stderr.join('')).toMatch(/approval required for deploy — run: insta approvals approve a1/)
+    expect(stderr.join('')).toMatch(/approval required for deploy — run: insta agent approvals approve a1/)
     expect(stdout.join('')).toBe('')
     expect(process.exitCode).toBe(2)
   })
@@ -139,7 +139,7 @@ describe('nextActionsLines', () => {
   it('renders a mapped op as an insta command with args, plus its reason', () => {
     const lines = nextActionsLines([{ op: 'service.add', reason: 'Add a service first.', args: { type: 'postgres', name: 'db' } }])
     expect(lines[0]).toBe('Next:')
-    expect(lines.join('\n')).toContain('insta services add postgres db')
+    expect(lines.join('\n')).toContain('insta service add postgres db')
     expect(lines.join('\n')).toContain('Add a service first.')
   })
 
@@ -160,9 +160,9 @@ describe('nextActionsLines', () => {
 
   it('renders metrics/logs hints with the compute target (runnable command)', () => {
     const metricsLines = nextActionsLines([{ op: 'metrics', reason: 'Check metrics.', args: { projectId: 'pr_1' } }])
-    expect(metricsLines.join('\n')).toContain('insta metrics compute')
+    expect(metricsLines.join('\n')).toContain('insta compute metrics')
 
     const logsLines = nextActionsLines([{ op: 'logs', reason: 'Check logs.', args: { projectId: 'pr_1' } }])
-    expect(logsLines.join('\n')).toContain('insta logs compute')
+    expect(logsLines.join('\n')).toContain('insta compute logs')
   })
 })

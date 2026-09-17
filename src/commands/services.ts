@@ -69,7 +69,7 @@ export function resolveSoleService<T extends { id: string; type: string; name: s
     if (!svc) throw new Error(`${type} service not found: ${name}`)
     return svc
   }
-  if (of.length === 0) throw new Error(`no ${type} service in this project (add one with \`insta services add ${type} <name>\`)`)
+  if (of.length === 0) throw new Error(`no ${type} service in this project (add one with \`insta service add ${type} <name>\`)`)
   if (of.length > 1) throw new Error(`multiple ${type} services — specify one: ${of.map((s) => s.name).join(', ')}`)
   return of[0]!
 }
@@ -113,10 +113,10 @@ export async function servicesAdd(type: string, name: string, opts: ServicesAddO
     parsePort(opts.port) // junk fails here, before any config/network access
   }
   // Presence, not truthiness: `--no-always-on` is an explicit false and is just as compute-only.
-  if (opts.alwaysOn !== undefined && type !== 'compute') throw new Error('--always-on / --no-always-on is only valid for compute services (for postgres, use `insta db always-on on|off` after creation)')
+  if (opts.alwaysOn !== undefined && type !== 'compute') throw new Error('--always-on / --no-always-on is only valid for compute services (for postgres, use `insta postgres always-on on|off` after creation)')
   if (opts.mountPath !== undefined && (type !== 'compute' || opts.volume === undefined)) throw new Error('--mount-path requires --volume on a compute service')
   if (opts.volume !== undefined) {
-    if (type !== 'compute') throw new Error('--volume is only valid for compute services (postgres has one by default — grow it with `insta db volume --size`)')
+    if (type !== 'compute') throw new Error('--volume is only valid for compute services (postgres has one by default — grow it with `insta postgres volume --size`)')
     parseVolumeGib(opts.volume) // junk fails here, before any config/network access
   }
   const api = await ApiClient.load()
@@ -131,9 +131,10 @@ export async function servicesAdd(type: string, name: string, opts: ServicesAddO
   // general `insta secrets` bundle — without this line nothing in the product says how to reach it.
   if (type === 'postgres') {
     // The hint must be runnable as printed: carry --branch when the service was created on a
-    // branch other than the linked one, and --group so it survives multiple postgres services.
-    const flags = `${opts.branch ? ` --branch ${opts.branch}` : ''} --group ${name}`
-    info(`  connect: \`insta db url${flags}\` prints the connection string, \`insta db connect${flags}\` opens psql (--group optional with a single postgres service)`)
+    // branch other than the linked one, and the service name so it survives multiple postgres
+    // services (a trailing positional on `postgres url`/`postgres connect`, not a flag).
+    const branchFlag = opts.branch ? ` --branch ${opts.branch}` : ''
+    info(`  connect: \`insta postgres url ${name}${branchFlag}\` prints the connection string, \`insta postgres connect ${name}${branchFlag}\` opens psql ([service] optional with a single postgres service)`)
   }
   renderNextActions(res.body.nextActions)
 }
@@ -175,7 +176,7 @@ export async function servicesList(opts: { json?: boolean; branch?: string }): P
   const branch = opts.branch ?? p.branch
   const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
   if (opts.json) return printJson(services)
-  if (!services.length) return info(`(no services on ${branch ?? 'default'} — add one with \`insta services add <postgres|storage|compute|redis|mysql|mongodb> <name>\`)`)
+  if (!services.length) return info(`(no services on ${branch ?? 'default'} — add one with \`insta service add <postgres|storage|compute|redis|mysql|mongodb> <name>\`)`)
   for (const s of services) info(serviceListLine(s))
 }
 
