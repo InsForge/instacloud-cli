@@ -461,6 +461,22 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
       .not.toContain(`${PERCENT}/id_ed25519`)
   })
 
+  it('keeps the multiplexing socket path under the 104-byte limit even for a long host and user', () => {
+    // The bug: `ControlPath ~/.insta/ssh/cm-%r@%h:%p` expands with the route-key
+    // user and the regional gateway host, and a real prod alias reached 109
+    // bytes -- past the macOS Unix-domain-socket cap -- so every `ssh` died on
+    // `ControlPath too long`. %C is a fixed 40 hex chars, so ask `ssh -G` for
+    // the value it would actually open and measure it. `ssh -G` expands ~ and
+    // the tokens, so this is the real path, not the template.
+    const g = effective('insta-dev-agent.insta', rendered({
+      entries: [entry('insta-dev-agent.insta', 'ssh.us-east-1.compute.instacloud.tech', 'prod-main-dev-agent-81d21d-00n984v5tcy', 2222)],
+    }))
+    const cp = g.get('controlpath') ?? ''
+    expect(cp, 'ssh -G did not report a ControlPath').toContain('cm-')
+    expect(cp, `ControlPath is ${cp.length} bytes: ${cp}`).not.toContain('%')
+    expect(cp.length, `ControlPath is ${cp.length} bytes (limit 104): ${cp}`).toBeLessThan(104)
+  })
+
   it('does not let a % in the path reach the ControlPath tokens', () => {
     // ControlPath carries tokens we MEANT, and `ssh -G` does expand that one --
     // so it is the check that the escaping did not spill outside the two path
@@ -1243,14 +1259,12 @@ describe('the generated config works on Windows, where multiplexing does not', (
   it('omits ControlMaster, ControlPath and ControlPersist on win32', () => {
     // Win32-OpenSSH does not implement ControlMaster (PowerShell/Win32-OpenSSH
     // #1328, #405) and FAILS the connection rather than ignoring the directive,
-    // so every alias would be unusable -- not merely unmultiplexed. The
-    // ControlPath also contains a `:` before %p, which is not a legal character
-    // in a Windows filename.
+    // so every alias would be unusable -- not merely unmultiplexed.
     const out = win()
     expect(out, 'ControlMaster would fail every connection on Windows').not.toContain('ControlMaster')
     expect(out).not.toContain('ControlPath')
     expect(out).not.toContain('ControlPersist')
-    expect(out, 'a colon reached a Windows path').not.toContain('%r@%h:%p')
+    expect(out, 'no multiplexing token leaked onto Windows').not.toContain('cm-%C')
   })
 
   it('still routes, authenticates and renews on Windows', () => {
@@ -1275,6 +1289,10 @@ describe('the generated config works on Windows, where multiplexing does not', (
       const out = renderConfigBlock({ entries: [entry()], identityFile: '/home/dev/.insta/ssh/id_ed25519', knownHostsFile: KNOWN_HOSTS, platform })
       expect(out, `${platform} lost connection multiplexing`).toContain('ControlMaster auto')
       expect(out).toContain('ControlPersist 10m')
+      // Keyed on %C, never %r@%h:%p: a Unix-domain socket path caps at 104 bytes
+      // and the route-key user plus the gateway host overflowed it.
+      expect(out, `${platform} ControlPath must be the fixed-length %C form`).toContain('ControlPath ~/.insta/ssh/cm-%C')
+      expect(out).not.toContain('%r@%h:%p')
     }
   })
 })
