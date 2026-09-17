@@ -10,7 +10,7 @@
 #   (equivalent to piping this script with:  sh -s -- --agents; add -y for a hard non-interactive run)
 #
 # Flags:
-#   --agents       after installing, run `insta setup agent` (skills for Claude Code/Codex/Cursor/…)
+#   --agents       after installing, run `insta agent setup` (`setup agent` on older CLIs) (skills for Claude Code/Codex/Cursor/…)
 #   -y             non-interactive
 #   --staging      target the staging deployment (shorthand for --env staging)
 #   --env <name>   target a named deployment: prod (default) | staging
@@ -201,7 +201,7 @@ if [ "$ON_PATH" != "1" ]; then
 fi
 
 # ---- environment (--staging / --env) ----
-# MUST run before `setup agent`: that step registers the MCP server, and it derives the MCP host and
+# MUST run before `agent setup` (`setup agent` on older CLIs): that step registers the MCP server, and it derives the MCP host and
 # registration name from the persisted environment. Switching afterwards would leave the machine's
 # agents pointed at production's MCP server while the CLI talked to staging.
 if [ -n "$ENV_NAME" ]; then
@@ -211,7 +211,7 @@ if [ -n "$ENV_NAME" ]; then
     # install is still pointed at PRODUCTION. Carrying on would be the worst outcome: the canonical
     # usage is `curl … | sh && insta project create`, often run unattended by an agent, which would
     # then provision real production infrastructure believing it was staging. Exiting here also
-    # stops `setup agent` from wiring this machine's agents to the wrong environment.
+    # stops `agent setup` (`setup agent` on older CLIs) from wiring this machine's agents to the wrong environment.
     echo "error: could not select environment '$ENV_NAME' — this install is still pointed at PRODUCTION." >&2
     echo "  The installed CLI ($("$INSTALL_DIR/$BIN" --version 2>/dev/null | tail -1)) may predate \`insta env\` (needs >= 0.0.23)." >&2
     echo "  Upgrade, then retry:  insta upgrade && insta env use $ENV_NAME" >&2
@@ -223,8 +223,8 @@ fi
 # ---- agent setup (--agents) ----
 if [ "$AGENTS" = "1" ]; then
   echo
-  # `insta setup agent` prints its own "setting up coding-agent skills …" line + clean summary.
-  # CLI >= 0.0.38: bare `setup agent` FORCES prod (switching the machine if needed), so a staging
+  # `insta agent setup` (`setup agent` on older CLIs) prints its own "setting up coding-agent skills …" line + clean summary.
+  # CLI >= 0.0.38: bare `agent setup` (`setup agent` on older CLIs) FORCES prod (switching the machine if needed), so a staging
   # install must pass the environment explicitly. The persisted env already matches (env use above),
   # so --env is a no-op switch there — it just stops setup from "correcting" the machine to prod.
   # Older CLIs (a pinned INSTA_VERSION) reject the flag; ONLY that exact case (commander's
@@ -240,14 +240,18 @@ if [ "$AGENTS" = "1" ]; then
   YFLAG=""
   [ "$YES" = "1" ] && YFLAG="-y"
   SETUP_ERR="${TMPDIR:-/tmp}/insta-setup-err.$$"
-  if "$INSTALL_DIR/$BIN" setup agent $YFLAG $SETUP_ENV_ARGS 2>"$SETUP_ERR"; then
+  # CLI releases after 0.0.79 spell it `insta agent setup`; older binaries only know `setup agent`.
+  # Probe the installed binary rather than parse a version: `agent --help` exits 0 only where the
+  # group exists. Remove this probe once every install target is a release with `agent setup`.
+  if "$INSTALL_DIR/$BIN" agent --help >/dev/null 2>&1; then SETUP_CMD="agent setup"; else SETUP_CMD="setup agent"; fi
+  if "$INSTALL_DIR/$BIN" $SETUP_CMD $YFLAG $SETUP_ENV_ARGS 2>"$SETUP_ERR"; then
     cat "$SETUP_ERR" >&2
   else
     cat "$SETUP_ERR" >&2
     if [ -n "$SETUP_ENV_ARGS" ] && grep -qi "unknown option" "$SETUP_ERR"; then
-      "$INSTALL_DIR/$BIN" setup agent $YFLAG || echo "warn: agent setup failed — run: insta setup agent"
+      "$INSTALL_DIR/$BIN" $SETUP_CMD $YFLAG || echo "warn: agent setup failed — run: insta $SETUP_CMD"
     else
-      echo "warn: agent setup failed — run: insta setup agent ${SETUP_ENV_ARGS}"
+      echo "warn: agent setup failed — run: insta $SETUP_CMD ${SETUP_ENV_ARGS}"
     fi
   fi
   rm -f "$SETUP_ERR"

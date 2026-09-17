@@ -33,7 +33,7 @@ version-pinned `npm install -g` fallback to run yourself). E2e-validated on macO
 and Windows (PowerShell + cmd):
 
 ```bash
-npx -y insta@latest setup agent
+npx -y insta@latest agent setup
 ```
 
 This command means **production** (CLI ≥ 0.0.38): if the machine was previously switched to
@@ -41,7 +41,7 @@ staging it switches back — announced, session dropped, like `insta env use pro
 its own explicit command, which also persists the choice:
 
 ```bash
-npx -y insta@latest setup agent --env staging
+npx -y insta@latest agent setup --env staging
 ```
 
 On macOS/Linux without Node, the native-binary installer puts the `insta` CLI on PATH (the
@@ -143,8 +143,8 @@ mean rules are unavailable. Text output also lists effective rules. The old `pol
 
 ### Agents get the same surface
 
-`insta manifest` prints an agent-legible view of every branch and its URLs. `insta setup
-agent` installs the InstaCloud skill and registers the remote MCP server for the coding
+`insta manifest` prints an agent-legible view of every branch and its URLs. `insta agent
+setup` installs the InstaCloud skill and registers the remote MCP server for the coding
 agents on the machine — and, when running from the npx cache with no durable `insta` on
 PATH, first installs the CLI itself globally.
 
@@ -211,28 +211,26 @@ build never reaches a production installer.
 | Command | What it covers |
 |---|---|
 | `insta login` · `logout` · `status` | Browser sign-in (default), `--email` + password, or `--oauth github\|google`; `status` shows the environment, login and linked project/branch |
-| `insta env` | `show` · `use <prod\|staging>` |
-| `insta setup` | `agent` — install the CLI (if missing), the skill, and MCP for every coding agent; targets prod, `--env staging` for staging |
-| `insta mcp` | `install` — register the remote MCP server only |
 | `insta org` | `list` · `create` (one free org per user) |
 | `insta project` | `create` · `list` · `link` · `delete` |
 | `insta branch` | `create` · `list` · `switch` · `delete` · `merge` |
-| `insta services` | `add` · `list` · `remove` · `rename` · `set-access` · `scale` · `upgrade` · `secrets` |
-| `insta secrets` | Write `.env`, plus `list` · `set` · `unset` · `tree` |
+| `insta service` (`services`, `svc`) | `add` · `list` · `remove` · `rename` |
+| `insta secrets` | Write `.env`, plus `list` · `set` · `unset` · `bind` · `unbind` · `bindings` · `sources` · `tree` |
+| `insta domain` | Bought or bring-your-own: `attach` · `check` · `detach`; buy through InstaCloud: `search` · `buy` · `list` · `status` · `records …` |
+| `insta compute` | `start` · `stop` · `suspend` · `restart` · `status` · `scale` · `limits` · `volume` · `always-on` · `exec` · `ssh` · `repo` · `connect-repo` · `watch-paths` · `disconnect-repo` · `logs` · `metrics` |
+| `insta postgres` | `url` (print the DSN) · `connect` (psql) · `stats` · `limits` · `volume` · `always-on` · `logs` · `metrics` — every verb takes `[service]` |
+| `insta redis` · `mysql` · `mongodb` | `query` · `status` · `limits` · `volume` · `always-on` · `logs` · `metrics` |
+| `insta storage` | `list` · `get` · `delete` · `set-access` |
+| `insta build [dir]` · `deploy [dir]` | Verify a source dir would build; deploy a source directory (built remotely) or `--image <url>` |
 | `insta run <cmd>` | Run a command with the branch bundle injected, nothing written to disk |
-| `insta deploy [dir]` | Deploy a source directory (built remotely) or `--image <url>` |
-| `insta compute` | `start` · `stop` · `suspend` · `status` · `set-domain` · `check-domain` · `remove-domain` |
-| `insta domain` | Buy a domain through InstaCloud: `search` · `buy` · `attach` · `list` · `status` |
-| `insta db` | `url` (print the postgres DSN) · `connect` (psql session) · `limits` · `stats` · `always-on` · `volume` |
-| `insta regions` | Regions available for postgres and compute |
-| `insta manifest` | Agent-legible view of every branch and its URLs |
-| `insta metrics` · `logs` · `events` | Service metrics; runtime logs (`--deploy` for deploy events); audit timeline |
-| `insta usage` · `billing` | Usage by billing dimension; `billing upgrade` · `billing portal` |
-| `insta approvals` | `list` · `approve` · `deny` |
-| `insta agent-policy` | `get` · `set <mode>` · `protect-branch` · `unprotect-branch` · `rule set <action> <decision>` · `revoke-sessions` |
-| `insta observe` | `install` · `uninstall` · `report` · `sync` — local credential audit |
+| `insta template` | `list` · `info` · `deploy` |
+| `insta billing` | Current cycle overview; `subscribe <tier>` · `portal` · `usage` |
+| `insta agent` | `setup` (this machine's coding agents) · `manifest` · `policy …` · `approvals …` · `observe …` · `events` |
+| `insta config` | `install-mcp` · `regions` · `autoupdate` |
 | `insta feedback` | Report an InstaCloud-side hurdle (bug / feature-request / friction) to the team — never for the app you are building; works logged-out |
-| `insta upgrade` · `autoupdate` | Update the CLI; show or set auto-update |
+| `insta upgrade` | Update the CLI |
+
+Every command accepts `--api-url <url>` for this invocation only (internal debugging); `insta --help` documents it.
 
 ## Configuration
 
@@ -255,7 +253,7 @@ build never reaches a production installer.
 ## Agent skills
 
 The `insta` skill and its task guides live in
-[InsForge/instacloud-skills](https://github.com/InsForge/instacloud-skills). `insta setup agent`
+[InsForge/instacloud-skills](https://github.com/InsForge/instacloud-skills). `insta agent setup`
 installs it user-globally for every coding agent on the machine. `insta project create` and
 `insta project link` additionally install the stack skills (Tigris, Better Auth) into the
 project, along with the `insta observe` credential-audit hook. Postgres needs no stack
