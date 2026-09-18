@@ -39,7 +39,19 @@ export async function readBuildLogs(api: Api, projectId: string, source: BuildSo
     do {
       if (++requests > 200) throw new Error('build logs exceed the per-read page limit')
       const params = new URLSearchParams({ ...(step ? { step } : {}), ...(cursor ? { cursor } : {}) })
-      const { body } = await api.rawRequest('GET', `/projects/${projectId}/builds/${source}/${encodeURIComponent(buildId)}/logs?${params}`, undefined, { signal })
+      signal.throwIfAborted()
+      const request = new AbortController()
+      const abort = () => request.abort(signal.reason)
+      signal.addEventListener('abort', abort, { once: true })
+      const timeout = setTimeout(() => request.abort(new DOMException('build log request timed out', 'TimeoutError')), 20_000)
+      let body
+      try {
+        const response = await api.rawRequest('GET', `/projects/${projectId}/builds/${source}/${encodeURIComponent(buildId)}/logs?${params}`, undefined, { signal: request.signal })
+        body = response.body
+      } finally {
+        clearTimeout(timeout)
+        signal.removeEventListener('abort', abort)
+      }
       if (!body || !['ready', 'pending', 'unsupported', 'unavailable'].includes(body.state) || !Array.isArray(body.steps) || !Array.isArray(body.entries)) throw new Error('invalid build log response')
       bytes += Buffer.byteLength(JSON.stringify(body))
       if (bytes > 16 * 1024 * 1024) throw new Error('build logs exceed the 16 MiB per-read limit')
@@ -134,18 +146,18 @@ export function archiveLogWatcher(api: Api, projectId: string, write: (message: 
   const follow: FollowState = { tails: new Map(), emit: snapshot => printer.print(snapshot, write) }
   let warned = ''
   let unavailable = false
-  return async (buildId: string, finished: boolean, remainingMs = 30_000): Promise<void> => {
+  return async (buildId: string, finished: boolean, remainingMs = 30_000, cancelSignal?: AbortSignal): Promise<void> => {
     if (unavailable) return
     const started = Date.now()
     const deadline = started + remainingMs
-    const refreshDeadline = started + Math.min(remainingMs, finished ? 18_000 : 3000)
+    const refreshDeadline = started + Math.min(remainingMs, finished ? 18_000 : remainingMs)
     for (let attempt = 0; attempt < (finished ? 6 : 1); attempt++) {
       if (attempt > 0) await wait(Math.min(3000, Math.max(0, refreshDeadline - Date.now())))
       const finalRead = finished && (attempt === 5 || Date.now() >= refreshDeadline)
       const remaining = Math.min(deadline - Date.now(), finalRead ? 30_000 : refreshDeadline - Date.now())
       if (remaining <= 0) return
       if (finished && (attempt === 0 || finalRead)) follow.tails.clear()
-      const signal = AbortSignal.timeout(remaining)
+      const signal = cancelSignal ?? AbortSignal.timeout(remaining)
       try {
         const snapshot = await readBuildLogs(api, projectId, 'archive', buildId, signal, follow)
         if (snapshot.state === 'unsupported') {
@@ -157,10 +169,11 @@ export function archiveLogWatcher(api: Api, projectId: string, write: (message: 
         if (snapshot.state === 'unavailable') throw new Error('build logs unavailable')
         warned = ''
       } catch (error) {
-        if (signal.aborted && !finalRead && Date.now() < deadline) continue
+        if (cancelSignal?.aborted) return
+        if (finished && signal.aborted && !finalRead && Date.now() < deadline) continue
         if (error instanceof ApiError && error.status === 400) follow.tails.clear()
         printer.finishLine(write)
-        const reason = signal.aborted ? ' (timed out)' : error instanceof ApiError ? ` (HTTP ${error.status})` : ''
+        const reason = signal.aborted || (error instanceof Error && error.name === 'TimeoutError') ? ' (timed out)' : error instanceof ApiError ? ` (HTTP ${error.status})` : ''
         const message = `Could not read build logs${reason}. Retry with: insta build-logs ${buildId}\n`
         if (warned !== message) write(message)
         warned = message

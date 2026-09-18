@@ -227,34 +227,67 @@ it.each([250, 350])('finishes the final full read after %s ms page reads consume
   } finally { timeout.mockRestore(); vi.useRealTimers() }
 })
 
-it('yields an unfinished live refresh without warning and resumes its completed pages', async () => {
+it('reads slow live pages for longer than 30 seconds without truncating or repeating output', async () => {
   vi.useFakeTimers()
   const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
     const controller = new AbortController()
     setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), ms)
     return controller.signal
   })
-  let slow = true
+  let latency = 4000
   const api: Pick<ApiClient, 'rawRequest'> = { rawRequest: vi.fn(async (_method, path, _body, opts) => {
-    await new Promise(resolve => setTimeout(resolve, slow ? 1100 : 10))
+    await new Promise(resolve => setTimeout(resolve, latency))
     opts?.signal?.throwIfAborted()
     const q = new URL('http://local' + path).searchParams
     if (!q.has('step')) return { status: 200, body: base }
-    return { status: 200, body: { ...base, entries: [entry(q.has('cursor') ? 'tail\n' : 'first\n')], ...(q.has('cursor') ? {} : { nextCursor: 'tail' }) } }
+    const page = Number(q.get('cursor') ?? 0)
+    return { status: 200, body: { ...base, entries: [entry(`page ${page}\n`)], ...(page < 7 ? { nextCursor: String(page + 1) } : {}) } }
   }) }
   const write = vi.fn()
   try {
     const watch = archiveLogWatcher(api, 'p', write)
-    let watching = watch('b', false)
-    await vi.runAllTimersAsync(); await watching
-    expect(write).toHaveBeenCalledWith('first\n')
-    slow = false
+    let watching = watch('b', false, 60_000)
+    await vi.advanceTimersByTimeAsync(36_000)
+    await watching
+    expect(write).toHaveBeenCalledWith('page 7\n')
+    latency = 10
     watching = watch('b', false)
-    await vi.runAllTimersAsync(); await watching
+    await vi.advanceTimersByTimeAsync(20)
+    await watching
     expect(write.mock.calls.some(([s]) => s.includes('Could not read'))).toBe(false)
-    expect(write.mock.calls.filter(([s]) => s === 'first\n')).toHaveLength(1)
-    expect(write.mock.calls.filter(([s]) => s === 'tail\n')).toHaveLength(1)
+    expect(write.mock.calls.filter(([s]) => s.startsWith('page '))).toHaveLength(8)
   } finally { timeout.mockRestore(); vi.useRealTimers() }
+})
+
+it('times out a stalled page after 20 seconds and retries from its saved cursor', async () => {
+  vi.useFakeTimers()
+  let stalled = true
+  const cursors: string[] = []
+  const api: Pick<ApiClient, 'rawRequest'> = { rawRequest: vi.fn(async (_method, path, _body, opts) => {
+    const q = new URL('http://local' + path).searchParams
+    if (!q.has('step')) return { status: 200, body: base }
+    const cursor = q.get('cursor') ?? ''
+    cursors.push(cursor)
+    if (cursor && stalled) await new Promise((_resolve, reject) => opts!.signal!.addEventListener('abort', () => reject(opts!.signal!.reason), { once: true }))
+    return { status: 200, body: { ...base, entries: [entry(cursor ? 'tail\n' : 'first\n')], ...(cursor ? {} : { nextCursor: 'tail' }) } }
+  }) }
+  const write = vi.fn()
+  try {
+    const watch = archiveLogWatcher(api, 'p', write)
+    const watching = watch('b', false, 60_000)
+    await vi.advanceTimersByTimeAsync(19_999)
+    expect(write).toHaveBeenCalledWith('first\n')
+    expect(write.mock.calls.some(([s]) => s.includes('Could not read'))).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    await watching
+    expect(write).toHaveBeenCalledWith('Could not read build logs (timed out). Retry with: insta build-logs b\n')
+    stalled = false
+    await watch('b', false)
+    expect(cursors).toEqual(['', 'tail', 'tail'])
+    expect(write.mock.calls.filter(([s]) => s === 'first\n')).toHaveLength(1)
+    expect(write).toHaveBeenCalledWith('tail\n')
+    expect(vi.getTimerCount()).toBe(0)
+  } finally { vi.useRealTimers() }
 })
 
 it('reports a final read timeout while respecting the remaining deployment deadline', async () => {
