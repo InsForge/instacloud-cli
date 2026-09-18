@@ -219,6 +219,7 @@ build never reaches a production installer.
 | `insta branch` | `create` · `list` · `switch` · `delete` · `merge` |
 | `insta services` | `add` · `list` · `remove` · `rename` · `set-access` · `scale` · `upgrade` · `secrets` |
 | `insta secrets` | Write `.env`, plus `list` · `set` · `unset` · `tree` |
+| `insta cron` | Branch-scoped HTTP schedules: `list` · `create` · `show` · `edit` · `pause` · `resume` · `delete` · `run` · `runs` · `preview`. Expressions are UTC and so is every time printed; `run` is one EXTRA execution and does not consume the next scheduled tick; header values are write-only, so `show` lists header names only |
 | `insta run <cmd>` | Run a command with the branch bundle injected, nothing written to disk |
 | `insta deploy [dir]` | Deploy a source directory (built remotely) or `--image <url>` |
 | `insta compute` | `start` · `stop` · `suspend` · `status` · `set-domain` · `check-domain` · `remove-domain` |
