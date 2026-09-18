@@ -440,15 +440,21 @@ bill.command('usage').description('Usage for the current billing cycle by billin
   .option('--from <unix>').option('--to <unix>').option('--proj [id]', 'show one project (the linked one, or a given id) instead of the whole org').option('--json')
   .action(guard((o) => obs.usage(o)))
 
+// `agent setup` and its hidden alias `setup agent` declare their options from ONE list, so a flag
+// added to the canonical command cannot be missing from the one-liner the console prints.
+function withSetupAgentOptions(cmd: Command): Command {
+  return cmd
+    .option('-y, --yes', 'non-interactive')
+    .option('--env <prod|staging>', 'deployment to set this machine up for (default: prod — switches and persists, like `insta env use`)')
+    .option('--mcp-token', 'register Claude Code with a minted insta_ API token instead of OAuth (requires login and token-creation permission)')
+    .option('--project <id>', 'also link this directory to an existing project after setup (flows through login first if needed)')
+    .option('--create [name]', 'also create a new project and link this directory after setup (default name: this directory; mutually exclusive with --project)')
+    .action(guard((o) => setup.setupAgent(o)))
+}
+
 // ---- agent (this machine's coding agents + the project's agent governance) ----
 const agent = program.command('agent').description('Agents: set up this machine, the project manifest, access policy, approvals (HITL), the local credential audit, the event timeline')
-agent.command('setup').description('Install the insta CLI (if missing), the insta skill for all coding agents, and the MCP server — targets production; pass --env staging for the staging deployment')
-  .option('-y, --yes', 'non-interactive')
-  .option('--env <prod|staging>', 'deployment to set this machine up for (default: prod — switches and persists, like `insta env use`)')
-  .option('--mcp-token', 'register Claude Code with a minted insta_ API token instead of OAuth (requires login and token-creation permission)')
-  .option('--project <id>', 'also link this directory to an existing project after setup (flows through login first if needed)')
-  .option('--create [name]', 'also create a new project and link this directory after setup (default name: this directory; mutually exclusive with --project)')
-  .action(guard((o) => setup.setupAgent(o)))
+withSetupAgentOptions(agent.command('setup').description('Install the insta CLI (if missing), the insta skill for all coding agents, and the MCP server — targets production; pass --env staging for the staging deployment'))
 agent.command('manifest').description('Print an agent-legible view of the project environments').option('--json').action(guard((o) => manifest(o)))
 const agentPol = agent.command('policy').description('Project agent access policy')
 agentPol.command('get').option('--json').action(guard((o) => agentPolicy.get(o)))
@@ -479,6 +485,13 @@ cfg.command('install-mcp').description('Register the remote MCP server with codi
   .action(guard((o) => mcp.mcpInstall(o)))
 cfg.command('regions').description('List regions available for postgres/compute services').option('--json').action(guard((o) => regions.regionsList(o)))
 cfg.command('autoupdate [mode]').description('Show or set auto-update: on | off (default: on while pre-1.0)').action(guard((mode) => selfUpdate.autoupdate(mode)))
+
+// ---- setup (hidden compatibility alias of `agent setup`) ----
+// `npx -y insta@latest setup agent [--project <id>]` is printed by the console, the landing page
+// and third-party docs; it must keep working on every release. Permanent, like `services|svc`;
+// hidden so the canonical `agent setup` is the only one help advertises.
+const setupCompat = program.command('setup', { hidden: true }).description('Compatibility alias: `insta setup agent` is `insta agent setup`')
+withSetupAgentOptions(setupCompat.command('agent').description('Alias of `insta agent setup`, kept for the console one-liner'))
 
 // ---- feedback (agent + human hurdle reports → the InstaCloud team) ----
 program.command('feedback')

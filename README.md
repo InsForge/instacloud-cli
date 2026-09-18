@@ -36,6 +36,8 @@ and Windows (PowerShell + cmd):
 npx -y insta@latest agent setup
 ```
 
+`insta setup agent` is still accepted as a hidden alias, so older instructions keep working.
+
 This command means **production** (CLI ≥ 0.0.38): if the machine was previously switched to
 staging it switches back — announced, session dropped, like `insta env use prod`. Staging is
 its own explicit command, which also persists the choice:

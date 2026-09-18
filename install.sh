@@ -10,7 +10,7 @@
 #   (equivalent to piping this script with:  sh -s -- --agents; add -y for a hard non-interactive run)
 #
 # Flags:
-#   --agents       after installing, run `insta agent setup` — or `setup agent` on older CLIs — installing skills for Claude Code/Codex/Cursor/…
+#   --agents       after installing, run `insta setup agent` (alias of `insta agent setup`) — installing skills for Claude Code/Codex/Cursor/…
 #   -y             non-interactive
 #   --staging      target the staging deployment (shorthand for --env staging)
 #   --env <name>   target a named deployment: prod (default) | staging
@@ -240,19 +240,17 @@ if [ "$AGENTS" = "1" ]; then
   YFLAG=""
   [ "$YES" = "1" ] && YFLAG="-y"
   SETUP_ERR="${TMPDIR:-/tmp}/insta-setup-err.$$"
-  # CLI releases after 0.0.79 spell it `insta agent setup`; older binaries only know `setup agent`.
-  # Probe the ROOT help for an `agent` command group. Not `agent --help`: commander prints the root
-  # help and exits 0 for ANY unknown command when --help is present, so that never discriminates.
-  # The pattern needs the trailing space/EOL so the old `agent-policy` row cannot match.
-  if "$INSTALL_DIR/$BIN" --help 2>/dev/null | grep -qE '^ +agent( |$)'; then SETUP_CMD="agent setup"; else SETUP_CMD="setup agent"; fi
-  if "$INSTALL_DIR/$BIN" $SETUP_CMD $YFLAG $SETUP_ENV_ARGS 2>"$SETUP_ERR"; then
+  # `setup agent` is the permanent compatibility alias of `insta agent setup` (canonical since the
+  # command re-organization). It works on every release, which is exactly what a script fetched from
+  # `main` and run against whatever binary is current needs — do not "modernize" this call.
+  if "$INSTALL_DIR/$BIN" setup agent $YFLAG $SETUP_ENV_ARGS 2>"$SETUP_ERR"; then
     cat "$SETUP_ERR" >&2
   else
     cat "$SETUP_ERR" >&2
     if [ -n "$SETUP_ENV_ARGS" ] && grep -qi "unknown option" "$SETUP_ERR"; then
-      "$INSTALL_DIR/$BIN" $SETUP_CMD $YFLAG || echo "warn: agent setup failed — run: insta $SETUP_CMD"
+      "$INSTALL_DIR/$BIN" setup agent $YFLAG || echo "warn: agent setup failed — run: insta setup agent"
     else
-      echo "warn: agent setup failed — run: insta $SETUP_CMD ${SETUP_ENV_ARGS}"
+      echo "warn: agent setup failed — run: insta setup agent ${SETUP_ENV_ARGS}"
     fi
   fi
   rm -f "$SETUP_ERR"

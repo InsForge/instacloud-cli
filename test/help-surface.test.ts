@@ -29,7 +29,7 @@ const RETIRED: string[][] = [
   ['services', 'scale'], ['services', 'upgrade'], ['services', 'set-access'], ['services', 'secrets'],
   ['compute', 'set-domain'], ['compute', 'check-domain'], ['compute', 'remove-domain'],
   ['db'], ['metrics'], ['logs'], ['usage'], ['manifest'], ['approvals'], ['agent-policy'], ['observe'], ['events'],
-  ['setup'], ['mcp'], ['regions'], ['autoupdate'],
+  ['mcp'], ['regions'], ['autoupdate'],
   ['billing', 'upgrade'],
 ]
 
@@ -79,6 +79,20 @@ describe('top-level surface', () => {
     const r = run(['secrets', 'lst'])
     expect(r.status).not.toBe(0)
     expect(r.stderr).toMatch(/unknown command|too many arguments/)
+  }, 30_000)
+  // The console, the landing page and third-party docs print `npx -y insta@latest setup agent …`;
+  // that string must keep working on every release, so `setup agent` is a permanent hidden alias
+  // of `agent setup` — the same class as `services|svc`.
+  it('keeps `setup agent` as a hidden alias of `agent setup` with identical options', () => {
+    expect(run(['--help']).stdout).not.toMatch(/^\s+setup\b/m)
+    const alias = run(['setup', 'agent', '--help'])
+    const canonical = run(['agent', 'setup', '--help'])
+    expect(alias.status).toBe(0)
+    expect(canonical.status).toBe(0)
+    // Option flags only (the column before the description), sorted: a flag added to one
+    // registration cannot silently be missing from the other.
+    const flags = (help: string) => help.split('\n').filter((l) => /^\s+-/.test(l)).map((l) => l.trim().split(/\s{2,}/)[0]).sort()
+    expect(flags(alias.stdout)).toEqual(flags(canonical.stdout))
   }, 30_000)
 })
 

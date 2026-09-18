@@ -53,7 +53,7 @@ pins the visible top level; changing it is a design decision, not a code change.
    trailing optional positional, sole/default service when omitted (`resolveSoleService`);
    `storage <verb> --service <name>`; org-scoped verbs take `--org <id>`. A new verb copies its
    group's shape; a new group copies the closest existing group.
-5. **Renames are hard cutovers.** No hidden aliases (only `services|svc` → `service` are permanent).
+5. **Renames are hard cutovers.** No hidden aliases, with two permanent exceptions: `services|svc` → `service`, and hidden `setup agent` → `agent setup` (the console one-liner is printed in too many places to cut over).
    A rename changes, in the same change set: `skills/insta/cli-reference.md`, `e2e/`, console copy
    in `frontend/`, MCP copy, and platform error strings that spell the path — and it ships in the
    order the design's §9 gives (docs/copy merge right after the CLI release, never before).
