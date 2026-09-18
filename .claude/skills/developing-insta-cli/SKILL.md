@@ -26,7 +26,7 @@ npx tsx src/index.ts --help   # run the CLI from source
 | `index.ts` | commander program — registers every command |
 | `api.ts` | typed platform-API client (auth headers, token refresh, error mapping) |
 | `config.ts` | global `~/.insta/config.json` (apiUrl + tokens + user) · project `./.insta/project.json` (projectId / orgId / current branch) · machine-local `./.insta/link-plane.json` (the control plane the link was made on; a foreign link fails closed in `requireProject`) |
-| `commands/` | one file per command group: `auth` `org` `project` `services` `branch` `secrets` `build` `deploy` `compute` `upgrade` `metrics` (+`logs`) `billing` `govern` (policy/approvals) `manifest` `observe` |
+| `commands/` | one file per command group: `auth` `org` `project` `services` `branch` `secrets` `cron` `build` `deploy` `compute` `upgrade` `metrics` (+`logs`) `billing` `govern` (policy/approvals) `manifest` `observe` |
 | `observe/` | local `insta observe` hook — `scanner.ts` (AWS/GitHub/Stripe/LLM/DB cred detection), `hook.ts`, `install.ts`, `report.ts` (→ platform event ingest) |
 | `flyctl-build.ts` | source-directory deploy build glue (Fly build context) |
 | `nixpacks.ts` | nixpacks glue for `insta build` — plan detection + Dockerfile generation (no Docker daemon) |
