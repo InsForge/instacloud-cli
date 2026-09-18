@@ -10,6 +10,9 @@ export async function buildLogs(buildId: string, opts: { source: string; follow?
   if (opts.follow) return followBuildLogs(api, projectId, opts.source, buildId, (text) => { process.stdout.write(text) })
   const snapshot = await readBuildLogs(api, projectId, opts.source, buildId)
   if (opts.json) return printJson(snapshot)
-  if (snapshot.state !== 'ready') return info(`Build logs ${snapshot.state}`)
-  new BuildLogPrinter().print(snapshot, (text) => { process.stdout.write(text) })
+  const printer = new BuildLogPrinter()
+  const write = (text: string) => { process.stdout.write(text) }
+  printer.print(snapshot, write)
+  printer.finishLine(write)
+  if (snapshot.state !== 'ready') info(`Build logs ${snapshot.state}`)
 }

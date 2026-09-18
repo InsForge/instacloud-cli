@@ -16,6 +16,7 @@ describe('build logs', () => {
       return { ...base, steps: [], entries: [entry('same\n'), entry('first\n')] }
     })
     const snapshot = await readBuildLogs(api, 'project', 'archive', 'build')
+    expect(snapshot.nextCursor).toBeUndefined()
     expect(snapshot.output[0]!.entries.map((e) => e.message)).toEqual(['second\n', 'same\n', 'same\n', 'first\n'])
     expect(api.rawRequest).toHaveBeenCalledTimes(4)
     expect(api.rawRequest).toHaveBeenCalledWith('GET', expect.stringContaining('cursor=logs%2Fnext'), undefined, { signal: expect.any(AbortSignal) })
@@ -95,4 +96,91 @@ it('retries a transient follow error without duplicating output and stops on per
   const down = apiWith(() => { throw new ApiError(502, 'down') })
   await expect(followBuildLogs(down, 'p', 'archive', 'b', write, async () => {})).rejects.toThrow('down')
   expect(down.rawRequest).toHaveBeenCalledTimes(5)
+})
+
+it('retains the mutable tail cursor and preserves identical records across pages', async () => {
+  let tailRecords = 1
+  const cursors: string[] = []
+  const api = apiWith(path => {
+    const q = new URL('http://local' + path).searchParams
+    if (!q.has('step')) return base
+    const cursor = q.get('cursor') ?? ''
+    cursors.push(cursor)
+    return { ...base, entries: Array.from({ length: cursor === 'tail' ? tailRecords : 1 }, () => entry('same\n')), ...(cursor ? {} : { nextCursor: 'tail' }) }
+  })
+  const write = vi.fn()
+  const watch = archiveLogWatcher(api, 'p', write, async () => {})
+  await watch('b', false)
+  tailRecords = 2
+  await watch('b', false)
+  expect(cursors).toEqual(['', 'tail', 'tail'])
+  expect(write.mock.calls.filter(([text]) => text === 'same\n')).toHaveLength(3)
+})
+
+it('emits completed pages before a later page fails and resumes at that page', async () => {
+  let fail = true
+  const cursors: string[] = []
+  const api = apiWith(path => {
+    const q = new URL('http://local' + path).searchParams
+    if (!q.has('step')) return base
+    const cursor = q.get('cursor') ?? ''
+    cursors.push(cursor)
+    if (cursor && fail) { fail = false; throw new ApiError(502, 'down') }
+    return { ...base, entries: [entry(cursor ? 'second' : 'first')], ...(cursor ? {} : { nextCursor: 'tail' }) }
+  })
+  const write = vi.fn()
+  const watch = archiveLogWatcher(api, 'p', write, async () => {})
+  await watch('b', false)
+  expect(write).toHaveBeenCalledWith('first')
+  await watch('b', false)
+  expect(cursors).toEqual(['', 'tail', 'tail'])
+  expect(write.mock.calls.filter(([text]) => text === 'first')).toHaveLength(1)
+  expect(write).toHaveBeenCalledWith('second')
+})
+
+it('waits for a pending step and separates only output boundaries, not chunks', async () => {
+  let pending = true
+  const api = apiWith(path => path.includes('step=') ? { ...base, state: pending ? 'pending' : 'ready', entries: pending ? [] : [entry('hello')] } : base)
+  expect((await readBuildLogs(api, 'p', 'archive', 'b')).state).toBe('pending')
+  const write = vi.fn()
+  const watch = archiveLogWatcher(api, 'p', write, async () => {})
+  await watch('b', false)
+  pending = false
+  await watch('b', false)
+  expect(write).toHaveBeenCalledWith('hello')
+  const printer = new BuildLogPrinter()
+  const chunks = vi.fn()
+  const snapshot = (entries: BuildLogSnapshot['entries']): BuildLogSnapshot => ({ ...base, state: 'ready', output: [{ step: 's', name: 'RUN', entries }] })
+  printer.print(snapshot([entry('hel')]), chunks)
+  printer.print(snapshot([entry('hel'), entry('lo')]), chunks)
+  printer.finishLine(chunks)
+  expect(chunks.mock.calls.map(([text]) => text)).toEqual(['RUN\n', 'hel', 'lo', '\n'])
+})
+
+
+it('prints sanitized metadata-only failures once during follow and one-shot reads', async () => {
+  const api = apiWith(() => ({ ...base, buildState: 'failed', error: 'failed to solve', steps: [{ ...steps[0], hasLogs: false, error: '\u001b[31mexit 17\u001b[0m' }] }))
+  const write = vi.fn()
+  await followBuildLogs(api, 'p', 'archive', 'b', write, async () => {})
+  expect(write.mock.calls.map(([text]) => text)).toEqual(['failed to solve\n', 'RUN test: exit 17\n'])
+  const snapshot = await readBuildLogs(api, 'p', 'archive', 'b')
+  const once = vi.fn()
+  new BuildLogPrinter().print(snapshot, once)
+  expect(once.mock.calls).toEqual(write.mock.calls)
+  expect(snapshot.error).toBe('failed to solve')
+})
+
+it('prints an unavailable build failure through the one-shot command', async () => {
+  const apiModule = await import('../src/api.js')
+  const api = apiWith(() => ({ ...base, state: 'unavailable', buildState: 'failed', error: 'source preparation failed', steps: [] }))
+  const load = vi.spyOn(apiModule.ApiClient, 'load').mockResolvedValue(api as ApiClient)
+  const project = vi.spyOn(apiModule, 'requireProject').mockResolvedValue({ projectId: 'p' } as Awaited<ReturnType<typeof apiModule.requireProject>>)
+  const output = vi.spyOn(process.stdout, 'write').mockReturnValue(true)
+  try {
+    const { buildLogs } = await import('../src/commands/build-logs.js')
+    await buildLogs('b', { source: 'archive' })
+    expect(output).toHaveBeenCalledWith('source preparation failed\n')
+  } finally {
+    load.mockRestore(); project.mockRestore(); output.mockRestore()
+  }
 })

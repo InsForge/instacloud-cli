@@ -124,6 +124,7 @@ export async function deployArchive(
   if (handleApproval(started, opts.json)) return null
   const operationId = started.body?.operationId
   if (typeof operationId !== 'string' || !operationId) throw new Error('the platform accepted the deploy but returned no operation id — re-run the deploy')
+  log(`build logs: insta build-logs ${operationId}`)
   if (started.body?.resumed === true) log('resuming the deploy this archive already started')
 
   const deadline = now() + DEPLOY_DEADLINE_MS

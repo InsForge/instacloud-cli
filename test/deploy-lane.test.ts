@@ -144,12 +144,15 @@ describe('prepareSource — lane dispatch', () => {
   // (packing, building) plus a poll loop to the path that has to keep that promise.
   it('writes no progress to stdout in --json mode', async () => {
     const { api } = fakeApi({ lane: 'archive', limits: { maxArchiveBytes: 1024 * 1024, maxExtractedBytes: 1024 * 1024, maxFiles: 100 } })
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     try {
       await prepareSource(api, 'p1', srcDir(false), 'main', { json: true }, noRun)
+      expect(err.mock.calls.map((c) => String(c[0])).join('')).toContain('build logs: insta build-logs op_1')
       expect(out.mock.calls.map((c) => String(c[0])).join('')).toBe('')
     } finally {
       out.mockRestore()
+      err.mockRestore()
     }
   })
 
