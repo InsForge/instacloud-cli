@@ -50,9 +50,13 @@ pins the visible top level; changing it is a design decision, not a code change.
 3. **One capability, one path.** Before adding a command, grep `src/commands/` for the platform
    endpoint it calls. If another command already calls it, add a flag or mode there instead.
 4. **Same shape for the same thing.** `compute|postgres|redis|mysql|mongodb <verb> [service]` —
-   trailing optional positional, sole/default service when omitted (`resolveSoleService`);
-   `storage <verb> --service <name>`; org-scoped verbs take `--org <id>`. A new verb copies its
-   group's shape; a new group copies the closest existing group.
+   trailing optional positional, sole/default service when omitted (`resolveSoleService`) — except
+   managed-database `query`, where the service is required and LEADS (`query <service> [args…]`),
+   because a trailing optional service cannot be told apart from the query argv (`insta redis query
+   GET key`) without a `--` separator like `compute exec` uses; the design's §8 records it as
+   deferred, and `test/help-surface.test.ts` pins it. `storage <verb> --service <name>`; org-scoped
+   verbs take `--org <id>`. A new verb copies its group's shape; a new group copies the closest
+   existing group.
 5. **Renames are hard cutovers.** No hidden aliases, with two permanent exceptions: `services|svc` → `service`, and hidden `setup agent` → `agent setup` (the console one-liner is printed in too many places to cut over).
    A rename changes, in the same change set: `skills/insta/cli-reference.md`, `e2e/`, console copy
    in `frontend/`, MCP copy, and platform error strings that spell the path — and it ships in the
@@ -62,8 +66,10 @@ Where things go: settings (limits/volume/always-on/scale) live under the service
 `logs`/`metrics` live under the service type via `addObservability()` in `index.ts`; anything
 about this machine's agents or the project's agent governance lives under `agent`; anything about
 this machine's CLI configuration lives under `config`. `--api-url` is injected on every command by
-`addApiUrlEverywhere()` — never declare it on a new command by hand (except a command that must
-persist it, like `login`).
+`addApiUrlEverywhere()`, with two deliberate exceptions: the root and `login` declare the option
+themselves (`login` is the one command that may persist the URL it is given), and `compute exec` is
+skipped because its argv is split before commander ever sees it — there, pass the flag at the root
+(`insta --api-url X compute exec …`). Never declare `--api-url` on a new command by hand.
 
 ## Getting a PR merged (main is protected — this exact flow, no other works)
 

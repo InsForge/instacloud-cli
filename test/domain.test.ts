@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest'
-import { domainSearch, domainBuy, domainAttach, domainList, domainStatus, domainRecordsAdd, domainRecordsList, domainRecordsRemove, domainRecordsSet, ownerOf, searchLines } from '../src/commands/domain.js'
+import { domainSearch, domainBuy, domainAttach, domainCheck, domainDetach, domainList, domainStatus, domainRecordsAdd, domainRecordsList, domainRecordsRemove, domainRecordsSet, ownerOf, searchLines } from '../src/commands/domain.js'
 import type { DomainDeps } from '../src/commands/compute.js'
 
 const services = [
@@ -134,6 +134,44 @@ describe('domain attach', () => {
     const own = (domainName: string) => ({ domainName }) as never
     expect(ownerOf('a.b.myapp.com', [own('myapp.com')])!.domainName).toBe('myapp.com')
     expect(ownerOf('notmyapp.com', [own('myapp.com')])).toBeNull()
+  })
+})
+
+// The compute plane is not where a bought hostname's binding lives: `attach` writes it into the
+// platform's DOMAINS record and a reconciler binds it, while `detach`'s only route unbinds on the
+// compute plane. The platform exposes no detach for the record, so running it would leave the
+// domain still claiming a binding that is gone.
+describe('domain detach', () => {
+  const inventory = { '/orgs/org1/domains': { items: [{ domainName: 'myapp.com', status: 'registered', hostnames: [], expiresAt: null, autorenew: true }] } }
+  it('refuses a bought hostname before any compute-plane call, and says how to move it', async () => {
+    const { deps: d, calls } = deps(inventory)
+    await expect(domainDetach('API.MyApp.com', { group: 'web' }, d)).rejects.toThrow('exit 1')
+    expect(stderr.join('')).toContain('api.myapp.com belongs to myapp.com, a domain bought through InstaCloud')
+    expect(stderr.join('')).toContain('insta domain attach api.myapp.com --group <other service>')
+    expect(stderr.join('')).toContain('insta domain status myapp.com')
+    // The inventory read and nothing else: no service lookup, no DELETE.
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(['GET /orgs/org1/domains'])
+  })
+  it('the apex of a bought domain is refused too', async () => {
+    const { deps: d } = deps(inventory)
+    await expect(domainDetach('myapp.com', {}, d)).rejects.toThrow('exit 1')
+    expect(stderr.join('')).toContain('a domain bought through InstaCloud')
+  })
+  it('a bring-your-own hostname still reaches the compute plane, lowercased', async () => {
+    const { deps: d, calls } = deps(inventory, { status: 200, body: { hostname: 'api.other.com', service: 'web' } })
+    await domainDetach('API.Other.com', { group: 'web' }, d)
+    expect(calls.at(-1)).toMatchObject({ method: 'DELETE', path: '/projects/p1/compute/domain', body: { hostname: 'api.other.com', branch: 'main', group: 'web' } })
+    expect(out()).toContain('removed custom domain api.other.com from web')
+  })
+})
+
+// `attach` lowercases before it sends, so `check` asking about the mixed-case spelling asks about
+// a binding the plane never wrote.
+describe('domain check', () => {
+  it('normalizes the hostname before asking the plane', async () => {
+    const { deps: d, calls } = deps({ '/compute/domain': { hostname: 'docs.myapp.com', status: 'pending', dns: [] } })
+    await domainCheck('  Docs.MyApp.com ', { group: 'web', json: true }, d)
+    expect(calls.at(-1)!.path).toBe('/projects/p1/compute/domain?hostname=docs.myapp.com&group=web&branch=main')
   })
 })
 

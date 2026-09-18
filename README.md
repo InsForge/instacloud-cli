@@ -232,7 +232,7 @@ build never reaches a production installer.
 | `insta feedback` | Report an InstaCloud-side hurdle (bug / feature-request / friction) to the team — never for the app you are building; works logged-out |
 | `insta upgrade` | Update the CLI |
 
-Every command accepts `--api-url <url>` for this invocation only (internal debugging); `insta --help` documents it.
+Every command accepts `--api-url <url>` for this invocation only (internal debugging); for `compute exec`, place it before `compute`. `insta --help` documents it.
 
 ## Configuration
 

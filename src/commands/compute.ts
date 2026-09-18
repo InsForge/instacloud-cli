@@ -659,9 +659,15 @@ export function volumeLines(name: string, volume: { sizeGib: number; mountPath: 
       ? `compute ${name}: no volume attached (attach one: \`insta compute volume ${name} --size <gi>\` — it mounts at /data on the next deploy)`
       : `${type} ${name}: no volume attached (attach one: \`insta ${type} volume ${name} --size <gi>\` — it mounts at the image's data directory)`,
   ]
+  // `--delete` exists on `compute volume` only — a managed database's volume IS its data
+  // directory, so the group never registered the flag (index.ts) and naming it here would print
+  // a command that fails.
+  const grow = type === 'compute'
+    ? 'grow with --size (grow-only), delete with --delete (destroys the data)'
+    : 'grow with --size (grow-only); the volume cannot be deleted — remove the service instead'
   return [
     `${type} ${name}: volume ${volume.sizeGib}Gi at ${volume.mountPath}  (plan max ${cap.volumeGib}Gi)`,
-    '  billing is actual data stored — the size is a cap, not a price; grow with --size (grow-only), delete with --delete (destroys the data)',
+    `  billing is actual data stored — the size is a cap, not a price; ${grow}`,
   ]
 }
 
@@ -684,7 +690,11 @@ export function volumeWriteLine(name: string, body: { volume: { sizeGib: number;
 // path (there is no detach), so the line says what came back with it: the two constraints the
 // volume imposed.
 export function volumeDeleteLine(name: string, type: ManagedType = 'compute'): string {
-  return `${type} ${name}: volume deleted — the disk and its data are gone; suspend fast-wake and scale-out are back`
+  // The two constraints a volume imposes — no suspend fast-wake, no scale-out — are compute-plane
+  // facts. `--delete` is registered on compute only, so the other branch is unreachable today;
+  // it is written type-aware anyway so the line cannot start lying if it ever becomes reachable.
+  const regained = type === 'compute' ? '; suspend fast-wake and scale-out are back' : ''
+  return `${type} ${name}: volume deleted — the disk and its data are gone${regained}`
 }
 
 // Map a DELETE .../volume failure. Pure, exported for tests. An older backend has no DELETE

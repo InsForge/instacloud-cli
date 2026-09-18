@@ -44,9 +44,16 @@ describe('servicesAddRequestBody --volume', () => {
 })
 
 describe('servicesAdd --volume validation (throws before any network/config access)', () => {
-  it('rejects --volume for a non-compute type, pointing at the db command instead', async () => {
+  // The hint must name the type the user TYPED: `insta postgres volume` resolves a postgres
+  // service, so pointing a redis/mysql/mongodb user at it sends them at the wrong service type.
+  it('rejects --volume for a non-compute type, pointing at that type\'s own command', async () => {
     await expect(servicesAdd('postgres', 'db', { volume: '10' })).rejects.toThrow(/--volume is only valid for compute services/)
-    await expect(servicesAdd('storage', 'bkt', { volume: '10' })).rejects.toThrow(/insta postgres volume --size/)
+    await expect(servicesAdd('postgres', 'db', { volume: '10' })).rejects.toThrow(/insta postgres volume --size <gi>/)
+    for (const type of ['redis', 'mysql', 'mongodb']) {
+      await expect(servicesAdd(type, 'db', { volume: '10' })).rejects.toThrow(new RegExp(`insta ${type} volume --size <gi>`))
+    }
+    // Storage owns no volume verb, so it gets the bare rule and no command to run.
+    await expect(servicesAdd('storage', 'bkt', { volume: '10' })).rejects.toThrow(/--volume is only valid for compute services$/)
   })
   it('rejects junk sizes locally instead of deferring to the server', async () => {
     await expect(servicesAdd('compute', 'api', { volume: '1.5' })).rejects.toThrow(/invalid volume size/)
@@ -79,6 +86,17 @@ describe('volumeLines (compute read display)', () => {
     expect(lines[0]).toMatch(/insta compute volume api --size <gi>/)
     expect(lines[0]).toMatch(/next deploy/)
   })
+  // `--delete` is registered on `compute volume` only (index.ts), so naming it on a managed
+  // database's read prints a command that does not exist.
+  it('never offers --delete on a managed database, and says what to do instead', () => {
+    for (const type of ['redis', 'mysql', 'mongodb'] as const) {
+      const lines = volumeLines('cache', { sizeGib: 10, mountPath: '/data' }, { volumeGib: 50 }, type)
+      expect(lines[0], type).toBe(`${type} cache: volume 10Gi at /data  (plan max 50Gi)`)
+      expect(lines[1], type).not.toMatch(/--delete/)
+      expect(lines[1], type).toMatch(/grow with --size \(grow-only\)/)
+      expect(lines[1], type).toMatch(/remove the service instead/)
+    }
+  })
 })
 
 describe('volumeWriteLine (compute PUT result display)', () => {
@@ -103,6 +121,11 @@ describe('volumeDeleteLine (compute DELETE result display)', () => {
   it('says the disk and data are gone and both constraints are back', () => {
     const line = volumeDeleteLine('api')
     expect(line).toBe('compute api: volume deleted — the disk and its data are gone; suspend fast-wake and scale-out are back')
+  })
+  // Unreachable today (no `--delete` outside compute), but the regained constraints are
+  // compute-plane facts: the line must not claim them for a managed database if it ever is.
+  it('claims no compute-plane effects for a managed database', () => {
+    expect(volumeDeleteLine('cache', 'redis')).toBe('redis cache: volume deleted — the disk and its data are gone')
   })
 })
 

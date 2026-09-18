@@ -56,6 +56,12 @@ test('the update machinery itself is exempt from the update check', () => {
   expect(skipsUpdateCheck('upgrade')).toBe(true)
   expect(skipsUpdateCheck('autoupdate')).toBe(true)
   expect(skipsUpdateCheck('__update-check')).toBe(true)
+  // The preference lives at `insta config autoupdate` since the command re-organization; matching
+  // on argv[2] alone let the command that turns auto-update OFF trigger an auto-update first.
+  expect(skipsUpdateCheck('config', 'autoupdate')).toBe(true)
+  // Narrow: the rest of the `config` group is an ordinary command.
+  expect(skipsUpdateCheck('config', 'regions')).toBe(false)
+  expect(skipsUpdateCheck('config')).toBe(false)
 })
 
 test('the ssh renewal hook is exempt, by the name the config block invokes', () => {

@@ -60,7 +60,11 @@ export function setApiUrlOverride(url: string | undefined): void {
  *  the file keeps the real login, so unsetting the override restores it. A custom host (insta-oss,
  *  a preview) is treated the same way — its session is equally foreign. */
 export function pickApiUrl(parsed: GlobalConfig | null, env: NodeJS.ProcessEnv, cliOverride?: string): GlobalConfig {
-  const named = envFromEnvVar(env.INSTA_ENV)
+  // `env` is the environment this call is deciding for, so an ABSENT property means unset — not
+  // "ask the real process". envFromEnvVar defaults its parameter to process.env.INSTA_ENV, so
+  // passing it `env.INSTA_ENV` unguarded made a caller handing in `{}` (every test, and any future
+  // caller with a synthetic environment) silently read the ambient one instead.
+  const named = env.INSTA_ENV === undefined ? null : envFromEnvVar(env.INSTA_ENV)
   const override = cliOverride ?? env.INSTA_API_URL ?? (named ? ENVS[named].api : undefined)
   if (!parsed) return { apiUrl: override ?? DEFAULT_API }
   const persisted = parsed.apiUrl ?? DEFAULT_API

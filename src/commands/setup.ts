@@ -1,5 +1,6 @@
-// `insta agent setup` — make this machine's coding agents InstaCloud-native in one step
-// (the Railway `railway setup agent` pattern). Installs the `insta` skill USER-GLOBALLY for
+// `insta agent setup` — make this machine's coding agents InstaCloud-native in one step.
+// (`setup agent` remains a permanent hidden alias; the canonical order is `agent setup`, per the
+// noun-first tree — see the Command architecture rules.) Installs the `insta` skill USER-GLOBALLY for
 // every agent the skills tool knows: the skill is pure product knowledge with brand-gated
 // triggers — no project state in it (the project binding is carried by ./.insta/project.json
 // at command time), so one machine-level copy is strictly better than per-project copies.

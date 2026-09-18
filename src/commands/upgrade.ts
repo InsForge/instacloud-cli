@@ -397,12 +397,17 @@ export async function autoupdate(mode?: string): Promise<void> {
  *  into the ssh session's stderr and an auto-upgrade spawns a detached process
  *  mid-connection. Same prefix rule trackCommand already applies to telemetry.
  */
-export function skipsUpdateCheck(cmd: string | undefined): boolean {
+export function skipsUpdateCheck(cmd: string | undefined, sub?: string | undefined): boolean {
+  // The autoupdate PREFERENCE moved to `insta config autoupdate` in the command re-organization,
+  // so the level-1 name alone stopped matching it: `insta config autoupdate off` would run the
+  // very check it is being typed to switch off (and could auto-upgrade before the handler lands).
+  // The retired top-level spelling stays exempt too — it costs nothing and cannot regress.
+  if (cmd === 'config' && sub === 'autoupdate') return true
   return cmd === 'upgrade' || cmd === 'autoupdate' || !!cmd?.startsWith('__')
 }
 
 export function maybeUpdate(current: string, argv: string[]): void {
-  if (skipsUpdateCheck(argv[2])) return
+  if (skipsUpdateCheck(argv[2], argv[3])) return
   const channel = detectChannel()
   const cache = readCache()
   const now = Date.now()

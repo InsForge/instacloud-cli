@@ -7,7 +7,13 @@ import { info, die, printJson, promptPassword, openUrl } from '../util.js'
 
 /** --api-url and --env both set the target host; --api-url wins (more specific), matching the
  *  INSTA_API_URL > INSTA_ENV precedence in config.ts. Returns the URL to point at, or undefined
- *  to leave whatever is already resolved alone. */
+ *  to leave whatever is already resolved alone.
+ *
+ *  Every login entry point feeds this into `api.setApiUrl(targetApiUrl(opts) ?? api.apiUrl)`: a
+ *  login is the one command that MAY move the machine's stored control-plane URL, and it must
+ *  store the deployment it actually authenticated against — flag, env var or stored URL alike.
+ *  Without the explicit set, ApiClient.persist() keeps the URL already on disk (see its comment),
+ *  which would file a session minted on one deployment under another one's URL. */
 function targetApiUrl(opts: { apiUrl?: string; env?: string }): string | undefined {
   if (opts.apiUrl) return opts.apiUrl
   if (!opts.env) return undefined
@@ -46,8 +52,7 @@ export async function login(
     return device(opts, openUrl)
   }
   const api = await ApiClient.load()
-  const target = targetApiUrl(opts)
-  if (target) api.setApiUrl(target)
+  api.setApiUrl(targetApiUrl(opts) ?? api.apiUrl)
   const password = opts.password ?? process.env.INSTA_PASSWORD ?? (await promptPassword())
   const res = await api.request('POST', '/auth/login', { email: opts.email, password }, { auth: false })
   api.setSession(res, res.user)
@@ -60,8 +65,7 @@ export async function login(
 export async function loginOauth(provider: string, opts: { apiUrl?: string; env?: string }): Promise<void> {
   if (provider !== 'github' && provider !== 'google') die('provider must be github or google')
   const api = await ApiClient.load()
-  const target = targetApiUrl(opts)
-  if (target) api.setApiUrl(target)
+  api.setApiUrl(targetApiUrl(opts) ?? api.apiUrl)
   const token = await browserOauth(api.apiUrl, provider)
   api.setSession({ accessToken: token, refreshToken: token })
   const me = await api.request<{ user: { id: string; email: string | null; name: string | null } }>('GET', '/me')
@@ -77,8 +81,7 @@ export async function loginOauth(provider: string, opts: { apiUrl?: string; env?
 // (which owns the signin round-trip), and poll the platform until they approve.
 export async function loginDevice(opts: { apiUrl?: string; env?: string }, open?: (url: string) => boolean): Promise<void> {
   const api = await ApiClient.load()
-  const target = targetApiUrl(opts)
-  if (target) api.setApiUrl(target)
+  api.setApiUrl(targetApiUrl(opts) ?? api.apiUrl)
   const token = await deviceGrant((path, body) => api.request('POST', path, body, { auth: false }), sleepSeconds, open)
   api.setSession({ accessToken: token, refreshToken: token })
   const me = await api.request<{ user: { id: string; email: string | null; name: string | null } }>('GET', '/me')
@@ -91,8 +94,7 @@ export async function loginDevice(opts: { apiUrl?: string; env?: string }, open?
 // the console, the platform mints an insta_ key, and it is stored exactly as --api-key stores one.
 export async function loginClaim(email: string, opts: { apiUrl?: string; env?: string }, open?: (url: string) => boolean, grant: typeof claimGrant = claimGrant): Promise<void> {
   const api = await ApiClient.load()
-  const target = targetApiUrl(opts)
-  if (target) api.setApiUrl(target)
+  api.setApiUrl(targetApiUrl(opts) ?? api.apiUrl)
   const client = agentMode()?.client ?? 'unknown'
   const key = await grant(email, client, (path, body, signal) => api.request('POST', path, body, { auth: false, signal }), sleepSeconds, open)
   const user = await applyApiKeyLogin(api, key)
@@ -103,8 +105,7 @@ export async function loginClaim(email: string, opts: { apiUrl?: string; env?: s
 // Non-interactive login with a durable insta_ key (minted via POST /tokens): store it and confirm against /me. No browser, no polling.
 export async function loginApiKey(key: string, opts: { apiUrl?: string; env?: string }): Promise<void> {
   const api = await ApiClient.load()
-  const target = targetApiUrl(opts)
-  if (target) api.setApiUrl(target)
+  api.setApiUrl(targetApiUrl(opts) ?? api.apiUrl)
   const user = await applyApiKeyLogin(api, key)
   await api.persist()
   info(`logged in as ${user.email ?? user.id} @ ${api.apiUrl}`)

@@ -135,6 +135,19 @@ describe('group shapes', () => {
     expect(commandNames(run(['config', '--help']).stdout)).toEqual(['install-mcp', 'regions', 'autoupdate'])
     expect(commandNames(run(['billing', '--help']).stdout)).toEqual(['subscribe', 'portal', 'usage'])
   }, 30_000)
+  // Rule 4's documented exception (SKILL.md "Command architecture", design §8): the managed-db
+  // `query` service is REQUIRED and LEADS, because a trailing optional service cannot be told
+  // apart from the query argv (`insta redis query GET key`) without a `--` separator. Pinned here
+  // so a later "make it consistent" refactor has to be a deliberate design change.
+  it('managed-database query takes the service first, and required', () => {
+    for (const type of ['redis', 'mysql', 'mongodb']) {
+      const r = run([type, 'query', '--help'])
+      expect(r.status, type).toBe(0)
+      expect(r.stdout, type).toContain(`Usage: insta ${type} query [options] <service> [args...]`)
+    }
+    const bare = run(['redis', 'query'])
+    expect(bare.status).not.toBe(0)
+  }, 30_000)
   it('offers --delete on compute volume only — a managed database volume is its data directory', () => {
     expect(run(['compute', 'volume', '--help']).stdout).toContain('--delete')
     for (const type of ['redis', 'mysql', 'mongodb']) {
@@ -153,5 +166,20 @@ describe('--api-url placement', () => {
     expect(JSON.parse(run(['env', '--json', '--api-url', URL_A]).stdout).apiUrl).toBe(URL_A)
     expect(JSON.parse(run(['--api-url', URL_A, 'env', '--json']).stdout).apiUrl).toBe(URL_A)
     expect(JSON.parse(run(['env', '--json', '--api-url', URL_A], { INSTA_API_URL: URL_B }).stdout).apiUrl).toBe(URL_A)
+  }, 30_000)
+  // `env` is hidden and hand-rolled, so it proves nothing about the 24 visible groups: a leaf that
+  // addApiUrlEverywhere() missed would only surface as `unknown option '--api-url'` at runtime.
+  // One representative leaf per group, plus a level-3 leaf. URL_A is unroutable, so every one of
+  // these fails on the connection — that is the SUCCESS condition here: the process got past
+  // commander's option parsing, which is the only thing being asserted.
+  const LEAVES: string[][] = [
+    ['service', 'list'], ['secrets', 'list'], ['domain', 'list'], ['compute', 'status'],
+    ['postgres', 'url'], ['redis', 'status'], ['mysql', 'status'], ['mongodb', 'status'],
+    ['storage', 'list'], ['template', 'list'], ['billing', 'usage'], ['agent', 'manifest'],
+    ['config', 'regions'], ['domain', 'records', 'list', 'example.com'],
+  ]
+  it.each(LEAVES)('`%s %s` accepts --api-url after the subcommand', (...path) => {
+    const r = run([...path, '--api-url', URL_A])
+    expect(`${r.stderr}${r.stdout}`, path.join(' ')).not.toContain('unknown option')
   }, 30_000)
 })

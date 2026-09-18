@@ -21,6 +21,23 @@ export function assertServiceName(name: string): void {
   if (!SERVICE_NAME_RE.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
 }
 
+// Every service type that owns an always-on / volume verb of its OWN. The creation-time flags are
+// compute-only, so the refusal has to name the group the user actually typed: pointing a redis or
+// mongodb user at `insta postgres …` sends them at a different service type (and, on a project
+// with no postgres, at nothing at all).
+const DB_TYPES = ['postgres', 'redis', 'mysql', 'mongodb'] as const
+const hasOwnGroup = (type: string): boolean => (DB_TYPES as readonly string[]).includes(type)
+
+export function alwaysOnTypeError(type: string): string {
+  const base = '--always-on / --no-always-on is only valid for compute services'
+  return hasOwnGroup(type) ? `${base} (for ${type}, use \`insta ${type} always-on on|off\` after creation)` : base
+}
+
+export function volumeTypeError(type: string): string {
+  const base = '--volume is only valid for compute services'
+  return hasOwnGroup(type) ? `${base} (${type} has one by default — grow it with \`insta ${type} volume --size <gi>\`)` : base
+}
+
 const MAX_COMPUTE_REPLICAS = 10
 
 // Parse a replica count inside the compute plane's current safety ceiling.
@@ -113,10 +130,10 @@ export async function servicesAdd(type: string, name: string, opts: ServicesAddO
     parsePort(opts.port) // junk fails here, before any config/network access
   }
   // Presence, not truthiness: `--no-always-on` is an explicit false and is just as compute-only.
-  if (opts.alwaysOn !== undefined && type !== 'compute') throw new Error('--always-on / --no-always-on is only valid for compute services (for postgres, use `insta postgres always-on on|off` after creation)')
+  if (opts.alwaysOn !== undefined && type !== 'compute') throw new Error(alwaysOnTypeError(type))
   if (opts.mountPath !== undefined && (type !== 'compute' || opts.volume === undefined)) throw new Error('--mount-path requires --volume on a compute service')
   if (opts.volume !== undefined) {
-    if (type !== 'compute') throw new Error('--volume is only valid for compute services (postgres has one by default — grow it with `insta postgres volume --size`)')
+    if (type !== 'compute') throw new Error(volumeTypeError(type))
     parseVolumeGib(opts.volume) // junk fails here, before any config/network access
   }
   const api = await ApiClient.load()
