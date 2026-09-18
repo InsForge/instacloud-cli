@@ -110,6 +110,7 @@ export async function deployArchive(
   now: () => number = Date.now,
   wait: (ms: number) => Promise<unknown> = sleep,
   log: (m: string) => void = () => {},
+  watchLogs?: (operationId: string, finished: boolean, remainingMs: number) => Promise<void>,
 ): Promise<ArchiveDeployResult | null> {
   const started = await api.rawRequest('POST', `/projects/${projectId}/archive-deploys`, {
     branch,
@@ -123,6 +124,7 @@ export async function deployArchive(
   if (handleApproval(started, opts.json)) return null
   const operationId = started.body?.operationId
   if (typeof operationId !== 'string' || !operationId) throw new Error('the platform accepted the deploy but returned no operation id — re-run the deploy')
+  log(`build logs: insta build-logs ${operationId}`)
   if (started.body?.resumed === true) log('resuming the deploy this archive already started')
 
   const deadline = now() + DEPLOY_DEADLINE_MS
@@ -141,6 +143,7 @@ export async function deployArchive(
       throw remaining <= POLL_REQUEST_TIMEOUT_MS ? overdue() : new Error(`the platform did not answer a status poll within ${POLL_REQUEST_TIMEOUT_MS / 1000}s — check \`insta status\` or re-run`)
     })
     const state = res.body?.state
+    await watchLogs?.(operationId, state === 'failed' || state === 'live', Math.max(0, deadline - now()))
     // A failed operation is an ANSWER, not a transport error: the poll worked, and the sentence
     // it carries (usually the gateway's own, e.g. "no Dockerfile at ./api") is the one to show.
     if (state === 'failed') {

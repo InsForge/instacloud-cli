@@ -226,6 +226,7 @@ build never reaches a production installer.
 | `insta db` | `url` (print the postgres DSN) · `connect` (psql session) · `limits` · `stats` · `always-on` · `volume` |
 | `insta regions` | Regions available for postgres and compute |
 | `insta manifest` | Agent-legible view of every branch and its URLs |
+| `insta build-logs <id>` | Read source-build output; `--source archive` (default) uses the deploy operation ID, `--source github` uses a GitHub build ID; `--follow` watches output, `--json` returns one snapshot |
 | `insta metrics` · `logs` · `events` | Service metrics; runtime logs (`--deploy` for deploy events); audit timeline |
 | `insta usage` · `billing` | Usage by billing dimension; `billing upgrade` · `billing portal` |
 | `insta approvals` | `list` · `approve` · `deny` |

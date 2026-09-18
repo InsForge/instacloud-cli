@@ -128,7 +128,9 @@ describe('deployArchive — the gated call and the poll after it', () => {
       { status: 200, body: live },
     ])
 
-    const out = await deployArchive(a, 'p1', ref, 'main', { group: 'api', port: '3000', websocket: true, replaceSource: true }, Date.now, noWait)
+    const notes: string[] = []
+    const out = await deployArchive(a, 'p1', ref, 'main', { group: 'api', port: '3000', websocket: true, replaceSource: true }, Date.now, noWait, message => { notes.push(message) })
+    expect(notes).toContain('build logs: insta build-logs op_1')
 
     expect(out).toEqual({ image: 'ecr.example/app@sha256:aa', url: 'https://app.example', branch: 'main', group: 'api', machineId: 'm1' })
     expect(calls[0]!.body).toEqual({ branch: 'main', group: 'api', archive: ref, port: 3000, websocket: true, replaceSource: true })
@@ -175,7 +177,7 @@ describe('deployArchive — the gated call and the poll after it', () => {
     expect(out).toMatchObject({ url: 'https://app.example' })
     expect(n).toBe(states.length + 1)
     // Progress is narrated once per state change, not once per poll.
-    expect(seen).toEqual(['queued…', 'building…', 'image built, deploying it'])
+    expect(seen).toEqual(['build logs: insta build-logs op_1', 'queued…', 'building…', 'image built, deploying it'])
   })
 
   it('returns the operation’s own failure sentence rather than throwing', async () => {
