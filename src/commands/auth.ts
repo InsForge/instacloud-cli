@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { ApiClient, ApiError, linkedProject } from '../api.js'
+import { readPersistedGlobal } from '../config.js'
 import { agentMode } from '../agent.js'
 import { ENVS, ENV_NAMES, envForApiUrl, isEnvName } from '../env.js'
 import { info, die, printJson, promptPassword, openUrl } from '../util.js'
@@ -322,8 +323,18 @@ function browserOauth(apiUrl: string, provider: string): Promise<string> {
   })
 }
 
+/** Log out: revoke the session on the server, then clear the local tokens.
+ *
+ *  Built from the PERSISTED config, not from `ApiClient.load()`'s override-resolved view. There is
+ *  exactly one stored session, so a runtime `--api-url` (or INSTA_API_URL / INSTA_ENV) has no
+ *  subject here — and pointing at a foreign deployment made this actively unsafe: readGlobal()
+ *  scrubs a foreign deployment's tokens, so the revoke below was skipped for want of a refresh
+ *  token while the local tokens were deleted anyway, leaving the session valid on the server with
+ *  nothing left on this machine to revoke it with. The revoke now always goes to the deployment
+ *  the session belongs to, with the real refresh token. `persist()` keeps the stored URL (see its
+ *  comment): logout never sets one explicitly. */
 export async function logout(): Promise<void> {
-  const api = await ApiClient.load()
+  const api = new ApiClient(await readPersistedGlobal())
   if (api.config.refreshToken) {
     try { await api.request('POST', '/auth/logout', { refreshToken: api.config.refreshToken }, { auth: false }) } catch { /* ignore */ }
   }
