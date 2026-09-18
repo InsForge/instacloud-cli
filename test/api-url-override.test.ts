@@ -109,6 +109,10 @@ describe('--api-url is never persisted', () => {
       expect(after.apiUrl).toBe(PROD)
       expect(after.accessToken).toBeUndefined()
       expect(after.refreshToken).toBeUndefined()
+      // Ignoring the flag silently would read as "logged out of staging". Say which deployment
+      // the session actually belonged to, and still exit 0.
+      expect(r.stdout).toContain(`does not apply to logout`)
+      expect(r.stdout).toContain(PROD)
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

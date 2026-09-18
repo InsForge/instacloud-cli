@@ -1,9 +1,9 @@
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { ApiClient, ApiError, linkedProject } from '../api.js'
-import { readPersistedGlobal } from '../config.js'
+import { readGlobal, readPersistedGlobal } from '../config.js'
 import { agentMode } from '../agent.js'
-import { ENVS, ENV_NAMES, envForApiUrl, isEnvName } from '../env.js'
+import { ENVS, ENV_NAMES, envForApiUrl, isEnvName, normalizeUrl } from '../env.js'
 import { info, die, printJson, promptPassword, openUrl } from '../util.js'
 
 /** --api-url and --env both set the target host; --api-url wins (more specific), matching the
@@ -334,7 +334,14 @@ function browserOauth(apiUrl: string, provider: string): Promise<string> {
  *  the session belongs to, with the real refresh token. `persist()` keeps the stored URL (see its
  *  comment): logout never sets one explicitly. */
 export async function logout(): Promise<void> {
-  const api = new ApiClient(await readPersistedGlobal())
+  const stored = await readPersistedGlobal()
+  // Say so rather than ignoring it silently: exiting 0 with a bare "logged out" while the flag
+  // named a different deployment reads as if that deployment was the one logged out of.
+  const resolved = (await readGlobal()).apiUrl
+  if (normalizeUrl(resolved) !== normalizeUrl(stored.apiUrl)) {
+    info(`note: the control-plane override (${resolved}) does not apply to logout — there is one stored session; logging out of ${stored.apiUrl}`)
+  }
+  const api = new ApiClient(stored)
   if (api.config.refreshToken) {
     try { await api.request('POST', '/auth/logout', { refreshToken: api.config.refreshToken }, { auth: false }) } catch { /* ignore */ }
   }

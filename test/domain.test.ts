@@ -157,6 +157,28 @@ describe('domain detach', () => {
     await expect(domainDetach('myapp.com', {}, d)).rejects.toThrow('exit 1')
     expect(stderr.join('')).toContain('a domain bought through InstaCloud')
   })
+  // The lookup is a guard on a command that worked without it. A control plane with no org-scoped
+  // domains route (an older deployment, insta-oss), a 403 or a transient 5xx must not turn a
+  // bring-your-own detach into a hard failure.
+  it('falls through to the compute plane when the ownership lookup fails', async () => {
+    const calls: Array<{ method: string; path: string; body?: unknown }> = []
+    const api = {
+      request: async (method: string, path: string, body?: unknown) => {
+        calls.push({ method, path, body })
+        if (path.includes('/orgs/')) throw new Error('HTTP 404')
+        if (path.includes('/services')) return { services }
+        throw new Error(`unexpected ${method} ${path}`)
+      },
+      rawRequest: async (method: string, path: string, body?: unknown) => {
+        calls.push({ method, path, body })
+        return { status: 200, body: { hostname: 'api.other.com', service: 'web' } }
+      },
+    }
+    const d = { api, project: { projectId: 'p1', orgId: 'org1', branch: 'main' } } as unknown as DomainDeps
+    await domainDetach('api.other.com', { group: 'web' }, d)
+    expect(calls[0]!.path).toBe('/orgs/org1/domains')
+    expect(calls.at(-1)).toMatchObject({ method: 'DELETE', path: '/projects/p1/compute/domain', body: { hostname: 'api.other.com', branch: 'main', group: 'web' } })
+  })
   it('a bring-your-own hostname still reaches the compute plane, lowercased', async () => {
     const { deps: d, calls } = deps(inventory, { status: 200, body: { hostname: 'api.other.com', service: 'web' } })
     await domainDetach('API.Other.com', { group: 'web' }, d)

@@ -173,12 +173,15 @@ describe('--api-url placement', () => {
   // these fails on the connection — that is the SUCCESS condition here: the process got past
   // commander's option parsing, which is the only thing being asserted.
   const LEAVES: string[][] = [
+    ['status'], ['org', 'list'], ['project', 'list'], ['branch', 'list'],
     ['service', 'list'], ['secrets', 'list'], ['domain', 'list'], ['compute', 'status'],
     ['postgres', 'url'], ['redis', 'status'], ['mysql', 'status'], ['mongodb', 'status'],
     ['storage', 'list'], ['template', 'list'], ['billing', 'usage'], ['agent', 'manifest'],
     ['config', 'regions'], ['domain', 'records', 'list', 'example.com'],
+    // The level-1 verbs: they carry no group, so nothing else here would catch a miss on them.
+    ['build'], ['deploy'], ['run', 'true'], ['feedback'],
   ]
-  it.each(LEAVES)('`%s %s` accepts --api-url after the subcommand', (...path) => {
+  it.each(LEAVES)('`%s %s` accepts --api-url after the command', (...path) => {
     const r = run([...path, '--api-url', URL_A])
     expect(`${r.stderr}${r.stdout}`, path.join(' ')).not.toContain('unknown option')
   }, 30_000)

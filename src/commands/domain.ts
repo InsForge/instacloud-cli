@@ -208,6 +208,22 @@ export async function domainCheck(host: string, opts: HostOpts, deps?: DomainDep
   return checkDomain(host.trim().toLowerCase(), opts, deps)
 }
 
+/** The bought domain `host` sits under, or null — including when the question cannot be answered.
+ *
+ *  This lookup is a GUARD on a command that worked without it: a control plane without the
+ *  org-scoped domains route (an older deployment, insta-oss), a 403, or a transient 5xx must not
+ *  turn a bring-your-own detach into a hard failure. A failed read means "nothing says this is a
+ *  bought name", which is exactly how the command behaved before the guard existed. A read that
+ *  SUCCEEDS is authoritative, and its refusal stands. */
+async function boughtOwner(d: DomainDeps, orgId: string, host: string): Promise<Purchased | null> {
+  try {
+    const { items } = await d.api.request<{ items: Purchased[] }>('GET', `/orgs/${orgId}/domains`)
+    return ownerOf(host, items)
+  } catch {
+    return null
+  }
+}
+
 /**
  * Release a hostname from its compute service. Bring-your-own only: a hostname under a domain
  * bought through InstaCloud is refused here.
@@ -226,8 +242,7 @@ export async function domainDetach(host: string, opts: HostOpts, deps?: DomainDe
   // Without an org there is no domains list to check against (INSTA_PROJECT_ID-only CI links name
   // none); a bring-your-own detach must keep working there, so the guard is simply not applied.
   if (d.project.orgId) {
-    const { items } = await d.api.request<{ items: Purchased[] }>('GET', `/orgs/${d.project.orgId}/domains`)
-    const owner = ownerOf(name, items)
+    const owner = await boughtOwner(d, d.project.orgId, name)
     if (owner) {
       die(`${name} belongs to ${owner.domainName}, a domain bought through InstaCloud — its binding lives on the domain, not on the compute plane, so detaching it here would leave the domain still claiming it. `
         + `Move it with \`insta domain attach ${name} --group <other service>\` (attach releases it from the current one), and see where it stands with \`insta domain status ${owner.domainName}\`.`)

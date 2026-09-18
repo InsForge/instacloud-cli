@@ -91,7 +91,7 @@ program.command('login').description('Log in — bare: sign in from your browser
   .option('--api-url <url>', 'control-plane API base URL')
   .option('--env <name>', `deployment environment: ${ENV_NAMES.join(' | ')}`)
   .action(guard((o) => auth.login(o)))
-program.command('logout').description('Log out and clear local tokens').action(guard(() => auth.logout()))
+program.command('logout').description('Log out and clear local tokens — always the stored session, so --api-url (and INSTA_API_URL / INSTA_ENV) do not apply here').action(guard(() => auth.logout()))
 program.command('status').description('Show login + linked project').option('--json').action(guard((o) => auth.status(o)))
 
 // ---- environment (prod | staging) — hidden: `--api-url` covers the debugging case; kept working ----

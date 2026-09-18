@@ -35,7 +35,13 @@ export function alwaysOnTypeError(type: string): string {
 
 export function volumeTypeError(type: string): string {
   const base = '--volume is only valid for compute services'
-  return hasOwnGroup(type) ? `${base} (${type} has one by default — grow it with \`insta ${type} volume --size <gi>\`)` : base
+  // insta-db-backed postgres is provisioned WITH its disk (dbVolume goes through
+  // PATCH /database/settings), so there is nothing to attach — only to grow. A managed Fly
+  // database can be volumeless, and `--size` attaches there (ServicesService.setVolumeSize's
+  // attach branch runs for isFlyRuntimeType), which is what `volumeLines` already prints.
+  if (type === 'postgres') return `${base} (postgres has one by default — grow it with \`insta postgres volume --size <gi>\`)`
+  if (hasOwnGroup(type)) return `${base} (attach or grow one after creation with \`insta ${type} volume --size <gi>\`)`
+  return base
 }
 
 const MAX_COMPUTE_REPLICAS = 10
