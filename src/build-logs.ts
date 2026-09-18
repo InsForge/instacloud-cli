@@ -136,14 +136,18 @@ export function archiveLogWatcher(api: Api, projectId: string, write: (message: 
   let unavailable = false
   return async (buildId: string, finished: boolean, remainingMs = 30_000): Promise<void> => {
     if (unavailable) return
-    const deadline = Date.now() + Math.min(remainingMs, finished ? 18_000 : 3000)
+    const started = Date.now()
+    const deadline = started + remainingMs
+    const refreshDeadline = started + Math.min(remainingMs, finished ? 18_000 : 3000)
     for (let attempt = 0; attempt < (finished ? 6 : 1); attempt++) {
-      if (attempt > 0) await wait(Math.min(3000, Math.max(0, deadline - Date.now())))
-      const remaining = deadline - Date.now()
+      if (attempt > 0) await wait(Math.min(3000, Math.max(0, refreshDeadline - Date.now())))
+      const finalRead = finished && (attempt === 5 || Date.now() >= refreshDeadline)
+      const remaining = Math.min(deadline - Date.now(), finalRead ? 30_000 : refreshDeadline - Date.now())
       if (remaining <= 0) return
-      if (finished && (attempt === 0 || attempt === 5)) follow.tails.clear()
+      if (finished && (attempt === 0 || finalRead)) follow.tails.clear()
+      const signal = AbortSignal.timeout(remaining)
       try {
-        const snapshot = await readBuildLogs(api, projectId, 'archive', buildId, AbortSignal.timeout(remaining), follow)
+        const snapshot = await readBuildLogs(api, projectId, 'archive', buildId, signal, follow)
         if (snapshot.state === 'unsupported') {
           printer.finishLine(write)
           write('Build logs are not supported for this build provider.\n')
@@ -153,12 +157,15 @@ export function archiveLogWatcher(api: Api, projectId: string, write: (message: 
         if (snapshot.state === 'unavailable') throw new Error('build logs unavailable')
         warned = ''
       } catch (error) {
+        if (signal.aborted && !finalRead && Date.now() < deadline) continue
         if (error instanceof ApiError && error.status === 400) follow.tails.clear()
         printer.finishLine(write)
-        const message = `Could not read build logs. Retry with: insta build-logs ${buildId}\n`
+        const reason = signal.aborted ? ' (timed out)' : error instanceof ApiError ? ` (HTTP ${error.status})` : ''
+        const message = `Could not read build logs${reason}. Retry with: insta build-logs ${buildId}\n`
         if (warned !== message) write(message)
         warned = message
       }
+      if (finalRead) return
     }
   }
 }
