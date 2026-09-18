@@ -148,7 +148,7 @@ describe('prepareSource — lane dispatch', () => {
     const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     try {
       await prepareSource(api, 'p1', srcDir(false), 'main', { json: true }, noRun)
-      expect(err.mock.calls.map((c) => String(c[0])).join('')).toContain('build logs: insta build-logs op_1')
+      expect(err.mock.calls.map((c) => String(c[0])).join('')).toContain('build logs: insta build logs op_1')
       expect(out.mock.calls.map((c) => String(c[0])).join('')).toBe('')
     } finally {
       out.mockRestore()
