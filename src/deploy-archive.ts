@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises'
 import type { ApiClient } from './api.js'
 import { handleApproval } from './util.js'
 import type { PackResult } from './pack.js'
@@ -110,7 +111,7 @@ export async function deployArchive(
   now: () => number = Date.now,
   wait: (ms: number) => Promise<unknown> = sleep,
   log: (m: string) => void = () => {},
-  watchLogs?: (operationId: string, finished: boolean, remainingMs: number) => Promise<void>,
+  watchLogs?: (operationId: string, finished: boolean, remainingMs: number, signal?: AbortSignal) => Promise<void>,
 ): Promise<ArchiveDeployResult | null> {
   const started = await api.rawRequest('POST', `/projects/${projectId}/archive-deploys`, {
     branch,
@@ -129,56 +130,62 @@ export async function deployArchive(
 
   const deadline = now() + DEPLOY_DEADLINE_MS
   const overdue = () => new Error(`the deploy did not finish within ${Math.round(DEPLOY_DEADLINE_MS / 60000)} minutes — check \`insta status\` or re-run`)
+  const logController = new AbortController()
+  const logTask = watchLogs ? (async () => {
+    while (!logController.signal.aborted && now() < deadline) {
+      await watchLogs(operationId, false, Math.max(0, deadline - now()), logController.signal)
+      await delay(Math.min(POLL_MS, Math.max(0, deadline - now())), undefined, { signal: logController.signal })
+    }
+  })().catch(() => {
+    if (!logController.signal.aborted) log(`Could not follow build logs. Retry with: insta build logs ${operationId}`)
+  }) : undefined
   let last = ''
-  for (;;) {
-    // The deadline bounds the wall clock, not the number of answers: it is checked before each poll,
-    // and each poll is itself bounded by what remains, so a stalled endpoint cannot hold the CLI
-    // past it, and an answer that would arrive after it is not waited for.
-    const remaining = deadline - now()
-    if (remaining <= 0) throw overdue()
-    const res = await api.rawRequest('GET', `/projects/${projectId}/archive-deploys/${encodeURIComponent(operationId)}`, undefined, {
-      signal: AbortSignal.timeout(Math.min(remaining, POLL_REQUEST_TIMEOUT_MS)),
-    }).catch((e) => {
-      if (!isAbort(e)) throw e
-      throw remaining <= POLL_REQUEST_TIMEOUT_MS ? overdue() : new Error(`the platform did not answer a status poll within ${POLL_REQUEST_TIMEOUT_MS / 1000}s — check \`insta status\` or re-run`)
-    })
-    const state = res.body?.state
-    await watchLogs?.(operationId, state === 'failed' || state === 'live', Math.max(0, deadline - now()))
-    // A failed operation is an ANSWER, not a transport error: the poll worked, and the sentence
-    // it carries (usually the gateway's own, e.g. "no Dockerfile at ./api") is the one to show.
-    if (state === 'failed') {
-      // `||` would let a non-string through and the CLI would print "[object Object]" for the one
-      // sentence that explains the failure. Only a non-empty string is a message.
-      const error = res.body?.error
-      return { failed: typeof error === 'string' && error ? error : 'the deploy failed' }
-    }
-    if (state === 'live') {
-      const image = res.body?.imageRef
-      const url = res.body?.url
-      if (typeof image !== 'string' || !image || typeof url !== 'string' || !url) {
-        throw new Error('the deploy finished but the platform returned no image or URL for it — check `insta status`')
+  try {
+    for (;;) {
+      const remaining = deadline - now()
+      if (remaining <= 0) throw overdue()
+      const res = await api.rawRequest('GET', `/projects/${projectId}/archive-deploys/${encodeURIComponent(operationId)}`, undefined, {
+        signal: AbortSignal.timeout(Math.min(remaining, POLL_REQUEST_TIMEOUT_MS)),
+      }).catch((e) => {
+        if (!isAbort(e)) throw e
+        throw remaining <= POLL_REQUEST_TIMEOUT_MS ? overdue() : new Error(`the platform did not answer a status poll within ${POLL_REQUEST_TIMEOUT_MS / 1000}s — check \`insta status\` or re-run`)
+      })
+      const state = res.body?.state
+      if (state === 'failed' || state === 'live') {
+        logController.abort()
+        await logTask
+        await watchLogs?.(operationId, true, Math.max(0, deadline - now()))
       }
-      // Optional strings, validated as such. String() would have coerced a protocol error into a
-      // plausible-looking branch or group and reported a target the deploy never named. An omitted
-      // field falls back to what was requested; a field of the wrong type is a broken contract.
-      const optionalString = (field: string, v: unknown): string | undefined => {
-        if (v === undefined || v === null) return undefined
-        if (typeof v !== 'string') throw new Error(`the platform returned a non-string ${field} for the deploy — upgrade with \`insta upgrade\``)
-        return v
+      if (state === 'failed') {
+        const error = res.body?.error
+        return { failed: typeof error === 'string' && error ? error : 'the deploy failed' }
       }
-      return {
-        image, url,
-        branch: optionalString('branch', res.body.branch) ?? branch,
-        group: optionalString('group', res.body.group) ?? opts.group ?? '',
-        machineId: optionalString('machineId', res.body.machineId),
+      if (state === 'live') {
+        const image = res.body?.imageRef
+        const url = res.body?.url
+        if (typeof image !== 'string' || !image || typeof url !== 'string' || !url) {
+          throw new Error('the deploy finished but the platform returned no image or URL for it — check `insta status`')
+        }
+        const optionalString = (field: string, v: unknown): string | undefined => {
+          if (v === undefined || v === null) return undefined
+          if (typeof v !== 'string') throw new Error(`the platform returned a non-string ${field} for the deploy — upgrade with \`insta upgrade\``)
+          return v
+        }
+        return {
+          image, url,
+          branch: optionalString('branch', res.body.branch) ?? branch,
+          group: optionalString('group', res.body.group) ?? opts.group ?? '',
+          machineId: optionalString('machineId', res.body.machineId),
+        }
       }
+      if (state !== 'queued' && state !== 'building' && state !== 'deploying') {
+        throw new Error(`the platform reported an unknown deploy state (${JSON.stringify(state)}) — upgrade with \`insta upgrade\``)
+      }
+      if (state !== last) { log(state === 'deploying' ? 'image built, deploying it' : `${state}…`); last = state }
+      await wait(POLL_MS)
     }
-    // Only the platform's own in-flight states keep the loop going. An absent or unknown state
-    // would otherwise spend the whole deadline looking like a slow build.
-    if (state !== 'queued' && state !== 'building' && state !== 'deploying') {
-      throw new Error(`the platform reported an unknown deploy state (${JSON.stringify(state)}) — upgrade with \`insta upgrade\``)
-    }
-    if (state !== last) { log(state === 'deploying' ? 'image built, deploying it' : `${state}…`); last = state }
-    await wait(POLL_MS)
+  } finally {
+    logController.abort()
+    await logTask
   }
 }
