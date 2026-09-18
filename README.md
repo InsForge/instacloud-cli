@@ -223,7 +223,7 @@ build never reaches a production installer.
 | `insta postgres` | `url` (print the DSN) · `connect` (psql) · `stats` · `limits` · `volume` · `always-on` · `logs` · `metrics` — every verb takes `[service]` |
 | `insta redis` · `mysql` · `mongodb` | `query` · `status` · `limits` · `volume` · `always-on` · `logs` · `metrics` |
 | `insta storage` | `list` · `get` · `delete` · `set-access` |
-| `insta build [dir]` · `deploy [dir]` | Verify a source dir would build; deploy a source directory (built remotely) or `--image <url>` |
+| `insta build [dir]` · `deploy [dir]` | Verify a source dir would build; deploy a source directory (built remotely) or `--image <url>`. `insta build logs <id>` reads source-build output: `--source archive` (default) uses the deploy operation ID, `--source github` uses a GitHub build ID; `--follow` watches output, `--json` returns one snapshot |
 | `insta run <cmd>` | Run a command with the branch bundle injected, nothing written to disk |
 | `insta template` | `list` · `info` · `deploy` |
 | `insta billing` | Current cycle overview; `subscribe <tier>` · `portal` · `usage` |

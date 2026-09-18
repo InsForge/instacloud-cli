@@ -35,6 +35,7 @@ function fakeApi(lane: unknown, extra: Record<string, unknown> = {}, objectState
         if (lane === '404-target') throw new ApiError(404, 'compute group not found: default')
         return { status: 200, body: lane }
       }
+      if (path.includes('/builds/archive/')) return { status: 200, body: { state: 'unsupported', buildState: 'succeeded', steps: [], entries: [] } }
       if (path.includes('/build-uploads/')) return { status: 200, body: { state: objectStates.length > 1 ? objectStates.shift() : objectStates[0] } }
       if (key === 'POST /projects/p1/build-uploads') return { status: 200, body: { uploadUrl: 'https://bucket.example/o?put=1', expiresAt: '2026-09-09T00:15:00Z' } }
       // The deploy is accepted as an operation; the poll answers a finished one, so the loop runs once.
@@ -143,12 +144,15 @@ describe('prepareSource — lane dispatch', () => {
   // (packing, building) plus a poll loop to the path that has to keep that promise.
   it('writes no progress to stdout in --json mode', async () => {
     const { api } = fakeApi({ lane: 'archive', limits: { maxArchiveBytes: 1024 * 1024, maxExtractedBytes: 1024 * 1024, maxFiles: 100 } })
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     try {
       await prepareSource(api, 'p1', srcDir(false), 'main', { json: true }, noRun)
+      expect(err.mock.calls.map((c) => String(c[0])).join('')).toContain('build logs: insta build-logs op_1')
       expect(out.mock.calls.map((c) => String(c[0])).join('')).toBe('')
     } finally {
       out.mockRestore()
+      err.mockRestore()
     }
   })
 

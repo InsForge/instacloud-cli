@@ -29,7 +29,7 @@ const RETIRED: string[][] = [
   ['services', 'scale'], ['services', 'upgrade'], ['services', 'set-access'], ['services', 'secrets'],
   ['compute', 'set-domain'], ['compute', 'check-domain'], ['compute', 'remove-domain'],
   ['db'], ['metrics'], ['logs'], ['usage'], ['manifest'], ['approvals'], ['agent-policy'], ['observe'], ['events'],
-  ['mcp'], ['regions'], ['autoupdate'],
+  ['mcp'], ['regions'], ['autoupdate'], ['build-logs'],
   ['billing', 'upgrade'],
 ]
 
@@ -121,6 +121,14 @@ describe('group shapes', () => {
     expect(domain).toEqual(expect.arrayContaining(['attach', 'check', 'detach', 'records']))
     expect(run(['compute', 'scale', '--help']).stdout).toContain('Usage: insta compute scale [options] <count> [service]')
     expect(run(['storage', 'set-access', '--help']).stdout).toContain('Usage: insta storage set-access [options] <access>')
+  }, 30_000)
+  it('reads source-build output under `build logs`, not a top-level `build-logs`', () => {
+    expect(commandNames(run(['build', '--help']).stdout)).toContain('logs')
+    const r = run(['build', 'logs', '--help'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('--source')
+    expect(r.stdout).toContain('--follow')
+    expect(r.stdout).toContain('--json')
   }, 30_000)
   it('agent, config and billing carry the moved verbs', () => {
     expect(commandNames(run(['agent', '--help']).stdout)).toEqual(['setup', 'manifest', 'policy', 'approvals', 'observe', 'events'])

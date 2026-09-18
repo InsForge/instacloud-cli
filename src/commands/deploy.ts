@@ -1,3 +1,4 @@
+import { archiveLogWatcher } from '../build-logs.js'
 import { resolve, join } from 'node:path'
 import { existsSync, readFileSync } from 'node:fs'
 import { ApiClient, ApiError, requireProject } from '../api.js'
@@ -98,7 +99,11 @@ export async function prepareSource(
     // flyctl, local-docker and legacy all end in an image, and all three need a Dockerfile.
     return { image: await buildFromSource(api, projectId, dir, branch, opts, run) }
   }
-  const log = note(opts)
+  const stream = opts.json ? process.stderr : process.stdout
+  let lineStart = true
+  const finishLine = () => { if (!lineStart) stream.write('\n'); lineStart = true }
+  const log = (message: string) => { finishLine(); note(opts)(message) }
+  const writeOutput = (text: string) => { stream.write(text); if (text) lineStart = text.endsWith('\n') }
   const absDir = resolve(process.cwd(), dir)
   const caveat = windowsModeCaveat()
   if (caveat) log(caveat)
@@ -111,7 +116,8 @@ export async function prepareSource(
   // time, because a platform request has to answer inside the ALB's 60s while a build runs minutes.
   // A repo-connected service refuses this with a 409 the same way it refuses an image deploy, and
   // the hint that names the FLAG rather than the API field lives here, beside the `/deploy` path.
-  const out = await deployArchive(api, projectId, ref, branch, opts, Date.now, undefined, log)
+  const out = await deployArchive(api, projectId, ref, branch, opts, Date.now, undefined, log, archiveLogWatcher(api, projectId, writeOutput))
+    .finally(finishLine)
     .catch((e) => { throw e instanceof ApiError && e.status === 409 ? new ApiError(e.status, repoConnectedHint(e.message), e.body) : e })
   if (!out) return null
   if ('failed' in out) die(out.failed)

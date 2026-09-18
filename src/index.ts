@@ -22,6 +22,7 @@ import * as regions from './commands/regions.js'
 import * as secretsCmd from './commands/secrets.js'
 import { deploy } from './commands/deploy.js'
 import { build } from './commands/build.js'
+import { buildLogs } from './commands/build-logs.js'
 import * as computeCmd from './commands/compute.js'
 import * as githubCmd from './commands/github.js'
 import * as pgCmd from './commands/postgres.js'
@@ -208,9 +209,11 @@ dom.command('check <hostname>').description("A hostname's attach state — owner
 dom.command('detach <hostname>').description('Detach a hostname from its compute service (gated: deploy)')
   .option('--branch <b>').option('--group <g>', "compute service (default: the branch's sole compute service)").option('--json')
   .action(guard((hostname, o) => domainCmd.domainDetach(hostname, o)))
-dom.command('list').description("Domains bought through InstaCloud in this org — a domain belongs to the org, each of its hostnames to a service").option('--json')
+dom.command('list').description("Domains bought through InstaCloud in this org — a domain belongs to the org, each of its hostnames to a service")
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((o) => domainCmd.domainList(o)))
-dom.command('status <name>').description("A bought domain's order and attach state").option('--json')
+dom.command('status <name>').description("A bought domain's order and attach state")
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((name, o) => domainCmd.domainStatus(name, o)))
 const rec = dom.command('records').description('DNS records of a bought domain — the zone InstaCloud holds at the registrar')
 rec.command('list <domain>').description('Every record in the zone, managed ones marked')
@@ -387,11 +390,17 @@ storage.command('set-access <access>').description("Set the bucket's access mode
   .action(guard((access, o) => storageCmd.storageSetAccess(access, o)))
 
 // ---- build (pre-push verification — local, offline, deploys nothing) ----
-program.command('build [dir]').description('Verify a source directory would build before deploying: detection plan + the Dockerfile (yours, or the one nixpacks would generate server-side) + static checks. Local and offline — no login needed, nothing pushed. Exit 1 when the verdict is failed')
+const buildCmd = program.command('build [dir]').description('Verify a source directory would build before deploying: detection plan + the Dockerfile (yours, or the one nixpacks would generate server-side) + static checks. Local and offline — no login needed, nothing pushed. Exit 1 when the verdict is failed')
   .option('--explain', 'include the Dockerfile content in the output')
   .option('--port <p>', 'port the app listens on (else the Dockerfile EXPOSE)')
   .option('--json')
   .action(guard((dir, o) => build(dir, o)))
+// commander 12 defaults allowExcessArguments to true, so a mistyped subcommand (e.g. `build lgs`)
+// would otherwise be taken as the [dir] positional and run this group's own action instead of failing.
+buildCmd.allowExcessArguments(false)
+buildCmd.command('logs <build-id>').description('Read source-build output for a deploy operation or GitHub build')
+  .option('--source <source>', 'archive or github', 'archive').option('--follow', 'poll new output until the build ends').option('--json')
+  .action(guard((id, opts) => buildLogs(id, opts)))
 
 // ---- deploy ----
 program.command('deploy [dir]').description('Deploy a source directory (built remotely; on insta-compute a Dockerfile is optional and nixpacks detects the runtime) or a prebuilt --image to a branch compute group')
