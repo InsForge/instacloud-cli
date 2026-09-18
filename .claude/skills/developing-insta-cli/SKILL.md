@@ -26,8 +26,8 @@ npx tsx src/index.ts --help   # run the CLI from source
 | `index.ts` | commander program — registers every command |
 | `api.ts` | typed platform-API client (auth headers, token refresh, error mapping) |
 | `config.ts` | global `~/.insta/config.json` (apiUrl + tokens + user) · project `./.insta/project.json` (projectId / orgId / current branch) · machine-local `./.insta/link-plane.json` (the control plane the link was made on; a foreign link fails closed in `requireProject`) |
-| `commands/` | one file per command group: `auth` `org` `project` `services` `branch` `secrets` `build` `deploy` `compute` `upgrade` `metrics` (+`logs`) `billing` `govern` (policy/approvals) `manifest` `observe` |
-| `observe/` | local `insta observe` hook — `scanner.ts` (AWS/GitHub/Stripe/LLM/DB cred detection), `hook.ts`, `install.ts`, `report.ts` (→ platform event ingest) |
+| `commands/` | one file per command group: `auth` `org` `project` `branch` `services` (the `service` group) `secrets` `domain` `compute` (+ BYO domain functions, type-generalized limits/volume/always-on) `postgres` `managed-db` (redis/mysql/mongodb status) `db-query` `storage` `build` `deploy` `run` `template` `billing` `metrics` (+`logs`, `usage`) `govern` (approvals/events) `agent-policy` `observe` `manifest` `setup` `mcp` `regions` `env` `feedback` `upgrade` |
+| `observe/` | local `insta agent observe` hook — `scanner.ts` (AWS/GitHub/Stripe/LLM/DB cred detection), `hook.ts`, `install.ts`, `report.ts` (→ platform event ingest) |
 | `flyctl-build.ts` | source-directory deploy build glue (Fly build context) |
 | `nixpacks.ts` | nixpacks glue for `insta build` — plan detection + Dockerfile generation (no Docker daemon) |
 | `ensure-skills.ts` | installs/refreshes the agent skills into the user's project |
@@ -36,6 +36,40 @@ npx tsx src/index.ts --help   # run the CLI from source
 - **Command/flag changes must be mirrored in `skills/insta/cli-reference.md`** (the superproject
   `skills/` submodule) — that reference doc is how agents learn the CLI surface, so a new or
   renamed command/flag is only half-done until it's updated there, in the same change set.
+
+## Command architecture (read before adding or moving a command)
+
+The tree in `src/index.ts` follows five rules (design: superproject
+`docs/superpowers/specs/2026-09-17-cli-command-reorg-design.md`). `test/help-surface.test.ts`
+pins the visible top level; changing it is a design decision, not a code change.
+
+1. **Level 1 is a resource (noun, singular).** The only verbs at level 1 are `login`, `logout`,
+   `status`, `build`, `deploy`, `run`, `feedback`, `upgrade`. Nothing else joins without a design note.
+2. **Level 2 is a verb on that resource.** A third level makes level 2 a noun again
+   (`domain records add`, `agent policy set`).
+3. **One capability, one path.** Before adding a command, grep `src/commands/` for the platform
+   endpoint it calls. If another command already calls it, add a flag or mode there instead.
+4. **Same shape for the same thing.** `compute|postgres|redis|mysql|mongodb <verb> [service]` —
+   trailing optional positional, sole/default service when omitted (`resolveSoleService`) — except
+   managed-database `query`, where the service is required and LEADS (`query <service> [args…]`),
+   because a trailing optional service cannot be told apart from the query argv (`insta redis query
+   GET key`) without a `--` separator like `compute exec` uses; the design's §8 records it as
+   deferred, and `test/help-surface.test.ts` pins it. `storage <verb> --service <name>`; org-scoped
+   verbs take `--org <id>`. A new verb copies its group's shape; a new group copies the closest
+   existing group.
+5. **Renames are hard cutovers.** No hidden aliases, with two permanent exceptions: `services|svc` → `service`, and hidden `setup agent` → `agent setup` (the console one-liner is printed in too many places to cut over).
+   A rename changes, in the same change set: `skills/insta/cli-reference.md`, `e2e/`, console copy
+   in `frontend/`, MCP copy, and platform error strings that spell the path — and it ships in the
+   order the design's §9 gives (docs/copy merge right after the CLI release, never before).
+
+Where things go: settings (limits/volume/always-on/scale) live under the service type;
+`logs`/`metrics` live under the service type via `addObservability()` in `index.ts`; anything
+about this machine's agents or the project's agent governance lives under `agent`; anything about
+this machine's CLI configuration lives under `config`. `--api-url` is injected on every command by
+`addApiUrlEverywhere()`, with two deliberate exceptions: the root and `login` declare the option
+themselves (`login` is the one command that may persist the URL it is given), and `compute exec` is
+skipped because its argv is split before commander ever sees it — there, pass the flag at the root
+(`insta --api-url X compute exec …`). Never declare `--api-url` on a new command by hand.
 
 ## Getting a PR merged (main is protected — this exact flow, no other works)
 
@@ -70,6 +104,7 @@ npx tsx src/index.ts --help   # run the CLI from source
 | `npx insta@latest` behind the GH release | `publish-npm` job failed (OIDC trust/config?) — see step 4 |
 | `'C:\Program' is not recognized` from a spawned tool (win CI only) | `resolveSpawnable`'s cmd.exe hop strips the quotes around a spaced executable path (`C:\Program Files\…`). It exists for npm-installed `.cmd` shims — a real `.exe` (git, …) must be spawned directly, which finds it through PATHEXT anyway |
 | CLI hits the wrong server in tests | Persisted `~/.insta/config.json` apiUrl; set `INSTA_API_URL` (≥0.0.7) or move the config aside |
+| `insta --api-url X compute exec …` works but `insta compute exec --api-url X …` says unknown option | exec's argv is split before commander (`splitExecArgs`); pass `--api-url` at the root for exec |
 
 ## agents.instacloud.com
 

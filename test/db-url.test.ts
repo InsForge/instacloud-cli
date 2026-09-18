@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
 
-import { connectWithPsql, psqlEnvFromUrl, resolveDbUrl } from '../src/commands/db.js'
+import { connectWithPsql, psqlEnvFromUrl, resolveDbUrl } from '../src/commands/postgres.js'
 
 function stubApi(services: Array<{ id: string; type: string; name: string }>, credentials: Record<string, string>, status = 200) {
   const paths: string[] = []
@@ -127,6 +127,6 @@ describe('connectWithPsql', () => {
       queueMicrotask(() => child.emit('error', Object.assign(new Error('spawn psql ENOENT'), { code: 'ENOENT' })))
       return child
     }) as any)
-    await expect(code).rejects.toThrow(/psql not found on PATH.*insta db url/)
+    await expect(code).rejects.toThrow(/psql not found on PATH.*insta postgres url/)
   })
 })

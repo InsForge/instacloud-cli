@@ -1,13 +1,20 @@
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { ApiClient, ApiError, linkedProject } from '../api.js'
+import { readGlobal, readPersistedGlobal } from '../config.js'
 import { agentMode } from '../agent.js'
-import { ENVS, ENV_NAMES, envForApiUrl, isEnvName } from '../env.js'
+import { ENVS, ENV_NAMES, envForApiUrl, isEnvName, normalizeUrl } from '../env.js'
 import { info, die, printJson, promptPassword, openUrl } from '../util.js'
 
 /** --api-url and --env both set the target host; --api-url wins (more specific), matching the
  *  INSTA_API_URL > INSTA_ENV precedence in config.ts. Returns the URL to point at, or undefined
- *  to leave whatever is already resolved alone. */
+ *  to leave whatever is already resolved alone.
+ *
+ *  Every login entry point feeds this into `api.setApiUrl(targetApiUrl(opts) ?? api.apiUrl)`: a
+ *  login is the one command that MAY move the machine's stored control-plane URL, and it must
+ *  store the deployment it actually authenticated against — flag, env var or stored URL alike.
+ *  Without the explicit set, ApiClient.persist() keeps the URL already on disk (see its comment),
+ *  which would file a session minted on one deployment under another one's URL. */
 function targetApiUrl(opts: { apiUrl?: string; env?: string }): string | undefined {
   if (opts.apiUrl) return opts.apiUrl
   if (!opts.env) return undefined
@@ -46,8 +53,7 @@ export async function login(
     return device(opts, openUrl)
   }
   const api = await ApiClient.load()
-  const target = targetApiUrl(opts)
-  if (target) api.setApiUrl(target)
+  api.setApiUrl(targetApiUrl(opts) ?? api.apiUrl)
   const password = opts.password ?? process.env.INSTA_PASSWORD ?? (await promptPassword())
   const res = await api.request('POST', '/auth/login', { email: opts.email, password }, { auth: false })
   api.setSession(res, res.user)
@@ -60,8 +66,7 @@ export async function login(
 export async function loginOauth(provider: string, opts: { apiUrl?: string; env?: string }): Promise<void> {
   if (provider !== 'github' && provider !== 'google') die('provider must be github or google')
   const api = await ApiClient.load()
-  const target = targetApiUrl(opts)
-  if (target) api.setApiUrl(target)
+  api.setApiUrl(targetApiUrl(opts) ?? api.apiUrl)
   const token = await browserOauth(api.apiUrl, provider)
   api.setSession({ accessToken: token, refreshToken: token })
   const me = await api.request<{ user: { id: string; email: string | null; name: string | null } }>('GET', '/me')
@@ -77,8 +82,7 @@ export async function loginOauth(provider: string, opts: { apiUrl?: string; env?
 // (which owns the signin round-trip), and poll the platform until they approve.
 export async function loginDevice(opts: { apiUrl?: string; env?: string }, open?: (url: string) => boolean): Promise<void> {
   const api = await ApiClient.load()
-  const target = targetApiUrl(opts)
-  if (target) api.setApiUrl(target)
+  api.setApiUrl(targetApiUrl(opts) ?? api.apiUrl)
   const token = await deviceGrant((path, body) => api.request('POST', path, body, { auth: false }), sleepSeconds, open)
   api.setSession({ accessToken: token, refreshToken: token })
   const me = await api.request<{ user: { id: string; email: string | null; name: string | null } }>('GET', '/me')
@@ -91,8 +95,7 @@ export async function loginDevice(opts: { apiUrl?: string; env?: string }, open?
 // the console, the platform mints an insta_ key, and it is stored exactly as --api-key stores one.
 export async function loginClaim(email: string, opts: { apiUrl?: string; env?: string }, open?: (url: string) => boolean, grant: typeof claimGrant = claimGrant): Promise<void> {
   const api = await ApiClient.load()
-  const target = targetApiUrl(opts)
-  if (target) api.setApiUrl(target)
+  api.setApiUrl(targetApiUrl(opts) ?? api.apiUrl)
   const client = agentMode()?.client ?? 'unknown'
   const key = await grant(email, client, (path, body, signal) => api.request('POST', path, body, { auth: false, signal }), sleepSeconds, open)
   const user = await applyApiKeyLogin(api, key)
@@ -103,8 +106,7 @@ export async function loginClaim(email: string, opts: { apiUrl?: string; env?: s
 // Non-interactive login with a durable insta_ key (minted via POST /tokens): store it and confirm against /me. No browser, no polling.
 export async function loginApiKey(key: string, opts: { apiUrl?: string; env?: string }): Promise<void> {
   const api = await ApiClient.load()
-  const target = targetApiUrl(opts)
-  if (target) api.setApiUrl(target)
+  api.setApiUrl(targetApiUrl(opts) ?? api.apiUrl)
   const user = await applyApiKeyLogin(api, key)
   await api.persist()
   info(`logged in as ${user.email ?? user.id} @ ${api.apiUrl}`)
@@ -321,8 +323,25 @@ function browserOauth(apiUrl: string, provider: string): Promise<string> {
   })
 }
 
+/** Log out: revoke the session on the server, then clear the local tokens.
+ *
+ *  Built from the PERSISTED config, not from `ApiClient.load()`'s override-resolved view. There is
+ *  exactly one stored session, so a runtime `--api-url` (or INSTA_API_URL / INSTA_ENV) has no
+ *  subject here — and pointing at a foreign deployment made this actively unsafe: readGlobal()
+ *  scrubs a foreign deployment's tokens, so the revoke below was skipped for want of a refresh
+ *  token while the local tokens were deleted anyway, leaving the session valid on the server with
+ *  nothing left on this machine to revoke it with. The revoke now always goes to the deployment
+ *  the session belongs to, with the real refresh token. `persist()` keeps the stored URL (see its
+ *  comment): logout never sets one explicitly. */
 export async function logout(): Promise<void> {
-  const api = await ApiClient.load()
+  const stored = await readPersistedGlobal()
+  // Say so rather than ignoring it silently: exiting 0 with a bare "logged out" while the flag
+  // named a different deployment reads as if that deployment was the one logged out of.
+  const resolved = (await readGlobal()).apiUrl
+  if (normalizeUrl(resolved) !== normalizeUrl(stored.apiUrl)) {
+    info(`note: the control-plane override (${resolved}) does not apply to logout — there is one stored session; logging out of ${stored.apiUrl}`)
+  }
+  const api = new ApiClient(stored)
   if (api.config.refreshToken) {
     try { await api.request('POST', '/auth/logout', { refreshToken: api.config.refreshToken }, { auth: false }) } catch { /* ignore */ }
   }

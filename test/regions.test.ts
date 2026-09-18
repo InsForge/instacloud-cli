@@ -9,7 +9,7 @@ const regions = [
 
 afterEach(() => vi.restoreAllMocks())
 
-describe('insta regions', () => {
+describe('insta config regions', () => {
   it.each([false, true])('prints only the platform catalog (json=%s)', async (json) => {
     const request = vi.fn().mockResolvedValue({ regions })
     const chunks: string[] = []

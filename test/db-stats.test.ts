@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { dbStatsLines, fmtBytes } from '../src/commands/db.js'
+import { dbStatsLines, fmtBytes } from '../src/commands/postgres.js'
 
 describe('dbStatsLines', () => {
   it('renders the measured block: x / y with active count, cache hit percent, size', () => {

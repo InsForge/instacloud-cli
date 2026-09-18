@@ -41,7 +41,7 @@ afterEach(() => { stdout.length = 0 })
 afterAll(() => { outSpy.mockRestore() })
 const out = () => stdout.join('')
 
-describe('set-domain flow', () => {
+describe('setDomain flow', () => {
   it('looks the services up first, then sends the RESOLVED group (never the platform default)', async () => {
     const { deps: d, calls } = deps()
     await setDomain('app.customer.com', { group: 'web' }, d)
@@ -73,7 +73,7 @@ describe('set-domain flow', () => {
     // The owner (`web`) IS a service in this project, so the message can name the exact command.
     const { deps: d } = deps({ post: new ApiError(409, 'app.customer.com is already attached to web in us-west; remove it there first') })
     await expect(setDomain('app.customer.com', { group: 'api', branch: 'preview' }, d)).rejects.toThrow(
-      /domains are not moved; release it first: insta compute remove-domain app\.customer\.com --group web --branch preview/,
+      /domains are not moved; release it first: insta domain detach app\.customer\.com --group web --branch preview/,
     )
   })
 
@@ -90,7 +90,7 @@ describe('set-domain flow', () => {
   })
 })
 
-describe('check-domain flow', () => {
+describe('checkDomain flow', () => {
   it('sends hostname + resolved group + branch, and renders the stages', async () => {
     const { deps: d, calls } = deps({ only: true })
     await checkDomain('app.customer.com', {}, d)
@@ -105,7 +105,7 @@ describe('check-domain flow', () => {
   })
 })
 
-describe('remove-domain flow', () => {
+describe('removeDomain flow', () => {
   it('sends the resolved group and names the service and region it was removed from', async () => {
     const { deps: d, calls } = deps({ only: true })
     await removeDomain('app.customer.com', {}, d)

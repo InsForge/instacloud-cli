@@ -1,4 +1,4 @@
-// `insta services` — manage a project's opt-in services (postgres | storage | compute | redis | mysql | mongodb).
+// `insta service` — manage a project's opt-in services (postgres | storage | compute | redis | mysql | mongodb).
 import { ApiClient, requireProject } from '../api.js'
 import { info, printJson, handleApproval, renderNextActions } from '../util.js'
 
@@ -19,6 +19,29 @@ export function assertType(type: string, allowed: readonly string[] = SERVICE_TY
 
 export function assertServiceName(name: string): void {
   if (!SERVICE_NAME_RE.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+}
+
+// Every service type that owns an always-on / volume verb of its OWN. The creation-time flags are
+// compute-only, so the refusal has to name the group the user actually typed: pointing a redis or
+// mongodb user at `insta postgres …` sends them at a different service type (and, on a project
+// with no postgres, at nothing at all).
+const DB_TYPES = ['postgres', 'redis', 'mysql', 'mongodb'] as const
+const hasOwnGroup = (type: string): boolean => (DB_TYPES as readonly string[]).includes(type)
+
+export function alwaysOnTypeError(type: string): string {
+  const base = '--always-on / --no-always-on is only valid for compute services'
+  return hasOwnGroup(type) ? `${base} (for ${type}, use \`insta ${type} always-on on|off\` after creation)` : base
+}
+
+export function volumeTypeError(type: string): string {
+  const base = '--volume is only valid for compute services'
+  // insta-db-backed postgres is provisioned WITH its disk (dbVolume goes through
+  // PATCH /database/settings), so there is nothing to attach — only to grow. A managed Fly
+  // database can be volumeless, and `--size` attaches there (ServicesService.setVolumeSize's
+  // attach branch runs for isFlyRuntimeType), which is what `volumeLines` already prints.
+  if (type === 'postgres') return `${base} (postgres has one by default — grow it with \`insta postgres volume --size <gi>\`)`
+  if (hasOwnGroup(type)) return `${base} (attach or grow one after creation with \`insta ${type} volume --size <gi>\`)`
+  return base
 }
 
 const MAX_COMPUTE_REPLICAS = 10
@@ -69,7 +92,7 @@ export function resolveSoleService<T extends { id: string; type: string; name: s
     if (!svc) throw new Error(`${type} service not found: ${name}`)
     return svc
   }
-  if (of.length === 0) throw new Error(`no ${type} service in this project (add one with \`insta services add ${type} <name>\`)`)
+  if (of.length === 0) throw new Error(`no ${type} service in this project (add one with \`insta service add ${type} <name>\`)`)
   if (of.length > 1) throw new Error(`multiple ${type} services — specify one: ${of.map((s) => s.name).join(', ')}`)
   return of[0]!
 }
@@ -113,10 +136,10 @@ export async function servicesAdd(type: string, name: string, opts: ServicesAddO
     parsePort(opts.port) // junk fails here, before any config/network access
   }
   // Presence, not truthiness: `--no-always-on` is an explicit false and is just as compute-only.
-  if (opts.alwaysOn !== undefined && type !== 'compute') throw new Error('--always-on / --no-always-on is only valid for compute services (for postgres, use `insta db always-on on|off` after creation)')
+  if (opts.alwaysOn !== undefined && type !== 'compute') throw new Error(alwaysOnTypeError(type))
   if (opts.mountPath !== undefined && (type !== 'compute' || opts.volume === undefined)) throw new Error('--mount-path requires --volume on a compute service')
   if (opts.volume !== undefined) {
-    if (type !== 'compute') throw new Error('--volume is only valid for compute services (postgres has one by default — grow it with `insta db volume --size`)')
+    if (type !== 'compute') throw new Error(volumeTypeError(type))
     parseVolumeGib(opts.volume) // junk fails here, before any config/network access
   }
   const api = await ApiClient.load()
@@ -131,9 +154,10 @@ export async function servicesAdd(type: string, name: string, opts: ServicesAddO
   // general `insta secrets` bundle — without this line nothing in the product says how to reach it.
   if (type === 'postgres') {
     // The hint must be runnable as printed: carry --branch when the service was created on a
-    // branch other than the linked one, and --group so it survives multiple postgres services.
-    const flags = `${opts.branch ? ` --branch ${opts.branch}` : ''} --group ${name}`
-    info(`  connect: \`insta db url${flags}\` prints the connection string, \`insta db connect${flags}\` opens psql (--group optional with a single postgres service)`)
+    // branch other than the linked one, and the service name so it survives multiple postgres
+    // services (a trailing positional on `postgres url`/`postgres connect`, not a flag).
+    const branchFlag = opts.branch ? ` --branch ${opts.branch}` : ''
+    info(`  connect: \`insta postgres url ${name}${branchFlag}\` prints the connection string, \`insta postgres connect ${name}${branchFlag}\` opens psql ([service] optional with a single postgres service)`)
   }
   renderNextActions(res.body.nextActions)
 }
@@ -175,7 +199,7 @@ export async function servicesList(opts: { json?: boolean; branch?: string }): P
   const branch = opts.branch ?? p.branch
   const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
   if (opts.json) return printJson(services)
-  if (!services.length) return info(`(no services on ${branch ?? 'default'} — add one with \`insta services add <postgres|storage|compute|redis|mysql|mongodb> <name>\`)`)
+  if (!services.length) return info(`(no services on ${branch ?? 'default'} — add one with \`insta service add <postgres|storage|compute|redis|mysql|mongodb> <name>\`)`)
   for (const s of services) info(serviceListLine(s))
 }
 
@@ -211,60 +235,4 @@ export function parseAccess(raw: string): boolean {
   if (raw === 'public') return true
   if (raw === 'private') return false
   throw new Error(`access must be public|private, got: ${raw}`)
-}
-
-// insta services set-access storage <name> <public|private>
-export async function servicesSetAccess(type: string, name: string, access: string, _opts: { json?: boolean }): Promise<void> {
-  assertType(type, ['storage'])
-  const isPublic = parseAccess(access)
-  const api = await ApiClient.load()
-  const p = await requireProject()
-  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(p.branch)}`)
-  const id = resolveServiceId(services, type, name)
-  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${id}/access`, { public: isPublic })
-  if (handleApproval(res, _opts.json)) return
-  if (_opts.json) return printJson(res.body.service)
-  info(`set storage ${name} access to ${access}`)
-}
-
-// insta services scale compute <name> <number> [region]
-export async function servicesScale(type: string, name: string, number: string, region: string | undefined, _opts: { json?: boolean; branch?: string }): Promise<void> {
-  assertType(type, ['compute'])
-  const machineCount = parseCount(number)
-  const api = await ApiClient.load()
-  const p = await requireProject()
-  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(_opts.branch ?? p.branch)}`)
-  const id = resolveServiceId(services, type, name)
-  const res = await api.rawRequest('POST', `/projects/${p.projectId}/services/${id}/scale`, { machineCount, region })
-  if (handleApproval(res, _opts.json)) return
-  if (_opts.json) return printJson(res.body.service)
-  info(`scaled compute ${name} to ${machineCount} replica(s)${region ? ` in ${region}` : ''}`)
-}
-
-// insta services upgrade <compute|postgres> <name> <new-spec>
-export async function servicesUpgrade(type: string, name: string, spec: string, _opts: { json?: boolean; branch?: string }): Promise<void> {
-  assertType(type, ['compute', 'postgres'])
-  const api = await ApiClient.load()
-  const p = await requireProject()
-  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(_opts.branch ?? p.branch)}`)
-  const id = resolveServiceId(services, type, name)
-  const res = await api.rawRequest('POST', `/projects/${p.projectId}/services/${id}/upgrade`, { spec })
-  if (handleApproval(res, _opts.json)) return
-  if (_opts.json) return printJson(res.body.service)
-  info(`upgraded ${type} ${name} to ${spec}`)
-}
-
-// insta services secrets <type> <name> — the secret names bound to a service.
-export async function servicesSecrets(type: string, name: string, opts: { branch?: string; json?: boolean } = {}): Promise<void> {
-  assertType(type)
-  const api = await ApiClient.load()
-  const p = await requireProject()
-  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(opts.branch ?? p.branch)}`)
-  const id = resolveServiceId(services, type, name)
-  const res = await api.rawRequest('GET', `/projects/${p.projectId}/services/${id}/secrets`)
-  if (handleApproval(res, opts.json)) return
-  const { secrets } = res.body
-  if (opts.json) return printJson(secrets)
-  if (!secrets.length) return info(`(no secrets bound to ${type}/${name})`)
-  for (const n of secrets) info(n)
 }

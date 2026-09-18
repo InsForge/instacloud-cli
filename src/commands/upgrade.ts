@@ -2,7 +2,7 @@
 // release installer; npm via `npm i -g`). A background version check (detached, cached in
 // ~/.insta/update-check.json) powers an update nudge — and, since the CLI is young and moves
 // fast, AUTO-UPDATE IS ON BY DEFAULT: when a newer version is known, a quiet upgrade runs in the
-// background. `insta autoupdate off` (or INSTA_NO_AUTOUPDATE=1) disables that, leaving just the
+// background. `insta config autoupdate off` (or INSTA_NO_AUTOUPDATE=1) disables that, leaving just the
 // stderr nudge.
 //
 // ONE SOURCE OF TRUTH. "What is the latest insta?" is answered in exactly one place —
@@ -20,7 +20,7 @@ import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { readGlobal, writeGlobal } from '../config.js'
+import { readGlobal, readPersistedGlobal, writeGlobal } from '../config.js'
 import { resolveSpawnable } from '../spawn.js'
 import { info } from '../util.js'
 
@@ -366,16 +366,22 @@ export async function backgroundCheck(current: string, deps: CheckDeps = {}): Pr
   return 'auto'
 }
 
-// `insta autoupdate [on|off]` — toggle / show the auto-update preference (default: on).
+// `insta config autoupdate [on|off]` — toggle / show the auto-update preference (default: on).
 export async function autoupdate(mode?: string): Promise<void> {
-  const cfg = await readGlobal()
   if (mode === 'on' || mode === 'off') {
+    // Read-modify-write must use the PERSISTED config (like `env use` does), not readGlobal()'s
+    // runtime view: readGlobal() folds in a --api-url/INSTA_API_URL override and, when that override
+    // points at a different deployment, scrubs the stored session. Writing that view back to disk
+    // here would silently re-point ~/.insta/config.json at the override and log the user out just
+    // from toggling autoupdate.
+    const cfg = await readPersistedGlobal()
     await writeGlobal({ ...cfg, autoUpdate: mode === 'on' })
     info(`autoupdate ${mode}`)
     return
   }
+  const cfg = await readGlobal()
   const enabled = cfg.autoUpdate !== false && !process.env.INSTA_NO_AUTOUPDATE
-  info(`autoupdate: ${enabled ? 'on' : 'off'} (default on while the CLI is pre-1.0 — \`insta autoupdate off\` to disable)`)
+  info(`autoupdate: ${enabled ? 'on' : 'off'} (default on while the CLI is pre-1.0 — \`insta config autoupdate off\` to disable)`)
 }
 
 // Called once at CLI start-up. Never blocks: reads the cache synchronously, prints at most one
@@ -391,12 +397,17 @@ export async function autoupdate(mode?: string): Promise<void> {
  *  into the ssh session's stderr and an auto-upgrade spawns a detached process
  *  mid-connection. Same prefix rule trackCommand already applies to telemetry.
  */
-export function skipsUpdateCheck(cmd: string | undefined): boolean {
+export function skipsUpdateCheck(cmd: string | undefined, sub?: string | undefined): boolean {
+  // The autoupdate PREFERENCE moved to `insta config autoupdate` in the command re-organization,
+  // so the level-1 name alone stopped matching it: `insta config autoupdate off` would run the
+  // very check it is being typed to switch off (and could auto-upgrade before the handler lands).
+  // The retired top-level spelling stays exempt too — it costs nothing and cannot regress.
+  if (cmd === 'config' && sub === 'autoupdate') return true
   return cmd === 'upgrade' || cmd === 'autoupdate' || !!cmd?.startsWith('__')
 }
 
 export function maybeUpdate(current: string, argv: string[]): void {
-  if (skipsUpdateCheck(argv[2])) return
+  if (skipsUpdateCheck(argv[2], argv[3])) return
   const channel = detectChannel()
   const cache = readCache()
   const now = Date.now()
@@ -411,7 +422,7 @@ export function maybeUpdate(current: string, argv: string[]): void {
   } else if (action === 'auto') {
     writeCache({ ...cache!, lastAutoAt: now })
     respawnDetached(['upgrade'])
-    console.error(`↑ auto-updating insta ${current} → ${cache!.latest} in the background (\`insta autoupdate off\` to disable)`)
+    console.error(`↑ auto-updating insta ${current} → ${cache!.latest} in the background (\`insta config autoupdate off\` to disable)`)
   }
 }
 

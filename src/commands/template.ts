@@ -21,7 +21,7 @@ export type TemplateIndexEntry = {
 }
 
 // One aligned row per template; numeric columns right-aligned. Plain padded columns, as the rest
-// of the CLI (storage list, compute check-domain) — no table library.
+// of the CLI (storage list, domain check) — no table library.
 export function templateListLines(templates: TemplateIndexEntry[]): string[] {
   if (!templates.length) return ['(no templates published yet)']
   const head = ['CODE', 'VERSION', 'CATEGORY', 'PROJECTS', 'SUCCESS', 'NAME']
@@ -252,7 +252,7 @@ export function partialMessage(dep: any): string {
     ...serviceStateLines(dep),
     ...(dep?.error ? [`  ${dep.error}`] : []),
     ...(dep?.logsTail ? ['--- log tail ---', String(dep.logsTail).trimEnd()] : []),
-    'created services are kept — inspect with `insta logs compute <name>`, re-run the deploy to retry, or remove them with `insta services remove <type> <name>`',
+    'created services are kept — inspect with `insta compute logs <name>`, re-run the deploy to retry, or remove them with `insta service remove <type> <name>`',
   ].join('\n')
 }
 
@@ -300,7 +300,7 @@ export async function watchDeployment(
     }
     await wait(2)
   }
-  throw new Error(`timed out after ${Math.round(timeoutMs / 60_000)}m waiting for template deployment ${id} — check \`insta events\``)
+  throw new Error(`timed out after ${Math.round(timeoutMs / 60_000)}m waiting for template deployment ${id} — check \`insta agent events\``)
 }
 
 // ---- commands ----
@@ -428,6 +428,6 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
   info(`template ${codeLabel} deployed to branch ${branchName}`)
   for (const u of deploymentUrls(dep)) info(`  ${u}`)
   // Provider credentials are not in the `insta secrets` bundle — point at the paths that exist.
-  info('next: `insta db url` prints the postgres DSN; bind service credentials into compute with `insta secrets bind`; `insta secrets` refreshes user-defined secrets in .env')
+  info('next: `insta postgres url` prints the postgres DSN; bind service credentials into compute with `insta secrets bind`; `insta secrets` refreshes user-defined secrets in .env')
   renderNextActions(dep.nextActions)
 }

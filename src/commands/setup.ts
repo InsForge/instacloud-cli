@@ -1,5 +1,6 @@
-// `insta setup agent` — make this machine's coding agents InstaCloud-native in one step
-// (the Railway `railway setup agent` pattern). Installs the `insta` skill USER-GLOBALLY for
+// `insta agent setup` — make this machine's coding agents InstaCloud-native in one step.
+// (`setup agent` remains a permanent hidden alias; the canonical order is `agent setup`, per the
+// noun-first tree — see the Command architecture rules.) Installs the `insta` skill USER-GLOBALLY for
 // every agent the skills tool knows: the skill is pure product knowledge with brand-gated
 // triggers — no project state in it (the project binding is carried by ./.insta/project.json
 // at command time), so one machine-level copy is strictly better than per-project copies.
@@ -92,7 +93,7 @@ export function summarizeInstall(output: string): string {
 
 export type Runner = (cmd: string, args: string[]) => Promise<{ ok: boolean; output?: string }>
 
-// ---- CLI self-install (makes `npx -y insta setup agent` a complete one-liner) ----
+// ---- CLI self-install (makes `npx -y insta agent setup` a complete one-liner) ----
 
 // Under npx the CLI runs from the npm cache and vanishes when the process exits — but the skill
 // installed below tells every agent to run `insta …`, which then wouldn't exist. So when this
@@ -242,7 +243,7 @@ const defaultMinter: TokenMinter = async () => mintMcpToken(await ApiClient.load
 // token-creation permission; agent governance still applies. Existing registrations stay intact.
 /** Outcome of the Claude Code MCP registration. `announce` controls the SUCCESS lines only —
  *  `setup agent` passes false and folds Claude Code into one combined MCP line with the
- *  config-file agents; `insta mcp install` keeps the default self-narration. Failure surfaces
+ *  config-file agents; `insta config install-mcp` keeps the default self-narration. Failure surfaces
  *  (manual-add fallback, missing token) always print — silence there would read as success. */
 export type McpStatus = 'new' | 'existing' | 'no-claude' | 'no-token' | 'failed'
 export async function registerMcp(run: Runner = defaultRunner, mint: TokenMinter = defaultMinter, useToken = false, announce = true): Promise<McpStatus> {
@@ -256,7 +257,7 @@ export async function registerMcp(run: Runner = defaultRunner, mint: TokenMinter
   if (useToken) {
     const token = await mint()
     if (!token) {
-      info('  MCP not registered (--mcp-token needs a login) — run `insta login`, then `insta setup agent --mcp-token` again')
+      info('  MCP not registered (--mcp-token needs a login) — run `insta login`, then `insta agent setup --mcp-token` again')
       return 'no-token'
     }
     args.push('--header', `Authorization: Bearer ${token}`)
@@ -286,7 +287,7 @@ export function requireMcpRegistration(status: McpStatus): boolean {
 /** The environment `setup agent` should target, and whether the machine must be switched to it
  *  first. Pure — decides only; the caller performs the switch.
  *
- *  The contract: the public one-liner `npx -y insta setup agent` means PRODUCTION,
+ *  The contract: the public one-liner `npx -y insta agent setup` means PRODUCTION,
  *  full stop — a leftover `insta env use staging` from last month must not silently give a new
  *  onboarding run staging skills. Staging is an explicit ask: `--env staging` (or $INSTA_ENV).
  *  Two deliberate exceptions leave the machine alone:
@@ -502,9 +503,9 @@ export async function setupAgent(
     }
   }
   if (loggedIn) {
-    if (await enroll()) info('✓ Project agent session ready (expires in 24 hours; refresh with insta setup agent)')
+    if (await enroll()) info('✓ Project agent session ready (expires in 24 hours; refresh with insta agent setup)')
   } else {
-    info('  project agent session not created — run `insta login`, then `insta setup agent`')
+    info('  project agent session not created — run `insta login`, then `insta agent setup`')
   }
   // THE summary line. The restart note exists because config-file agents only read their MCP
   // config at startup; the skill files need no restart.

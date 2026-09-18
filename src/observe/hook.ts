@@ -36,7 +36,7 @@ async function readStdin(): Promise<string> {
 
 // Where findings go. The materialized hook lives at <project root>/.insta/observe/hook.js, so its
 // own entry path names the linked project root — the one directory whose .insta/audit.jsonl is
-// gitignored and that `insta observe report` reads. Anything else (the harness's project-dir env,
+// gitignored and that `insta agent observe report` reads. Anything else (the harness's project-dir env,
 // the event cwd) is only a guess: Codex passes the SESSION cwd, which in a monorepo can be a
 // subdirectory of the project, and writing there would leave an unignored audit log behind.
 export function projectRootFor(entry: string | undefined, env: NodeJS.ProcessEnv, eventCwd: string | undefined): string {

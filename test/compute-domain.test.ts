@@ -1,4 +1,4 @@
-// renderRemoveDomain — the `compute remove-domain --json` contract: stdout carries the platform
+// renderRemoveDomain — the `domain detach --json` contract: stdout carries the platform
 // response as JSON, never prose. Split out of removeDomain (same pattern as applyExecResult) so
 // this is testable without a network mock; the flag was once wired in index.ts without the handler
 // honoring it, which is exactly the regression this locks out.

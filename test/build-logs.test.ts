@@ -280,7 +280,7 @@ it('times out a stalled page after 20 seconds and retries from its saved cursor'
     expect(write.mock.calls.some(([s]) => s.includes('Could not read'))).toBe(false)
     await vi.advanceTimersByTimeAsync(1)
     await watching
-    expect(write).toHaveBeenCalledWith('Could not read build logs (timed out). Retry with: insta build-logs b\n')
+    expect(write).toHaveBeenCalledWith('Could not read build logs (timed out). Retry with: insta build logs b\n')
     stalled = false
     await watch('b', false)
     expect(cursors).toEqual(['', 'tail', 'tail'])
@@ -308,7 +308,7 @@ it('reports a final read timeout while respecting the remaining deployment deadl
     await watching
     expect(api.rawRequest).toHaveBeenCalledTimes(1)
     expect(timeout).toHaveBeenCalledWith(500)
-    expect(write).toHaveBeenCalledWith('Could not read build logs (timed out). Retry with: insta build-logs b\n')
+    expect(write).toHaveBeenCalledWith('Could not read build logs (timed out). Retry with: insta build logs b\n')
   } finally { timeout.mockRestore(); vi.useRealTimers() }
 })
 
@@ -316,7 +316,7 @@ it('keeps real HTTP failures visible in the archive watcher', async () => {
   const api = apiWith(() => { throw new ApiError(403, 'forbidden') })
   const write = vi.fn()
   await archiveLogWatcher(api, 'p', write)('b', false)
-  expect(write).toHaveBeenCalledWith('Could not read build logs (HTTP 403). Retry with: insta build-logs b\n')
+  expect(write).toHaveBeenCalledWith('Could not read build logs (HTTP 403). Retry with: insta build logs b\n')
 })
 
 

@@ -60,18 +60,18 @@ describe('billingLines', () => {
   // Stripe Checkout, so dropping the flag there subscribes the wrong org.
   it.each([
     ['paid', 'pro', 'past_due', 'insta billing portal --org org_123'],
-    ['ended', 'pro', 'canceled', 'insta billing upgrade pro --org org_123'],
-    ['free', 'free', null, 'insta billing upgrade pro --org org_123'],
+    ['ended', 'pro', 'canceled', 'insta billing subscribe pro --org org_123'],
+    ['free', 'free', null, 'insta billing subscribe pro --org org_123'],
   ])('carries --org into the %s hint', (_label, tier, subscriptionStatus, expected) => {
     const out = billingLines({ ...base, tier, subscriptionStatus, billingStatus: 'suspended' }, 'org_123').join('\n')
     expect(out).toContain(expected)
   })
 
-  // The resubscribe hint has to name the org's OWN tier. `insta billing upgrade pro` on a Team org
+  // The resubscribe hint has to name the org's OWN tier. `insta billing subscribe pro` on a Team org
   // resubscribes it onto the wrong plan, and enterprise has no self-serve command at all.
   it.each([
-    ['pro', 'insta billing upgrade pro'],
-    ['team', 'insta billing upgrade team'],
+    ['pro', 'insta billing subscribe pro'],
+    ['team', 'insta billing subscribe team'],
   ])('suspended after a cancellation on %s: names that tier', (tier, expected) => {
     const out = billingLines({ ...base, tier, billingStatus: 'suspended', subscriptionStatus: 'canceled' }).join('\n')
     expect(out).toContain(expected)
@@ -80,7 +80,7 @@ describe('billingLines', () => {
   it('suspended after a cancellation on enterprise: no self-serve command exists, so it says so', () => {
     const out = billingLines({ ...base, tier: 'enterprise', billingStatus: 'suspended', subscriptionStatus: 'canceled' }).join('\n')
     expect(out).toContain('contact support')
-    expect(out).not.toContain('insta billing upgrade')
+    expect(out).not.toContain('insta billing subscribe')
   })
 
   // A cancelled subscription suspends the org and keeps its tier (platform#300), so "your

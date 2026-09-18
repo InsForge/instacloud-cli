@@ -63,17 +63,17 @@ export function billingLines(s: BillingOverview, org?: string): string[] {
     const ended = s.subscriptionStatus === 'canceled' || s.subscriptionStatus === 'incomplete_expired'
     lines.push(
       s.tier === 'free'
-        ? `⚠  org suspended — billing limit reached; resumes next cycle (or \`insta billing upgrade pro${flag}\`)`
+        ? `⚠  org suspended — billing limit reached; resumes next cycle (or \`insta billing subscribe pro${flag}\`)`
         : lapsed
           ? `⚠  org suspended — subscription payment did not go through; settle it in \`insta billing portal${flag}\``
           : ended
             ? s.tier === 'enterprise'
-              // Per-deal, and `billing upgrade` cannot create one: naming a self-serve tier here
+              // Per-deal, and `billing subscribe` cannot create one: naming a self-serve tier here
               // would move them off the plan they negotiated.
               ? '⚠  org suspended — the subscription ended; contact support to restore this plan'
-              // Their OWN tier, not a hardcoded one: suggesting `upgrade pro` to a Team org
+              // Their OWN tier, not a hardcoded one: suggesting `subscribe pro` to a Team org
               // resubscribes it onto the wrong plan.
-              : `⚠  org suspended — the subscription ended; resubscribe with \`insta billing upgrade ${s.tier}${flag}\``
+              : `⚠  org suspended — the subscription ended; resubscribe with \`insta billing subscribe ${s.tier}${flag}\``
             // Deliberately claims nothing about the subscription: `incomplete` reaches here too,
             // and that one is neither current nor failed. All this branch knows is that the
             // suspension has no billing cause it can name.
@@ -100,7 +100,7 @@ export async function billing(opts: OrgOpt & { json?: boolean }): Promise<void> 
   for (const l of billingLines(s, opts.org)) info(l)
 }
 
-// insta billing upgrade <tier> — start a Stripe Checkout to subscribe the org to a paid tier.
+// insta billing subscribe <tier> — start a Stripe Checkout to subscribe the org to a paid tier.
 export async function billingUpgrade(tier: string, opts: OrgOpt & { open?: boolean; json?: boolean }): Promise<void> {
   // pro|team, matching what POST /orgs/:orgId/billing/checkout accepts: `team` is a real
   // self-serve tier, and `enterprise` is per-deal and 400s at the server.

@@ -1,8 +1,8 @@
-// `insta compute set-domain / check-domain` — region-aware, and never guessing. A compute service
+// `insta domain attach / check` — region-aware, and never guessing. A compute service
 // lives in ONE region (fixed at creation) and a custom hostname routes in that region's router, so:
 // the target service is resolved from the project (sole compute service → bind; several → refuse
-// with the list, regions shown, --group required; workers unbindable), the guidance after set-domain
-// is the platform's records VERBATIM (never a template), and check-domain renders every stage plus
+// with the list, regions shown, --group required; workers unbindable), the guidance after attach
+// is the platform's records VERBATIM (never a template), and check renders every stage plus
 // where the hostname resolves. Pure-function tests, same pattern as compute-exec.test.ts.
 import { describe, it, expect } from 'vitest'
 import {
@@ -64,14 +64,14 @@ const bound: DomainView = {
   ssl: 'initializing',
 }
 
-describe('domainGuidanceLines (after set-domain: what to do next, from the platform records)', () => {
-  it('renders the adapter records verbatim, region named, then the check-domain step', () => {
+describe('domainGuidanceLines (after attach: what to do next, from the platform records)', () => {
+  it('renders the adapter records verbatim, region named, then the check step', () => {
     expect(domainGuidanceLines(bound)).toEqual([
       'app.customer.com -> api (us-east)',
       'add these DNS records at your DNS provider:',
       '  CNAME  app.customer.com               -> cname.instacloud-dns.com',
       '  TXT    _insta-verify.app.customer.com -> insta-verify=tok123',
-      'then: insta compute check-domain app.customer.com',
+      'then: insta domain check app.customer.com',
     ])
   })
 
@@ -86,10 +86,10 @@ describe('domainGuidanceLines (after set-domain: what to do next, from the platf
   // The printed follow-up must reach the same service on the same branch: without --group it dies
   // on the very ambiguity error this feature raises, and without --branch it checks the linked
   // branch instead (cubic P2).
-  it('the follow-up check-domain command carries the resolved group and the invoked branch', () => {
-    expect(domainGuidanceLines(bound, { group: 'api' }).at(-1)).toBe('then: insta compute check-domain app.customer.com --group api')
+  it('the follow-up check command carries the resolved group and the invoked branch', () => {
+    expect(domainGuidanceLines(bound, { group: 'api' }).at(-1)).toBe('then: insta domain check app.customer.com --group api')
     expect(domainGuidanceLines(bound, { group: 'api', branch: 'preview' }).at(-1))
-      .toBe('then: insta compute check-domain app.customer.com --group api --branch preview')
+      .toBe('then: insta domain check app.customer.com --group api --branch preview')
   })
 
   it('an older platform without service/region: withRow fills them from the resolved row', () => {
@@ -100,7 +100,7 @@ describe('domainGuidanceLines (after set-domain: what to do next, from the platf
   })
 })
 
-describe('domainStatusLines (check-domain: every stage + where it routes)', () => {
+describe('domainStatusLines (check: every stage + where it routes)', () => {
   const active: DomainView = {
     ...bound, configured: true, status: 'active', ssl: 'active',
     dns: bound.dns.map((d) => ({ ...d, status: 'ok' })),
@@ -207,7 +207,7 @@ describe('domainStatusLines (check-domain: every stage + where it routes)', () =
   it('ownership unchecked: rendered as unchecked AND counted as a blocker', () => {
     const noStatus = { ...bound, dns: bound.dns.map(({ status: _s, ...d }) => d) }
     const lines = domainStatusLines(noStatus)
-    expect(lines[1]).toBe('  ownership   unchecked   TXT _insta-verify.app.customer.com -> insta-verify=tok123 (the plane has not checked it yet — re-run check-domain)')
+    expect(lines[1]).toBe('  ownership   unchecked   TXT _insta-verify.app.customer.com -> insta-verify=tok123 (the plane has not checked it yet — re-run insta domain check)')
     expect(lines.at(-1)).toContain('ownership unchecked')
   })
 
@@ -246,7 +246,7 @@ describe('domainStatusLines (check-domain: every stage + where it routes)', () =
       dns: [{ type: 'A', name: 'customer.com', value: '66.66.66.66', note: 'apex → the Fly app' }],
     }
     const lines = domainStatusLines(apex)
-    expect(lines[2]).toBe('  a           unchecked   A customer.com -> 66.66.66.66 (not checked yet — re-run check-domain)')
+    expect(lines[2]).toBe('  a           unchecked   A customer.com -> 66.66.66.66 (not checked yet — re-run insta domain check)')
     expect(lines.join('\n')).not.toContain('no routing record from the platform')
     expect(lines.join('\n')).not.toContain('add CNAME customer.com')
   })
@@ -333,26 +333,26 @@ describe('domainStatusLines (check-domain: every stage + where it routes)', () =
     const lines = domainStatusLines(fly)
     // Fly issues no ownership TXT, so that stage is drawn as unknown rather than silently dropped.
     expect(lines[1]).toBe('  ownership   n/a         (this provider does not use an ownership TXT)')
-    expect(lines[2]).toBe('  cname       unchecked   CNAME app.customer.com -> insta-main-api-ab12.fly.dev (not checked yet — re-run check-domain)')
-    expect(lines[3]).toBe("  cname       unchecked   _acme-challenge.app.customer.com -> app.customer.com.abc.flydns.net  (Let's Encrypt validation) (not checked yet — re-run check-domain)")
+    expect(lines[2]).toBe('  cname       unchecked   CNAME app.customer.com -> insta-main-api-ab12.fly.dev (not checked yet — re-run insta domain check)')
+    expect(lines[3]).toBe("  cname       unchecked   _acme-challenge.app.customer.com -> app.customer.com.abc.flydns.net  (Let's Encrypt validation) (not checked yet — re-run insta domain check)")
     expect(lines[4]).toBe('  certificate pending     (provider status: Awaiting configuration)')
   })
 
-  it('not added: one line pointing at set-domain, region still named, group + branch carried', () => {
+  it('not added: one line pointing at attach, region still named, group + branch carried', () => {
     expect(domainStatusLines({ ...bound, status: 'not added', dns: [] })).toEqual([
-      'app.customer.com is not attached to api (us-east) — attach it with: insta compute set-domain app.customer.com',
+      'app.customer.com is not attached to api (us-east) — attach it with: insta domain attach app.customer.com',
     ])
     expect(domainStatusLines({ ...bound, status: 'not added', dns: [] }, { group: 'api', branch: 'preview' })[0])
-      .toBe('app.customer.com is not attached to api (us-east) — attach it with: insta compute set-domain app.customer.com --group api --branch preview')
+      .toBe('app.customer.com is not attached to api (us-east) — attach it with: insta domain attach app.customer.com --group api --branch preview')
   })
 })
 
 describe('domainConflictMessage (bound elsewhere — domains are released, never moved)', () => {
   const conflict = (msg: string) => new ApiError(409, msg, { error: msg })
 
-  it('owner named and in this project: the exact remove-domain command', () => {
+  it('owner named and in this project: the exact detach command', () => {
     expect(domainConflictMessage('app.customer.com', conflict('app.customer.com is already attached to web in us-west; remove it there first'), [api, web]))
-      .toBe('app.customer.com is already attached to web (us-west) — domains are not moved; release it first: insta compute remove-domain app.customer.com --group web, then re-run set-domain')
+      .toBe('app.customer.com is already attached to web (us-west) — domains are not moved; release it first: insta domain detach app.customer.com --group web, then re-run insta domain attach')
   })
 
   it('owner named but not a service here: held by a deleted service → operator must release', () => {
@@ -363,12 +363,12 @@ describe('domainConflictMessage (bound elsewhere — domains are released, never
   it('the release command carries the branch the user was working on', () => {
     const e = conflict('app.customer.com is already attached to web in us-west; remove it there first')
     expect(domainConflictMessage('app.customer.com', e, [api, web], { group: 'api', branch: 'preview' }))
-      .toContain('insta compute remove-domain app.customer.com --group web --branch preview')
+      .toContain('insta domain detach app.customer.com --group web --branch preview')
   })
 
   it("owner not named (today's plane): generic release instruction, still no 'move'", () => {
     const msg = domainConflictMessage('app.customer.com', conflict('app.customer.com is already attached to another compute service; remove it there first'), [api, web])
-    expect(msg).toBe('app.customer.com is already attached to another compute service — domains are not moved; release it there first (insta compute remove-domain app.customer.com --group <that service>) or, if that service was deleted, ask an operator to release the hostname')
+    expect(msg).toBe('app.customer.com is already attached to another compute service — domains are not moved; release it there first (insta domain detach app.customer.com --group <that service>) or, if that service was deleted, ask an operator to release the hostname')
     expect(msg).not.toMatch(/move it|transfer/)
   })
 })

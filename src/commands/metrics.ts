@@ -60,7 +60,7 @@ function humanBytes(v: number, base: 1000 | 1024): string {
   return `${shown} ${units[i]}`
 }
 
-// insta metrics <db|compute|redis|mysql|mongodb> [group]
+// shared handler behind `insta <compute|postgres|redis|mysql|mongodb> metrics [service]`
 export async function metrics(component: string, group: string | undefined, opts: { branch?: string; from?: string; to?: string; step?: string; json?: boolean }): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()
@@ -83,7 +83,7 @@ export function cycleLine(res: { from: number; to: number }): string {
   return `billing cycle ${day(res.from)} → ${day(res.to - 86400)}`
 }
 
-// Pure: format the per-dimension lines (label: qty unit (cost)). Shared by `insta usage` and
+// Pure: format the per-dimension lines (label: qty unit (cost)). Shared by `insta billing usage` and
 // `insta billing` so both render dimensions identically.
 export function dimensionLines(dims: Dim[]): string[] {
   return dims.map((d) => {
@@ -97,7 +97,7 @@ function printDimensions(dims: Dim[]): void {
   for (const l of dimensionLines(dims)) info(l)
 }
 
-// insta usage — usage across the 5 billing dimensions (cpu/memory/volume/egress/storage) for the
+// insta billing usage — usage across the 5 billing dimensions (cpu/memory/volume/egress/storage) for the
 // current billing cycle. Shows the whole ORG by default (with a per-project breakdown); pass --proj
 // [id] for a single project (the linked one, or a given id). Billed dimensions, not raw provider
 // meters.
@@ -128,7 +128,8 @@ export async function usage(opts: { from?: string; to?: string; json?: boolean; 
   }
 }
 
-// pure: platform path for a deploy-events request (used by `insta logs --deploy`). Any Fly-backed
+// pure: platform path for a deploy-events request (used by `insta compute logs --deploy` and the
+// equivalent on redis/mysql/mongodb). Any Fly-backed
 // component (compute or a managed database) has machine lifecycle events; omitted → the platform
 // defaults to compute.
 export function deployEventsPath(projectId: string, opts: { component?: string; group?: string; branch?: string; limit?: string; instance?: string }): string {
@@ -171,7 +172,7 @@ export function resolveLogWindow(
   return { from, to }
 }
 
-// insta logs <db|compute|redis|mysql|mongodb> [group]
+// shared handler behind `insta <compute|postgres|redis|mysql|mongodb> logs [service]`
 export async function logs(component: string, group: string | undefined, opts: { branch?: string; limit?: string; region?: string; instance?: string; json?: boolean; deploy?: boolean; from?: string; to?: string; since?: string }): Promise<void> {
   const windowFlags = opts.from !== undefined || opts.to !== undefined || opts.since !== undefined
   if (opts.deploy && windowFlags) throw new Error('--from/--to/--since apply to runtime logs, not --deploy events')

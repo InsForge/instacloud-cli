@@ -1,4 +1,4 @@
-// `insta observe` — the local credential-audit hook. install wires a PostToolUse hook into the
+// `insta agent observe` — the local credential-audit hook. install wires a PostToolUse hook into the
 // agent harness; report renders the local audit; sync uploads findings into the project timeline
 // (idempotent via a stable dedup key, matching the platform's audit-event ingest).
 import { existsSync } from 'node:fs'
@@ -67,7 +67,7 @@ export async function observeInstall(): Promise<void> {
   const hint = untrackHint(res.tracked)
   if (hint) info(hint)
   info('it scans agent tool-use for credential exposure; findings append to ./.insta/audit.jsonl')
-  info('run `insta observe report` to review, `insta observe sync` to upload to the project timeline')
+  info('run `insta agent observe report` to review, `insta agent observe sync` to upload to the project timeline')
 }
 
 export async function observeUninstall(): Promise<void> {

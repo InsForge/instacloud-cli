@@ -559,7 +559,7 @@ describe('templateDeploy', () => {
     await templateDeploy('plausible', { json: true }, { api, project: PROJECT, wait: NO_WAIT })
     expect(JSON.parse(stdout.join(''))).toEqual(GATED.body)
     expect(stdout.join('')).not.toMatch(/approval required for/)
-    expect(stderr.join('')).toMatch(/approval required for template\.deploy — run: insta approvals approve appr_1/)
+    expect(stderr.join('')).toMatch(/approval required for template\.deploy — run: insta agent approvals approve appr_1/)
     expect(process.exitCode).toBe(2)
     expect(polls).toEqual([]) // nothing was deployed, so nothing is polled
   })

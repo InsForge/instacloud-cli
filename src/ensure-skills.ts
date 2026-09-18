@@ -33,7 +33,7 @@ export type Runner = (cmd: string, args: string[], inherit?: boolean) => Promise
 const defaultRunner: Runner = (cmdIn, argsIn, inherit = false) =>
   new Promise((resolve) => {
     // resolveSpawnable: on Windows `npx` is a .cmd shim spawn() refuses without a shell —
-    // re-enter npm's CLI script via node instead (same treatment as `insta setup agent`).
+    // re-enter npm's CLI script via node instead (same treatment as `insta agent setup`).
     const { cmd, args } = resolveSpawnable(cmdIn, argsIn)
     const env: NodeJS.ProcessEnv = { ...process.env, AI_AGENT: process.env.AI_AGENT || 'insta' }
     // npx exports its flags as npm_config_* to children; npm_config_package would pin the inner

@@ -1,4 +1,4 @@
-// `insta mcp install` — write the insta-cloud remote MCP server into each coding agent's own
+// `insta config install-mcp` — write the insta-cloud remote MCP server into each coding agent's own
 // config format. Claude Code is NOT handled here — it has a real registry CLI (`claude mcp add`,
 // see setup.ts registerMcp); these are the config-file agents. All entries are OAuth (no
 // credential written): each client discovers the platform AS via RFC 9728 and runs the browser
@@ -110,7 +110,7 @@ export async function installAgentConfigs(agent?: string, home: string = os.home
   return done
 }
 
-// `insta mcp install [--agent <slug>] [--mcp-token]` — claude-code goes through its registry CLI
+// `insta config install-mcp [--agent <slug>] [--mcp-token]` — claude-code goes through its registry CLI
 // (registerMcp); everything else is a config-file write. No --agent = claude-code + all detected.
 export async function mcpInstall(
   opts: { agent?: string; mcpToken?: boolean },

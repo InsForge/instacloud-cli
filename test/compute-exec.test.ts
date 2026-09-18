@@ -42,6 +42,13 @@ describe('splitExecArgs', () => {
     expect(splitExecArgs(A('app', 'echo', 'hi'), 'linux')).toEqual({ argv: A('app', 'echo', 'hi') })
   })
 
+  it('finds `compute exec` behind a root --api-url (with a value, or =value)', () => {
+    expect(splitExecArgs(['node', 'insta', '--api-url', 'http://x', 'compute', 'exec', 'api', '--', 'ls'], 'linux'))
+      .toEqual({ argv: ['node', 'insta', '--api-url', 'http://x', 'compute', 'exec', 'api'], command: ['ls'] })
+    expect(splitExecArgs(['node', 'insta', '--api-url=http://x', '--agent', 'compute', 'exec', '--', 'ls'], 'linux'))
+      .toEqual({ argv: ['node', 'insta', '--api-url=http://x', '--agent', 'compute', 'exec'], command: ['ls'] })
+  })
+
   // ---- the shim ate the separator (win32 only) ----
   //
   // Everything from the first non-option token is PAYLOAD and is never interpreted, so the remote
@@ -292,7 +299,7 @@ describe('applyExecResult', () => {
   it('202: exits 2 with the human approval hint on stderr, stdout untouched (non-json)', () => {
     applyExecResult({ status: 202, body: { status: 'approval_required', action: 'deploy', approvalId: 'appr_1' } })
     expect(process.exitCode).toBe(2)
-    expect(stderr.join('')).toMatch(/approval required for deploy — run: insta approvals approve appr_1/)
+    expect(stderr.join('')).toMatch(/approval required for deploy — run: insta agent approvals approve appr_1/)
     expect(stdout.join('')).toBe('')
   })
 

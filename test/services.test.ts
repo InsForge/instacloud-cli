@@ -153,8 +153,15 @@ describe('servicesAdd validation (throws before any network/config access)', () 
   it('rejects --port for a non-compute type', async () => {
     await expect(servicesAdd('postgres', 'db', { port: '3000' })).rejects.toThrow(/--port is only valid for compute services/)
   })
-  it('rejects --always-on for a non-compute type, pointing at the db command instead', async () => {
+  it('rejects --always-on for a non-compute type, pointing at that type\'s own command', async () => {
     await expect(servicesAdd('postgres', 'db', { alwaysOn: true })).rejects.toThrow(/--always-on \/ --no-always-on is only valid for compute services/)
+    // Each managed database has its own always-on verb; naming postgres' would send a redis user
+    // at a different service type.
+    for (const type of ['postgres', 'redis', 'mysql', 'mongodb']) {
+      await expect(servicesAdd(type, 'db', { alwaysOn: true })).rejects.toThrow(new RegExp(`insta ${type} always-on on\\|off`))
+    }
+    // Storage owns no always-on verb: the bare rule, with no command to run.
+    await expect(servicesAdd('storage', 'bkt', { alwaysOn: true })).rejects.toThrow(/only valid for compute services$/)
   })
   it('rejects --no-always-on for a non-compute type too: an explicit false is just as compute-only', async () => {
     // Presence check, not truthiness: a truthiness check would let `postgres db --no-always-on`

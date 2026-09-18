@@ -1,12 +1,17 @@
 import { ApiClient, ApiError, requireProject } from '../api.js'
 import { info, printJson, handleApproval, relayExitCode, writeFileAtomicSync, resolveThroughSymlink } from '../util.js'
-import { resolveComputeServiceId, resolveSoleService, q, parseVolumeGib } from './services.js'
+import { resolveComputeServiceId, resolveSoleService, q, parseVolumeGib, parseCount } from './services.js'
 
 type Opts = { branch?: string; group?: string; json?: boolean }
 
+// The service types that share compute's settings verbs (limits / volume / always-on) on the
+// platform: a "compute or managed-database" service. `status` is compute-only on the platform and
+// stays under resolveComputeServiceId (see managed-db.ts for the managed-DB status read).
+export type ManagedType = 'compute' | 'redis' | 'mysql' | 'mongodb'
+
 // ---- custom domains (bring your own hostname) ----
 //
-// A compute service's region is fixed at creation (`insta services add compute --region`), and a
+// A compute service's region is fixed at creation (`insta service add compute --region`), and a
 // custom hostname routes in the router of the region that OWNS the service. So the region is
 // DETECTED from the service, never chosen for the domain — the customer's DNS is one region-agnostic
 // CNAME target either way — and every line below names it so the user knows where traffic lands.
@@ -38,7 +43,7 @@ export function resolveDomainTarget(services: ComputeRow[], host: string, group?
     if (isWorker(svc)) throw new Error(`${svc.name} is a worker (port 0) — it has no HTTP endpoint, so ${host} cannot serve from it`)
     return svc
   }
-  if (compute.length === 0) throw new Error('no compute service in this project (add one with `insta services add compute <name>`)')
+  if (compute.length === 0) throw new Error('no compute service in this project (add one with `insta service add compute <name>`)')
   if (compute.length === 1) {
     const only = compute[0]!
     if (isWorker(only)) throw new Error(`${only.name} is a worker (port 0) — it has no HTTP endpoint, so ${host} cannot serve from it`)
@@ -75,7 +80,7 @@ export type DomainCmdCtx = { group?: string; branch?: string }
 const flags = (c: DomainCmdCtx = {}) =>
   `${c.group ? ` --group ${c.group}` : ''}${c.branch ? ` --branch ${c.branch}` : ''}`
 
-// After set-domain: exactly what to do next, from the records the platform returned — never a
+// After attach: exactly what to do next, from the records the platform returned — never a
 // hand-built template. No records = say so; a template here would send the customer publishing
 // values the plane never issued. Pure, exported for tests.
 export function domainGuidanceLines(r: DomainView, ctx: DomainCmdCtx = {}): string[] {
@@ -89,7 +94,7 @@ export function domainGuidanceLines(r: DomainView, ctx: DomainCmdCtx = {}): stri
   const nameW = Math.max(...records.map((d) => d.name.length))
   out.push('add these DNS records at your DNS provider:')
   for (const d of records) out.push(`  ${pad(d.type, 6)} ${pad(d.name, nameW)} -> ${d.value}`)
-  out.push(`then: insta compute check-domain ${r.hostname}${flags(ctx)}`)
+  out.push(`then: insta domain check ${r.hostname}${flags(ctx)}`)
   return out
 }
 
@@ -130,10 +135,10 @@ export function domainResolveLine(r: DomainView): { line: string; ready: boolean
   return { line: `  ${pad('resolves to', 12)}${r.origin}   (${region} router)   ok`, ready: true }
 }
 
-// check-domain: every stage, what each still needs, and where it routes. Pure, exported for tests.
+// check: every stage, what each still needs, and where it routes. Pure, exported for tests.
 export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string[] {
   if (r.status === 'not added') {
-    return [`${r.hostname} is not attached to ${targetOf(r)} — attach it with: insta compute set-domain ${r.hostname}${flags(ctx)}`]
+    return [`${r.hostname} is not attached to ${targetOf(r)} — attach it with: insta domain attach ${r.hostname}${flags(ctx)}`]
   }
   const records = recordsOf(r)
   const out = [`${r.hostname} -> ${targetOf(r)}`]
@@ -159,7 +164,7 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
     if (st === 'ok') stage('ownership', 'verified', '(TXT found)')
     else if (st === 'mismatch') { stage('ownership', 'mismatch', `TXT ${txt.name} has a different value — set it to ${txt.value}`); blockers.push('fix the ownership TXT') }
     else if (st === 'missing') { stage('ownership', 'pending', `add TXT ${txt.name} -> ${txt.value}`); blockers.push('add the ownership TXT') }
-    else { stage('ownership', 'unchecked', `TXT ${txt.name} -> ${txt.value} (the plane has not checked it yet — re-run check-domain)`); blockers.push('ownership unchecked') }
+    else { stage('ownership', 'unchecked', `TXT ${txt.name} -> ${txt.value} (the plane has not checked it yet — re-run insta domain check)`); blockers.push('ownership unchecked') }
   } else if (reportsOrigin(r)) {
     // The stage is drawn even with no record to draw it from: an omitted stage reads as "not
     // required", when in fact the platform told us nothing to publish. Only the plane
@@ -186,7 +191,7 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
     if (st === 'ok') stage(lbl, 'ok', `(points at ${d.value})`)
     else if (st === 'mismatch') { stage(lbl, 'mismatch', `${d.type} ${d.name} must point at ${d.value}`); blockers.push(`fix the ${d.type}`) }
     else if (st === 'missing') { stage(lbl, 'pending', `add ${d.type} ${d.name} -> ${d.value}`); blockers.push(`add the ${d.type}`) }
-    else { stage(lbl, 'unchecked', `${d.type} ${d.name} -> ${d.value} (not checked yet — re-run check-domain)`); blockers.push(`${d.type} unchecked`) }
+    else { stage(lbl, 'unchecked', `${d.type} ${d.name} -> ${d.value} (not checked yet — re-run insta domain check)`); blockers.push(`${d.type} unchecked`) }
   }
 
   // Everything else the platform returned — a Let's Encrypt validation CNAME, any extra record.
@@ -199,7 +204,7 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
     if (st === 'ok') stage(lbl, 'ok', where)
     else if (st === 'mismatch') { stage(lbl, 'mismatch', `${d.type} ${d.name} must point at ${d.value}`); blockers.push(`fix the ${d.type} ${d.name}`) }
     else if (st === 'missing') { stage(lbl, 'pending', `add ${where}`); blockers.push(`add the ${d.type} ${d.name}`) }
-    else { stage(lbl, 'unchecked', `${where} (not checked yet — re-run check-domain)`); blockers.push(`${d.type} ${d.name} unchecked`) }
+    else { stage(lbl, 'unchecked', `${where} (not checked yet — re-run insta domain check)`); blockers.push(`${d.type} ${d.name} unchecked`) }
   }
 
   const ssl = r.ssl ?? (r.configured ? 'active' : undefined)
@@ -235,7 +240,7 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
 
 // The platform's 409: the hostname is already bound elsewhere. Domains are never MOVED — the only
 // path is unbind there, then bind here — so the hint names the release step. Three shapes:
-//   owner named and present in this project → the exact remove-domain command;
+//   owner named and present in this project → the exact detach command;
 //   owner named but NOT in this project's services → it is held by a deleted (or other-project)
 //     service: an operator must release it (the plane has no self-serve orphan release yet);
 //   owner not named (today's plane) → the generic release instruction.
@@ -246,10 +251,10 @@ export function domainConflictMessage(host: string, e: ApiError, services: Compu
   const region = m?.[2]
   // The release command must name the OWNER's group, and the branch the user is working on — a
   // command that defaults back to the linked branch would release nothing.
-  const release = (group: string) => `insta compute remove-domain ${host}${flags({ group, branch: ctx.branch })}`
+  const release = (group: string) => `insta domain detach ${host}${flags({ group, branch: ctx.branch })}`
   if (owner) {
     const here = services.find((s) => s.type === 'compute' && s.name === owner)
-    if (here) return `${host} is already attached to ${owner}${region ? ` (${region})` : here.region ? ` (${here.region})` : ''} — domains are not moved; release it first: ${release(owner)}, then re-run set-domain`
+    if (here) return `${host} is already attached to ${owner}${region ? ` (${region})` : here.region ? ` (${here.region})` : ''} — domains are not moved; release it first: ${release(owner)}, then re-run insta domain attach`
     return `${host} is already attached to ${owner}${region ? ` in ${region}` : ''}, which is not a service in this project — it is held by a deleted service (or one in another project); ask an operator to release the hostname before re-binding it`
   }
   return `${host} is already attached to another compute service — domains are not moved; release it there first (${release('<that service>')}) or, if that service was deleted, ask an operator to release the hostname`
@@ -422,6 +427,8 @@ function execCommandIndex(argv: string[]): number {
   for (let cursor = 2; cursor < argv.length; cursor++) {
     const token = argv[cursor]!
     if (token === '--agent') continue
+    if (token === '--api-url') { cursor++; continue } // root flag with a value: skip both tokens
+    if (token.startsWith('--api-url=')) continue
     if (token.startsWith('-')) return -1 // a global flag, or `--`: either way not our command path
     return token === 'compute' && argv[cursor + 1] === 'exec' ? cursor : -1
   }
@@ -474,7 +481,7 @@ export function resolveExecFallback(
   const [head, ...rest] = payload
   if (head === undefined) return { serviceName: undefined, command: [] }
   if (!services.some((service) => service.type === 'compute' && service.name === head)) {
-    note(`note: no \`--\` separator was found and \`${head}\` is not a compute service, so it was read as the command. If \`${head}\` was the service, check the name with \`insta services list\`.`)
+    note(`note: no \`--\` separator was found and \`${head}\` is not a compute service, so it was read as the command. If \`${head}\` was the service, check the name with \`insta service list\`.`)
     return { serviceName: undefined, command: payload }
   }
   // `head` really is a service, so whatever follows it cannot be the command's first token.
@@ -579,18 +586,37 @@ export async function computeExec(
 
 // ---- always-on (opt out of scale-to-zero; all plans; billing is actual usage either way) ----
 
-export async function computeAlwaysOn(mode: string, serviceName: string | undefined, opts: LifeOpts): Promise<void> {
+export async function serviceAlwaysOn(type: ManagedType, mode: string, serviceName: string | undefined, opts: LifeOpts): Promise<void> {
   if (mode !== 'on' && mode !== 'off') throw new Error('mode must be on|off')
   const api = await ApiClient.load()
   const p = await requireProject()
   const branch = opts.branch ?? p.branch
   const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
-  const id = resolveComputeServiceId(services, serviceName)
-  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${id}/always-on`, { enabled: mode === 'on' })
+  const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, type, serviceName)
+  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${svc.id}/always-on`, { enabled: mode === 'on' })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const on = res.body.service?.always_on
-  info(`compute ${res.body.service?.name ?? id}: always-on ${on ? 'ENABLED — machines stay warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle'}`)
+  info(`${type} ${res.body.service?.name ?? svc.name}: always-on ${on ? 'ENABLED — machines stay warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle'}`)
+}
+export const computeAlwaysOn = (mode: string, serviceName: string | undefined, opts: LifeOpts): Promise<void> => serviceAlwaysOn('compute', mode, serviceName, opts)
+
+// ---- scale (same-region replica count; paid plans) ----
+type ScaleOpts = LifeOpts & { region?: string }
+
+// `insta compute scale <count> [service] [--region <r>]` — POST /services/:id/scale. Count is
+// validated locally (1..10); the paid-plan gate is the backend's and its 403 flows verbatim.
+export async function computeScale(count: string, serviceName: string | undefined, opts: ScaleOpts): Promise<void> {
+  const machineCount = parseCount(count)
+  const api = await ApiClient.load()
+  const p = await requireProject()
+  const branch = opts.branch ?? p.branch
+  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
+  const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, 'compute', serviceName)
+  const res = await api.rawRequest('POST', `/projects/${p.projectId}/services/${svc.id}/scale`, { machineCount, region: opts.region })
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body.service)
+  info(`scaled compute ${svc.name} to ${machineCount} replica(s)${opts.region ? ` in ${opts.region}` : ''}`)
 }
 
 // ---- limits (the resource ceiling; paid plans) ----
@@ -627,31 +653,48 @@ export function parseCpu(raw: string): number {
 
 // Render the volume read. Pure, exported for tests (mirrors serviceListLine). Every plan may view;
 // only growth is paid — that gate is the backend's to enforce, so nothing here pre-blocks.
-export function volumeLines(name: string, volume: { sizeGib: number; mountPath: string } | null, cap: { volumeGib: number }): string[] {
+export function volumeLines(name: string, volume: { sizeGib: number; mountPath: string } | null, cap: { volumeGib: number }, type: ManagedType = 'compute'): string[] {
   if (!volume) return [
-    `compute ${name}: no volume attached (attach one: \`insta compute volume ${name} --size <gi>\` — it mounts at /data on the next deploy)`,
+    type === 'compute'
+      ? `compute ${name}: no volume attached (attach one: \`insta compute volume ${name} --size <gi>\` — it mounts at /data on the next deploy)`
+      : `${type} ${name}: no volume attached (attach one: \`insta ${type} volume ${name} --size <gi>\` — it mounts at the image's data directory)`,
   ]
+  // `--delete` exists on `compute volume` only — a managed database's volume IS its data
+  // directory, so the group never registered the flag (index.ts) and naming it here would print
+  // a command that fails.
+  const grow = type === 'compute'
+    ? 'grow with --size (grow-only), delete with --delete (destroys the data)'
+    : 'grow with --size (grow-only); the volume cannot be deleted — remove the service instead'
   return [
-    `compute ${name}: volume ${volume.sizeGib}Gi at ${volume.mountPath}  (plan max ${cap.volumeGib}Gi)`,
-    '  billing is actual data stored — the size is a cap, not a price; grow with --size (grow-only), delete with --delete (destroys the data)',
+    `${type} ${name}: volume ${volume.sizeGib}Gi at ${volume.mountPath}  (plan max ${cap.volumeGib}Gi)`,
+    `  billing is actual data stored — the size is a cap, not a price; ${grow}`,
   ]
 }
 
 // Render the PUT result. Pure, exported for tests. `attached` comes from the backend and is what
 // tells a FIRST attach (no disk yet — it mounts on the next deploy) apart from a grow (the live
 // disk was already extended); the wire size is authoritative in both cases.
-export function volumeWriteLine(name: string, body: { volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }; attached?: boolean }): string {
+export function volumeWriteLine(name: string, body: { volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }; attached?: boolean }, type: ManagedType = 'compute'): string {
   if (body.attached) {
-    return `compute ${name}: volume ${body.volume.sizeGib}Gi attached — mounts at ${body.volume.mountPath} on the next deploy  (plan max ${body.cap.volumeGib}Gi)`
+    // Only a compute service has a deploy step for the mount to wait on; a managed database has
+    // no deploy, so its disk is simply mounted.
+    const mounts = type === 'compute'
+      ? `mounts at ${body.volume.mountPath} on the next deploy`
+      : `mounts at ${body.volume.mountPath}`
+    return `${type} ${name}: volume ${body.volume.sizeGib}Gi attached — ${mounts}  (plan max ${body.cap.volumeGib}Gi)`
   }
-  return `compute ${name}: volume grown to ${body.volume.sizeGib}Gi at ${body.volume.mountPath}  (plan max ${body.cap.volumeGib}Gi)`
+  return `${type} ${name}: volume grown to ${body.volume.sizeGib}Gi at ${body.volume.mountPath}  (plan max ${body.cap.volumeGib}Gi)`
 }
 
 // Render the DELETE result. Pure, exported for tests. Deleting is the only way off the volume
 // path (there is no detach), so the line says what came back with it: the two constraints the
 // volume imposed.
-export function volumeDeleteLine(name: string): string {
-  return `compute ${name}: volume deleted — the disk and its data are gone; suspend fast-wake and scale-out are back`
+export function volumeDeleteLine(name: string, type: ManagedType = 'compute'): string {
+  // The two constraints a volume imposes — no suspend fast-wake, no scale-out — are compute-plane
+  // facts. `--delete` is registered on compute only, so the other branch is unreachable today;
+  // it is written type-aware anyway so the line cannot start lying if it ever becomes reachable.
+  const regained = type === 'compute' ? '; suspend fast-wake and scale-out are back' : ''
+  return `${type} ${name}: volume deleted — the disk and its data are gone${regained}`
 }
 
 // Map a DELETE .../volume failure. Pure, exported for tests. An older backend has no DELETE
@@ -678,7 +721,7 @@ type VolumeOpts = LifeOpts & { size?: string; mountPath?: string; delete?: boole
 // no undo; billing stops now). The paid/cap/machine-count gates all belong to the backend, whose
 // 403/400 messages carry the upgrade hints and must reach the user verbatim (the guard prints
 // ApiError messages as-is).
-export async function computeVolume(serviceName: string | undefined, opts: VolumeOpts): Promise<void> {
+export async function serviceVolume(type: ManagedType, serviceName: string | undefined, opts: VolumeOpts): Promise<void> {
   if (opts.delete && opts.mountPath !== undefined) throw new Error('--delete cannot be combined with --mount-path')
   if (opts.mountPath !== undefined && !opts.size) throw new Error('--mount-path requires --size when attaching a volume')
   if (opts.delete && opts.size) throw new Error('--delete cannot be combined with --size (one changes the volume, the other destroys it)')
@@ -686,61 +729,63 @@ export async function computeVolume(serviceName: string | undefined, opts: Volum
   const p = await requireProject()
   const branch = opts.branch ?? p.branch
   const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
-  const id = resolveComputeServiceId(services, serviceName)
+  const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, type, serviceName)
 
   if (opts.delete) {
     let res
-    try { res = await api.rawRequest('DELETE', `/projects/${p.projectId}/services/${id}/volume`) }
+    try { res = await api.rawRequest('DELETE', `/projects/${p.projectId}/services/${svc.id}/volume`) }
     catch (e) { throw volumeDeleteError(e) }
     if (handleApproval(res, opts.json)) return
     if (opts.json) return printJson(res.body)
-    info(volumeDeleteLine(res.body.service?.name ?? serviceName ?? id))
+    info(volumeDeleteLine(res.body.service?.name ?? svc.name, type))
     return
   }
 
   if (!opts.size) {
-    const r = await api.request('GET', `/projects/${p.projectId}/services/${id}/volume`)
+    const r = await api.request('GET', `/projects/${p.projectId}/services/${svc.id}/volume`)
     if (opts.json) return printJson(r)
-    for (const line of volumeLines(serviceName ?? id, r.volume, r.cap)) info(line)
+    for (const line of volumeLines(svc.name, r.volume, r.cap, type)) info(line)
     return
   }
 
   const sizeGib = parseVolumeGib(opts.size)
-  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${id}/volume`, { sizeGib, ...(opts.mountPath !== undefined ? { mountPath: opts.mountPath } : {}) })
+  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${svc.id}/volume`, { sizeGib, ...(opts.mountPath !== undefined ? { mountPath: opts.mountPath } : {}) })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
-  info(volumeWriteLine(res.body.service?.name ?? serviceName ?? id, res.body))
+  info(volumeWriteLine(res.body.service?.name ?? svc.name, res.body, type))
 }
+export const computeVolume = (serviceName: string | undefined, opts: VolumeOpts): Promise<void> => serviceVolume('compute', serviceName, opts)
 
 type LimitsOpts = LifeOpts & { cpu?: string; memory?: string }
 
 // Show or set a compute service's ceiling. With no --memory it PRINTS the current limits and the
 // plan cap (so `insta compute limits` is a safe read), which is also what a UI renders as a slider
 // with its plan-limit marker.
-export async function computeLimits(serviceName: string | undefined, opts: LimitsOpts): Promise<void> {
+export async function serviceLimits(type: ManagedType, serviceName: string | undefined, opts: LimitsOpts): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()
   const branch = opts.branch ?? p.branch
   const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
-  const id = resolveComputeServiceId(services, serviceName)
+  const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, type, serviceName)
 
   if (!opts.memory && !opts.cpu) {
-    const r = await api.request('GET', `/projects/${p.projectId}/services/${id}/limits`)
+    const r = await api.request('GET', `/projects/${p.projectId}/services/${svc.id}/limits`)
     if (opts.json) return printJson(r)
-    info(`compute ${serviceName ?? id}: ceiling ${r.limits.cpu} vCPU / ${fmtMb(r.limits.memoryMb)}  (plan max ${r.cap.cpu} vCPU / ${fmtMb(r.cap.memoryMb)})`)
-    info('  billing is actual usage — the ceiling caps what the app may burn, it is not a price')
+    info(`${type} ${svc.name}: ceiling ${r.limits.cpu} vCPU / ${fmtMb(r.limits.memoryMb)}  (plan max ${r.cap.cpu} vCPU / ${fmtMb(r.cap.memoryMb)})`)
+    info(`  billing is actual usage — the ceiling caps what the ${type === 'compute' ? 'app' : 'database'} may burn, it is not a price`)
     return
   }
   if (!opts.memory) throw new Error('--memory is required when setting limits (cpu is derived from it; pass --cpu only to override)')
 
   const body: Record<string, unknown> = { memoryMb: parseMemoryMb(opts.memory) }
   if (opts.cpu) body.cpu = parseCpu(opts.cpu)
-  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${id}/limits`, body)
+  const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${svc.id}/limits`, body)
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const l = res.body.limits
-  info(`compute ${res.body.service?.name ?? id}: ceiling set to ${l.cpu} vCPU / ${fmtMb(l.memoryMb)}`)
+  info(`${type} ${res.body.service?.name ?? svc.name}: ceiling set to ${l.cpu} vCPU / ${fmtMb(l.memoryMb)}`)
 }
+export const computeLimits = (serviceName: string | undefined, opts: LimitsOpts): Promise<void> => serviceLimits('compute', serviceName, opts)
 
 // ---- ssh (interactive sessions) --------------------------------------------
 

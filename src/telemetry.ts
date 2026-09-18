@@ -35,18 +35,18 @@ const SERVICE = oneOf(SERVICE_TYPES)
 // `login`/`env use` accept the name case-insensitively; so does this.
 const ENV: Check = (v) => isEnvName(v.trim().toLowerCase())
 const ON_OFF = oneOf(['on', 'off'])
-const TARGET = oneOf(['db', 'compute', 'redis', 'mysql', 'mongodb'])
 const POLICY_ACTION: Check = (v) => /^(?:secrets|deploy|project|branch|service|storage)(?:\.[a-zA-Z]+)?$/.test(v)
 
 const SAFE_ARGS: Record<string, Record<number, Check>> = {
   'env use': { 0: ENV }, 'project link': { 0: ID },
-  'services add': { 0: SERVICE }, 'services remove': { 0: SERVICE }, 'services rename': { 0: SERVICE }, 'services secrets': { 0: SERVICE },
-  'services set-access': { 0: SERVICE, 2: oneOf(['public', 'private']) },
-  'services scale': { 0: SERVICE, 2: NUMBER, 3: REGION }, 'services upgrade': { 0: SERVICE, 2: SLUG },
-  'compute always-on': { 0: ON_OFF }, 'db always-on': { 0: ON_OFF }, metrics: { 0: TARGET }, logs: { 0: TARGET },
-  'template info': { 0: SLUG }, 'billing upgrade': { 0: oneOf(['pro', 'team']) },
-  'approvals approve': { 0: ID }, 'approvals deny': { 0: ID },
-  'agent-policy rule set': { 0: POLICY_ACTION, 1: oneOf(['allow', 'deny', 'approve']) }, autoupdate: { 0: ON_OFF },
+  'service add': { 0: SERVICE }, 'service remove': { 0: SERVICE }, 'service rename': { 0: SERVICE },
+  'storage set-access': { 0: oneOf(['public', 'private']) },
+  'compute scale': { 0: NUMBER },
+  'compute always-on': { 0: ON_OFF }, 'postgres always-on': { 0: ON_OFF },
+  'redis always-on': { 0: ON_OFF }, 'mysql always-on': { 0: ON_OFF }, 'mongodb always-on': { 0: ON_OFF },
+  'template info': { 0: SLUG }, 'billing subscribe': { 0: oneOf(['pro', 'team']) },
+  'agent approvals approve': { 0: ID }, 'agent approvals deny': { 0: ID },
+  'agent policy rule set': { 0: POLICY_ACTION, 1: oneOf(['allow', 'deny', 'approve']) }, 'config autoupdate': { 0: ON_OFF },
 }
 const SAFE_OPTIONS: Record<string, Check> = {
   org: ID, project: ID, region: REGION, env: ENV, oauth: oneOf(['github', 'google']),

@@ -77,5 +77,5 @@ export async function envUse(name: string, opts: { json?: boolean } = {}): Promi
   // files were written for the previous environment and are keyed by a different server name, so
   // they keep talking to it until setup is re-run. --env is REQUIRED in the hint: since 0.0.38 a
   // bare `setup agent` forces prod, which would silently undo the switch the user just made.
-  info(`  re-point this machine's agents at it with: insta setup agent --env ${target}`)
+  info(`  re-point this machine's agents at it with: insta agent setup --env ${target}`)
 }

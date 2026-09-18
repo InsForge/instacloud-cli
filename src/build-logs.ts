@@ -174,7 +174,7 @@ export function archiveLogWatcher(api: Api, projectId: string, write: (message: 
         if (error instanceof ApiError && error.status === 400) follow.tails.clear()
         printer.finishLine(write)
         const reason = signal.aborted || (error instanceof Error && error.name === 'TimeoutError') ? ' (timed out)' : error instanceof ApiError ? ` (HTTP ${error.status})` : ''
-        const message = `Could not read build logs${reason}. Retry with: insta build-logs ${buildId}\n`
+        const message = `Could not read build logs${reason}. Retry with: insta build logs ${buildId}\n`
         if (warned !== message) write(message)
         warned = message
       }

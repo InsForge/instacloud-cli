@@ -1,9 +1,9 @@
-// `insta db query <service> [args...]` — run a query/command against a MANAGED database
-// (mysql/redis/mongodb) through the platform's console exec API. Postgres is not a console target
-// (it has the SQL editor / DATABASE_URL, and `insta db url|connect`), so a postgres service is
-// rejected here. The shape logic — path, request body, result rendering — lives in pure,
-// unit-tested seams; the handler just resolves the service and wires them to the API, this repo's
-// pure-seam convention.
+// `insta redis|mysql|mongodb query <service> [args...]` — run a query/command against a MANAGED
+// database through the platform's console exec API. Postgres is not a console target (it has the
+// SQL editor / DATABASE_URL, and `insta postgres url|connect`), so a postgres service is rejected
+// here. The shape logic — path, request body, result rendering — lives in pure, unit-tested seams;
+// the handler just resolves the service and wires them to the API, this repo's pure-seam
+// convention.
 import { ApiClient, requireProject } from '../api.js'
 import { info, printJson, die, handleApproval } from '../util.js'
 import { q } from './services.js'
@@ -78,11 +78,13 @@ async function dbQueryDeps(deps?: DbQueryDeps): Promise<DbQueryDeps> {
 }
 
 // Resolve <service> (a service NAME) to its id + engine, then dispatch to the console exec API.
-export async function dbQuery(service: string, args: string[], opts: Opts = {}, deps?: DbQueryDeps): Promise<void> {
+// `engine` is the group the command was typed under (`insta redis query …`): a service of another
+// type is refused with the right group named, never queried through the wrong renderer.
+export async function dbQuery(service: string, args: string[], opts: Opts = {}, deps?: DbQueryDeps, engine?: Engine): Promise<void> {
   // An empty command is never valid — reject it before loading config or hitting the network,
   // rather than posting an empty statement/argv to the console.
   if (args.length === 0) {
-    die('usage: insta db query <service> <query…> (mysql/mongodb: one quoted statement; redis: e.g. GET mykey)')
+    die(`usage: insta ${engine ?? '<redis|mysql|mongodb>'} query <service> <query…> (mysql/mongodb: one quoted statement; redis: e.g. GET mykey)`)
   }
   const { api, project: p } = await dbQueryDeps(deps)
   const branch = opts.branch ?? p.branch
@@ -90,20 +92,21 @@ export async function dbQuery(service: string, args: string[], opts: Opts = {}, 
   const svc = (services as Array<{ id: string; type: string; name: string }>).find((s) => s.name === service)
   if (!svc) die(`service not found: ${service}`)
   if (!(MANAGED_ENGINES as readonly string[]).includes(svc.type)) {
-    die('db query is for managed databases (mysql/redis/mongodb); postgres uses the SQL editor / DATABASE_URL')
+    die('query is for managed databases (mysql/redis/mongodb); postgres uses `insta postgres url|connect` / the SQL editor')
   }
-  const engine = svc.type as Engine
+  if (engine && svc.type !== engine) die(`${service} is a ${svc.type} service — use: insta ${svc.type} query ${service} …`)
+  const resolved = svc.type as Engine
   // --database is a mongodb-only selector (execBody drops it for the others). Rejecting it here,
   // rather than silently ignoring it, keeps the documented mongodb-only contract honest.
-  if (opts.database !== undefined && engine !== 'mongodb') {
+  if (opts.database !== undefined && resolved !== 'mongodb') {
     die('--database is only supported for mongodb services')
   }
-  const res = await api.rawRequest('POST', consoleExecPath(p.projectId, svc.id), execBody(engine, args, opts.database))
+  const res = await api.rawRequest('POST', consoleExecPath(p.projectId, svc.id), execBody(resolved, args, opts.database))
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
-  if (engine === 'mysql') {
+  if (resolved === 'mysql') {
     for (const line of renderMysqlRows(res.body ?? {})) info(line)
-  } else if (engine === 'redis') {
+  } else if (resolved === 'redis') {
     info(renderRedisReply(res.body?.reply))
   } else {
     info(renderMongoResult(res.body?.result))

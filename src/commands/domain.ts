@@ -1,7 +1,7 @@
 import { ApiClient } from '../api.js'
 import { info, printJson, handleApproval, die } from '../util.js'
 import { presentUrl, resolveOrgId } from './billing.js'
-import { domainDeps, domainTarget, type DomainDeps } from './compute.js'
+import { domainDeps, domainTarget, setDomain, checkDomain, removeDomain, type DomainDeps } from './compute.js'
 
 type Quote = { domainName: string; purchasable: boolean; priceCents?: number; renewalPriceCents?: number; reason?: string }
 type Order = { id: string; domainName: string; years: number; status: string; priceCents: number; renewalPriceCents: number | null; checkoutUrl?: string; failedReason: string | null }
@@ -78,7 +78,9 @@ export async function domainAttach(host: string, opts: { branch?: string; group?
     const { items: orders } = await api.request<{ items: Order[] }>('GET', `/orgs/${orgId}/domains/orders`)
     const o = ownerOf(name, orders)
     if (o) die(`${o.domainName} is not registered yet — its order is ${o.status}: insta domain status ${o.domainName}`)
-    die(`no domain this org bought covers ${name} — for a domain you own elsewhere: insta compute set-domain ${name}`)
+    // Not a name this org bought: a domain owned elsewhere. Same verb, the bring-your-own path —
+    // the plane issues the edge cert and the DNS records to publish in your own zone are printed.
+    return setDomain(name, opts, { api, project: p })
   }
   const branch = opts.branch ?? p.branch
   const { target } = await domainTarget(api, p.projectId, branch, name, opts.group)
@@ -195,4 +197,56 @@ export async function domainRecordsRemove(domainName: string, id: string, opts: 
   const r = await api.request('DELETE', `${recordPath(orgId, domainName)}/${encodeURIComponent(id)}`)
   if (opts.json) return printJson(r)
   info(`removed record ${id} from ${domainName}`)
+}
+
+// `insta domain check|detach <hostname>` — the hostname-level reads and writes. Both normalize the
+// hostname exactly as `attach` does: DNS is case-insensitive, `attach` lowercases before it sends,
+// and forwarding `Docs.MyApp.com` verbatim asked the plane about a binding it never wrote.
+type HostOpts = { branch?: string; group?: string; json?: boolean }
+
+export async function domainCheck(host: string, opts: HostOpts, deps?: DomainDeps): Promise<void> {
+  return checkDomain(host.trim().toLowerCase(), opts, deps)
+}
+
+/** The bought domain `host` sits under, or null — including when the question cannot be answered.
+ *
+ *  This lookup is a GUARD on a command that worked without it: a control plane without the
+ *  org-scoped domains route (an older deployment, insta-oss), a 403, or a transient 5xx must not
+ *  turn a bring-your-own detach into a hard failure. A failed read means "nothing says this is a
+ *  bought name", which is exactly how the command behaved before the guard existed. A read that
+ *  SUCCEEDS is authoritative, and its refusal stands. */
+async function boughtOwner(d: DomainDeps, orgId: string, host: string): Promise<Purchased | null> {
+  try {
+    const { items } = await d.api.request<{ items: Purchased[] }>('GET', `/orgs/${orgId}/domains`)
+    return ownerOf(host, items)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Release a hostname from its compute service. Bring-your-own only: a hostname under a domain
+ * bought through InstaCloud is refused here.
+ *
+ * `attach` writes a bought hostname into the platform's DOMAINS record (state, serviceId,
+ * releaseFrom) and lets a reconciler bind it on the compute plane; this verb's only route,
+ * DELETE /projects/:id/compute/domain, unbinds on the compute plane alone and the platform
+ * exposes no detach route for the domains record. Running it would leave the record still
+ * claiming a binding that no longer exists — and, for an apex, `attach` binds both the name and
+ * its www while this takes one hostname. The supported way to move a bought hostname is another
+ * `attach`, which releases it from the old service itself.
+ */
+export async function domainDetach(host: string, opts: HostOpts, deps?: DomainDeps): Promise<void> {
+  const d = await domainDeps(deps)
+  const name = host.trim().toLowerCase()
+  // Without an org there is no domains list to check against (INSTA_PROJECT_ID-only CI links name
+  // none); a bring-your-own detach must keep working there, so the guard is simply not applied.
+  if (d.project.orgId) {
+    const owner = await boughtOwner(d, d.project.orgId, name)
+    if (owner) {
+      die(`${name} belongs to ${owner.domainName}, a domain bought through InstaCloud — its binding lives on the domain, not on the compute plane, so detaching it here would leave the domain still claiming it. `
+        + `Move it with \`insta domain attach ${name} --group <other service>\` (attach releases it from the current one), and see where it stands with \`insta domain status ${owner.domainName}\`.`)
+    }
+  }
+  return removeDomain(name, opts, d)
 }

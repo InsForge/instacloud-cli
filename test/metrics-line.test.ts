@@ -1,4 +1,4 @@
-// `insta metrics` series rendering. The seam exists because compute's egress/ingress series arrive
+// per-resource `metrics` series rendering. The seam exists because compute's egress/ingress series arrive
 // as raw bytes per second: printed unscaled, real traffic reads as an 8-digit number nobody can
 // size at a glance.
 import { describe, it, expect } from 'vitest'

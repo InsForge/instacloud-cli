@@ -1,4 +1,4 @@
-// `insta manifest` resource labels — the prefix names WHERE a service runs, and `insta manifest`
+// `insta agent manifest` resource labels — the prefix names WHERE a service runs, and `insta agent manifest`
 // is explicitly the agent-legible view of the project, so a wrong prefix misinforms agents too.
 //
 // The bug this locks down: the platform's resource `kind` is 'fly' for EVERY compute row ('fly' is

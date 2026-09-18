@@ -10,7 +10,7 @@
 #   (equivalent to piping this script with:  sh -s -- --agents; add -y for a hard non-interactive run)
 #
 # Flags:
-#   --agents       after installing, run `insta setup agent` (skills for Claude Code/Codex/Cursor/…)
+#   --agents       after installing, run `insta setup agent` (alias of `insta agent setup`) — installing skills for Claude Code/Codex/Cursor/…
 #   -y             non-interactive
 #   --staging      target the staging deployment (shorthand for --env staging)
 #   --env <name>   target a named deployment: prod (default) | staging
@@ -201,7 +201,7 @@ if [ "$ON_PATH" != "1" ]; then
 fi
 
 # ---- environment (--staging / --env) ----
-# MUST run before `setup agent`: that step registers the MCP server, and it derives the MCP host and
+# MUST run before `agent setup` (`setup agent` on older CLIs): that step registers the MCP server, and it derives the MCP host and
 # registration name from the persisted environment. Switching afterwards would leave the machine's
 # agents pointed at production's MCP server while the CLI talked to staging.
 if [ -n "$ENV_NAME" ]; then
@@ -211,7 +211,7 @@ if [ -n "$ENV_NAME" ]; then
     # install is still pointed at PRODUCTION. Carrying on would be the worst outcome: the canonical
     # usage is `curl … | sh && insta project create`, often run unattended by an agent, which would
     # then provision real production infrastructure believing it was staging. Exiting here also
-    # stops `setup agent` from wiring this machine's agents to the wrong environment.
+    # stops `agent setup` (`setup agent` on older CLIs) from wiring this machine's agents to the wrong environment.
     echo "error: could not select environment '$ENV_NAME' — this install is still pointed at PRODUCTION." >&2
     echo "  The installed CLI ($("$INSTALL_DIR/$BIN" --version 2>/dev/null | tail -1)) may predate \`insta env\` (needs >= 0.0.23)." >&2
     echo "  Upgrade, then retry:  insta upgrade && insta env use $ENV_NAME" >&2
@@ -223,8 +223,8 @@ fi
 # ---- agent setup (--agents) ----
 if [ "$AGENTS" = "1" ]; then
   echo
-  # `insta setup agent` prints its own "setting up coding-agent skills …" line + clean summary.
-  # CLI >= 0.0.38: bare `setup agent` FORCES prod (switching the machine if needed), so a staging
+  # `insta agent setup` (`setup agent` on older CLIs) prints its own "setting up coding-agent skills …" line + clean summary.
+  # CLI >= 0.0.38: bare `agent setup` (`setup agent` on older CLIs) FORCES prod (switching the machine if needed), so a staging
   # install must pass the environment explicitly. The persisted env already matches (env use above),
   # so --env is a no-op switch there — it just stops setup from "correcting" the machine to prod.
   # Older CLIs (a pinned INSTA_VERSION) reject the flag; ONLY that exact case (commander's
@@ -240,6 +240,9 @@ if [ "$AGENTS" = "1" ]; then
   YFLAG=""
   [ "$YES" = "1" ] && YFLAG="-y"
   SETUP_ERR="${TMPDIR:-/tmp}/insta-setup-err.$$"
+  # `setup agent` is the permanent compatibility alias of `insta agent setup` (canonical since the
+  # command re-organization). It works on every release, which is exactly what a script fetched from
+  # `main` and run against whatever binary is current needs — do not "modernize" this call.
   if "$INSTALL_DIR/$BIN" setup agent $YFLAG $SETUP_ENV_ARGS 2>"$SETUP_ERR"; then
     cat "$SETUP_ERR" >&2
   else

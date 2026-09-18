@@ -1,6 +1,6 @@
 // Thin API client over the platform control-plane. Handles bearer auth + one-shot refresh on 401.
 // 2xx (including 202 approval_required) returns the parsed body; >=400 throws ApiError.
-import { readGlobal, writeGlobal, readProject, persistAutoLink, resolveProjectLink, foreignLinkMessage, type GlobalConfig, type ProjectConfig } from './config.js'
+import { readGlobal, readPersistedGlobal, writeGlobal, readProject, persistAutoLink, resolveProjectLink, foreignLinkMessage, type GlobalConfig, type ProjectConfig } from './config.js'
 import { autoResolveProject, promptChoice, type ProjectItem } from './resolve-project.js'
 import { die } from './util.js'
 import { USER_AGENT } from './version.js'
@@ -40,9 +40,23 @@ export class ApiClient {
   get apiUrl(): string { return this.cfg.apiUrl }
   get config(): GlobalConfig { return this.cfg }
 
-  async persist(): Promise<void> { await writeGlobal(this.cfg) }
+  // `this.cfg` came from readGlobal(), which has already folded in the AMBIENT control-plane
+  // override (--api-url, INSTA_API_URL, INSTA_ENV) — so writing it back verbatim persists a
+  // debugging override as this machine's control plane. `insta logout --api-url <staging>` did
+  // exactly that: it re-pointed the stored apiUrl at staging and dropped the real login with it
+  // (readGlobal scrubs the session of a foreign deployment, and that scrubbed view was the thing
+  // being written). Only an EXPLICIT setApiUrl — a login, which chose the deployment it
+  // authenticated against — may move the stored URL; everything else keeps what is on disk.
+  async persist(): Promise<void> {
+    if (this.apiUrlExplicit) return writeGlobal(this.cfg)
+    await writeGlobal({ ...this.cfg, apiUrl: (await readPersistedGlobal()).apiUrl })
+  }
 
-  setApiUrl(url: string): void { this.cfg.apiUrl = url }
+  private apiUrlExplicit = false
+  setApiUrl(url: string): void {
+    this.cfg.apiUrl = url
+    this.apiUrlExplicit = true
+  }
 
   setSession(tokens: { accessToken: string; refreshToken: string }, user?: GlobalConfig['user']): void {
     this.cfg.accessToken = tokens.accessToken
@@ -138,7 +152,7 @@ export async function requireProject(deps: RequireProjectDeps = {}): Promise<Pro
   // flipped it again. Only an explicit `insta project link` may replace a link.
   if (r?.foreign) die(foreignLinkMessage(r.foreign))
   if (r) return r.link
-  if (agentMode()) die('agent mode requires a linked project — run `insta setup agent --project <id>`')
+  if (agentMode()) die('agent mode requires a linked project — run `insta agent setup --project <id>`')
   if (deps.autoResolve) return deps.autoResolve()
   // One command, just works: unlinked ≠ error. Resolve the project (auto when there's one,
   // one-keystroke picker when several) and persist the choice so this happens once per dir.
