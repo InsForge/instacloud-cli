@@ -28,3 +28,14 @@ test('without the env var, the link file still rules', async () => {
   await writeProject({ projectId: 'p-file', orgId: 'o', branch: 'main' }, dir)
   expect(await readProject(dir)).toMatchObject({ projectId: 'p-file' })
 })
+
+// `ProjectConfig.orgId` is typed string, but this path resolves a project with no org: sending it
+// builds `/orgs//…`, which the platform rejects as a malformed uuid rather than as a missing org.
+test('an org verb refuses an INSTA_PROJECT_ID that names no organization', async () => {
+  process.env.INSTA_PROJECT_ID = 'p-env'
+  const { resolveOrgId } = await import('../src/commands/billing.js')
+  await expect(resolveOrgId({})).rejects.toThrow()
+  process.env.INSTA_ORG_ID = 'org-env'
+  expect(await resolveOrgId({})).toBe('org-env')
+  expect(await resolveOrgId({ org: 'explicit' })).toBe('explicit')
+})
