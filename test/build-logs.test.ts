@@ -8,8 +8,8 @@ const entry = (message: string) => ({ timestamp: '2026-09-17T00:00:00Z', message
 const apiWith = (read: (path: string) => unknown): Pick<ApiClient, 'rawRequest'> => ({ rawRequest: vi.fn(async (_method, path) => ({ status: 200, body: read(path) })) })
 
 describe('build logs', () => {
-  it.each([[false, false, false], [true, false, false], [false, true, false], [true, true, false], [false, true, true], [true, true, true]])('merges duplicate steps across pages (terminal first: %s, older completion: %s, sub-ms: %s)', async (terminalFirst, olderCompletion, subMillisecond) => {
-    const finished = { digest: 'step1', name: 'RUN test', hasLogs: false, completedAt: subMillisecond ? '2026-09-17T00:00:00.000000002Z' : '2026-09-17T00:00:01Z', error: 'exit 17' }
+  it.each([[false, false, false, false], [true, false, false, false], [false, true, false, false], [true, true, false, false], [false, true, true, false], [true, true, true, false], [false, true, true, true], [true, true, true, true]])('merges duplicate steps across pages (terminal first: %s, older completion: %s, sub-ms: %s, success: %s)', async (terminalFirst, olderCompletion, subMillisecond, success) => {
+    const finished = { digest: 'step1', name: 'RUN test', hasLogs: false, completedAt: subMillisecond ? '2026-09-17T00:00:00.000000002Z' : '2026-09-17T00:00:01Z', ...(success ? {} : { error: 'exit 17' }) }
     const running = { digest: 'step1', name: 'RUN test', hasLogs: true, ...(olderCompletion ? { completedAt: subMillisecond ? '2026-09-17T00:00:00.000000001Z' : '2026-09-17T00:00:00Z', error: 'older error' } : {}) }
     const records = terminalFirst ? [finished, running] : [running, finished]
     const api = apiWith(path => {

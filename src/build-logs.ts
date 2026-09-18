@@ -74,7 +74,7 @@ export async function readBuildLogs(api: Api, projectId: string, source: BuildSo
     if (!previous) { byDigest.set(step.digest, step); continue }
     const [older, newer] = previous.completedAt && (!step.completedAt || completionKey(previous.completedAt) > completionKey(step.completedAt))
       ? [step, previous] : [previous, step]
-    byDigest.set(step.digest, { ...older, ...newer, hasLogs: older.hasLogs || newer.hasLogs, error: newer.error || older.error })
+    byDigest.set(step.digest, { ...older, ...newer, hasLogs: older.hasLogs || newer.hasLogs, error: newer.error })
   }
   const steps = [...byDigest.values()]
   follow?.emit({ ...first, steps, output: [] })
