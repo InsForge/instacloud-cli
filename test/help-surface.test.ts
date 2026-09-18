@@ -127,6 +127,14 @@ describe('group shapes', () => {
     expect(commandNames(run(['config', '--help']).stdout)).toEqual(['install-mcp', 'regions', 'autoupdate'])
     expect(commandNames(run(['billing', '--help']).stdout)).toEqual(['subscribe', 'portal', 'usage'])
   }, 30_000)
+  it('offers --delete on compute volume only — a managed database volume is its data directory', () => {
+    expect(run(['compute', 'volume', '--help']).stdout).toContain('--delete')
+    for (const type of ['redis', 'mysql', 'mongodb']) {
+      const help = run([type, 'volume', '--help']).stdout
+      expect(help, type).not.toContain('--delete')
+      expect(help, type).toContain('--size')
+    }
+  }, 30_000)
 })
 
 describe('--api-url placement', () => {
