@@ -7,7 +7,7 @@ export type BuildLogPage = {
   state: 'ready' | 'pending' | 'unsupported' | 'unavailable'
   buildState: string
   error?: string
-  steps: Array<{ digest: string; name: string; error?: string; hasLogs: boolean }>
+  steps: Array<{ digest: string; name: string; error?: string; hasLogs: boolean; completedAt?: string }>
   entries: Array<{ timestamp: string; message: string; occurrence?: number }>
   nextCursor?: string
 }
@@ -20,6 +20,12 @@ type LogTail = { cursor?: string; counts: Map<string, number> }
 type FollowState = { tails: Map<string, LogTail>; emit: (snapshot: BuildLogSnapshot) => void }
 const entryKey = (step: string, entry: BuildLogPage['entries'][number]) => createHash('sha256').update(JSON.stringify([step, entry.timestamp, entry.message])).digest('hex')
 class LogsNotReady extends Error {}
+
+// Compute emits UTC RFC3339Nano; Date.parse discards submillisecond ordering.
+function completionKey(value: string): string {
+  const [seconds, fraction = ''] = value.slice(0, -1).split('.')
+  return `${seconds}.${fraction.padEnd(9, '0')}`
+}
 
 export async function readBuildLogs(api: Api, projectId: string, source: BuildSource, buildId: string, signal = AbortSignal.timeout(30_000), follow?: FollowState): Promise<BuildLogSnapshot> {
   let bytes = 0
@@ -62,7 +68,15 @@ export async function readBuildLogs(api: Api, projectId: string, source: BuildSo
   const stepPages = await pages()
   const first = stepPages[0]!
   if (stepPages.some((page) => page.state !== first.state)) throw new LogsNotReady('build steps are temporarily unavailable')
-  const steps = stepPages.flatMap((page) => page.steps)
+  const byDigest = new Map<string, BuildLogPage['steps'][number]>()
+  for (const step of stepPages.flatMap((page) => page.steps)) {
+    const previous = byDigest.get(step.digest)
+    if (!previous) { byDigest.set(step.digest, step); continue }
+    const [older, newer] = previous.completedAt && (!step.completedAt || completionKey(previous.completedAt) > completionKey(step.completedAt))
+      ? [step, previous] : [previous, step]
+    byDigest.set(step.digest, { ...older, ...newer, hasLogs: older.hasLogs || newer.hasLogs, error: newer.error })
+  }
+  const steps = [...byDigest.values()]
   follow?.emit({ ...first, steps, output: [] })
   const output: BuildLogSnapshot['output'] = []
   for (const step of steps) {
