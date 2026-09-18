@@ -1,3 +1,4 @@
+import { archiveLogWatcher } from '../build-logs.js'
 import { resolve, join } from 'node:path'
 import { existsSync, readFileSync } from 'node:fs'
 import { ApiClient, ApiError, requireProject } from '../api.js'
@@ -111,7 +112,7 @@ export async function prepareSource(
   // time, because a platform request has to answer inside the ALB's 60s while a build runs minutes.
   // A repo-connected service refuses this with a 409 the same way it refuses an image deploy, and
   // the hint that names the FLAG rather than the API field lives here, beside the `/deploy` path.
-  const out = await deployArchive(api, projectId, ref, branch, opts, Date.now, undefined, log)
+  const out = await deployArchive(api, projectId, ref, branch, opts, Date.now, undefined, log, archiveLogWatcher(api, projectId, (text) => { (opts.json ? process.stderr : process.stdout).write(text) }))
     .catch((e) => { throw e instanceof ApiError && e.status === 409 ? new ApiError(e.status, repoConnectedHint(e.message), e.body) : e })
   if (!out) return null
   if ('failed' in out) die(out.failed)

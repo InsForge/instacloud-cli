@@ -21,6 +21,7 @@ import * as regions from './commands/regions.js'
 import * as secretsCmd from './commands/secrets.js'
 import { deploy } from './commands/deploy.js'
 import { build } from './commands/build.js'
+import { buildLogs } from './commands/build-logs.js'
 import * as computeCmd from './commands/compute.js'
 import * as githubCmd from './commands/github.js'
 import * as dbCmd from './commands/db.js'
@@ -364,6 +365,9 @@ program.command('manifest').description('Print an agent-legible view of the proj
 program.command('regions').description('List regions available for postgres/compute services').option('--json').action(guard((o) => regions.regionsList(o)))
 
 // ---- observability ----
+program.command('build-logs <build-id>').description('Read source-build output for a deploy operation or GitHub build')
+  .option('--source <source>', 'archive or github', 'archive').option('--follow', 'poll new output until the build ends').option('--json')
+  .action(guard((id, opts) => buildLogs(id, opts)))
 program.command('metrics <target> [group]').description('Service metrics (target: db|compute|redis|mysql|mongodb)')
   .option('--branch <b>').option('--from <unix>').option('--to <unix>').option('--step <s>').option('--json')
   .action(guard((target, group, o) => obs.metrics(target, group, o)))

@@ -35,6 +35,7 @@ function fakeApi(lane: unknown, extra: Record<string, unknown> = {}, objectState
         if (lane === '404-target') throw new ApiError(404, 'compute group not found: default')
         return { status: 200, body: lane }
       }
+      if (path.includes('/builds/archive/')) return { status: 200, body: { state: 'unsupported', buildState: 'succeeded', steps: [], entries: [] } }
       if (path.includes('/build-uploads/')) return { status: 200, body: { state: objectStates.length > 1 ? objectStates.shift() : objectStates[0] } }
       if (key === 'POST /projects/p1/build-uploads') return { status: 200, body: { uploadUrl: 'https://bucket.example/o?put=1', expiresAt: '2026-09-09T00:15:00Z' } }
       // The deploy is accepted as an operation; the poll answers a finished one, so the loop runs once.
