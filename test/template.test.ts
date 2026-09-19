@@ -210,6 +210,18 @@ describe('validateManifest', () => {
     // The shape a manifest authors today passes.
     expect(validateManifest({ code: 'x', version: '1', services: { a: { type: 'worker', image: 'a:1', volume: true } } })).toEqual([])
   })
+  // A worker is PORTLESS (insta-platform#490): the executor deploys it as the platform's port-0
+  // service, so a port, a healthcheck or scale-to-zero on one is a contradiction the author hears
+  // here, before the upload. Mirrors templateManifest.ts.
+  it('a worker is portless: port, healthcheck and alwaysOn:false are refused, the bare shape passes', () => {
+    const worker = (extra: Record<string, unknown>) =>
+      ({ code: 'x', version: '1', services: { bg: { type: 'worker', image: 'a:1', ...extra } } }) as unknown as TemplateManifest
+    expect(validateManifest(worker({}))).toEqual([])
+    expect(validateManifest(worker({ alwaysOn: true }))).toEqual([])
+    expect(validateManifest(worker({ port: 8080 })).join('\n')).toMatch(/a worker has no routed port/)
+    expect(validateManifest(worker({ healthcheck: '/' })).join('\n')).toMatch(/a worker has no HTTP endpoint/)
+    expect(validateManifest(worker({ alwaysOn: false })).join('\n')).toMatch(/a worker cannot scale to zero/)
+  })
 })
 
 describe('parseManifestYaml', () => {
