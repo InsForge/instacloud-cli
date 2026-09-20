@@ -185,7 +185,6 @@ describe('custom mount paths', () => {
   it('rejects paths without an attachment and conflicting deletion flags before accessing config', async () => {
     await expect(servicesAdd('compute', 'web', { mountPath: '/app/storage' })).rejects.toThrow(/requires --volume/)
     await expect(servicesAdd('postgres', 'db', { mountPath: '/app/storage', volume: '1' })).rejects.toThrow(/compute/)
-    await expect(computeVolume('web', { mountPath: '/app/storage' })).rejects.toThrow(/requires --size/)
     await expect(computeVolume('web', { mountPath: '/app/storage', delete: true })).rejects.toThrow(/cannot be combined/)
   })
 })

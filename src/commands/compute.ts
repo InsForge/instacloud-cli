@@ -653,7 +653,7 @@ export function parseCpu(raw: string): number {
 
 // Render the volume read. Pure, exported for tests (mirrors serviceListLine). Every plan may view;
 // only growth is paid — that gate is the backend's to enforce, so nothing here pre-blocks.
-export function volumeLines(name: string, volume: { sizeGib: number; mountPath: string } | null, cap: { volumeGib: number }, type: ManagedType = 'compute'): string[] {
+export function volumeLines(name: string, volume: { sizeGib: number; mountPath: string; appliedMountPath?: string | null; pending?: boolean } | null, cap: { volumeGib: number }, type: ManagedType = 'compute'): string[] {
   if (!volume) return [
     type === 'compute'
       ? `compute ${name}: no volume attached (attach one: \`insta compute volume ${name} --size <gi>\` — it mounts at /data on the next deploy)`
@@ -667,6 +667,7 @@ export function volumeLines(name: string, volume: { sizeGib: number; mountPath: 
     : 'grow with --size (grow-only); the volume cannot be deleted — remove the service instead'
   return [
     `${type} ${name}: volume ${volume.sizeGib}Gi at ${volume.mountPath}  (plan max ${cap.volumeGib}Gi)`,
+    ...(volume.pending ? [`  pending: ${volume.appliedMountPath ?? '(not deployed)'} → ${volume.mountPath}; deploy to apply (restarts the service). Application configuration is not updated automatically.`] : []),
     `  billing is actual data stored — the size is a cap, not a price; ${grow}`,
   ]
 }
@@ -674,7 +675,9 @@ export function volumeLines(name: string, volume: { sizeGib: number; mountPath: 
 // Render the PUT result. Pure, exported for tests. `attached` comes from the backend and is what
 // tells a FIRST attach (no disk yet — it mounts on the next deploy) apart from a grow (the live
 // disk was already extended); the wire size is authoritative in both cases.
-export function volumeWriteLine(name: string, body: { volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }; attached?: boolean }, type: ManagedType = 'compute'): string {
+export function volumeWriteLine(name: string, body: { volume: { sizeGib: number; mountPath: string; appliedMountPath?: string | null; pending?: boolean }; cap: { volumeGib: number }; attached?: boolean; changed?: boolean }, type: ManagedType = 'compute'): string {
+  if (body.volume.pending && !body.attached) return `${type} ${name}: mount path ${body.volume.appliedMountPath ?? '(not deployed)'} → ${body.volume.mountPath} pending — deploy to apply (restarts the service). Update application paths, variables and startup commands yourself.`
+  if (body.changed === false) return `${type} ${name}: volume unchanged at ${body.volume.mountPath}`
   if (body.attached) {
     // Only a compute service has a deploy step for the mount to wait on; a managed database has
     // no deploy, so its disk is simply mounted.
@@ -723,7 +726,6 @@ type VolumeOpts = LifeOpts & { size?: string; mountPath?: string; delete?: boole
 // ApiError messages as-is).
 export async function serviceVolume(type: ManagedType, serviceName: string | undefined, opts: VolumeOpts): Promise<void> {
   if (opts.delete && opts.mountPath !== undefined) throw new Error('--delete cannot be combined with --mount-path')
-  if (opts.mountPath !== undefined && !opts.size) throw new Error('--mount-path requires --size when attaching a volume')
   if (opts.delete && opts.size) throw new Error('--delete cannot be combined with --size (one changes the volume, the other destroys it)')
   const api = await ApiClient.load()
   const p = await requireProject()
@@ -741,14 +743,14 @@ export async function serviceVolume(type: ManagedType, serviceName: string | und
     return
   }
 
-  if (!opts.size) {
+  if (!opts.size && opts.mountPath === undefined) {
     const r = await api.request('GET', `/projects/${p.projectId}/services/${svc.id}/volume`)
     if (opts.json) return printJson(r)
     for (const line of volumeLines(svc.name, r.volume, r.cap, type)) info(line)
     return
   }
 
-  const sizeGib = parseVolumeGib(opts.size)
+  const sizeGib = opts.size === undefined ? undefined : parseVolumeGib(opts.size)
   const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${svc.id}/volume`, { sizeGib, ...(opts.mountPath !== undefined ? { mountPath: opts.mountPath } : {}) })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)

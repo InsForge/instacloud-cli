@@ -35,11 +35,9 @@ describe('volume mount path requests', () => {
 })
 
 describe('mount path validation and list display', () => {
-  it.each([undefined, ''])('rejects mount path with missing or empty size (%j) before loading configuration', async (size) => {
-    await expect(computeVolume('web', { size, mountPath: '/cache' })).rejects.toThrow('--mount-path requires --size')
-    expect(fake.load).not.toHaveBeenCalled()
-    expect(fake.request).not.toHaveBeenCalled()
-    expect(fake.rawRequest).not.toHaveBeenCalled()
+  it('sends a path-only edit without an implicit resize', async () => {
+    await computeVolume('web', { mountPath: '/cache' })
+    expect(fake.rawRequest).toHaveBeenCalledWith('PUT', '/projects/p1/services/s1/volume', { mountPath: '/cache', sizeGib: undefined })
   })
   it.each(['/app/storage', '/data', null, undefined])('shows the recorded compute volume path (%j), defaulting legacy rows to /data', (path) => {
     const line = serviceListLine({ type: 'compute', name: 'web', status: 'active', id: 's1', machine_count: 1, volume_gib: 1, volume_mount_path: path })
