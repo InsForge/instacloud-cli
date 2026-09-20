@@ -6,8 +6,10 @@ import { domainDeps, domainTarget, setDomain, checkDomain, removeDomain, type Do
 type Quote = { domainName: string; purchasable: boolean; priceCents?: number; renewalPriceCents?: number; reason?: string }
 type Order = { id: string; domainName: string; years: number; status: string; priceCents: number; renewalPriceCents: number | null; checkoutUrl?: string; failedReason: string | null }
 type HostnameState = { hostname: string; state: string; reason?: string; service: string | null }
-type Purchased = { domainName: string; status: string; hostnames: HostnameState[]; expiresAt: string | null; autorenew: boolean }
+type Purchased = { domainName: string; status: string; hostnames: HostnameState[]; expiresAt: string | null; autorenew: boolean; locked: boolean; nameservers: string[]; delegated: boolean; transferLockExpiresAt: string | null }
 type DnsRecord = { id: number; type: string; fqdn: string; answer: string; ttl: number; priority?: number; managed: boolean; hostname?: string }
+
+type RecordsOpts = { org?: string; json?: boolean }
 
 const usd = (cents: number): string => `$${(cents / 100).toFixed(2)}`
 
@@ -100,11 +102,18 @@ export async function domainAttach(host: string, opts: { branch?: string; group?
 function domainLines(d: Purchased, linked = true): string[] {
   const out = [`${d.domainName}  ${d.status}${d.expiresAt ? `  (expires ${d.expiresAt.slice(0, 10)}${d.autorenew ? ', auto-renews' : ''})` : ''}`]
   // Vacuously true for a domain with no hostnames, which is every domain until something attaches.
-  if (linked && d.hostnames.every((h) => h.state === 'failed')) {
+  // Not while delegated: the platform fails every hostname on the way out, and refuses the attach.
+  if (linked && !d.delegated && d.hostnames.every((h) => h.state === 'failed')) {
     const names = d.hostnames.map((h) => h.hostname)
     // Attaching the bought name itself re-attaches its www.
     const retry = names.includes(d.domainName) ? names.filter((h) => h !== `www.${d.domainName}`) : names
     out.push(`  nothing serving — ${(retry.length ? retry : [d.domainName]).map((h) => `insta domain attach ${h}`).join('; ')}`)
+  }
+  // The zone answers elsewhere, so nothing published here resolves and an attach is refused. The
+  // repair is a next action, so it follows `linked` like the others: under --org it would name this org.
+  if (d.delegated) {
+    out.push(`  delegated to ${d.nameservers.join(', ')}${linked ? '' : ' — attach is refused'}`)
+    if (linked) out.push(`  attach is refused until: insta domain nameservers reset ${d.domainName}`)
   }
   const w = Math.max(0, ...d.hostnames.map((x) => x.hostname.length))
   for (const h of d.hostnames) out.push(`  ${h.hostname.padEnd(w)}  ${h.state}${h.service ? ` → ${h.service}` : ''}${h.reason ? ` — ${h.reason}` : ''}`)
@@ -139,9 +148,51 @@ export async function domainStatus(name: string, opts: { org?: string; json?: bo
   for (const line of domain ? domainLines(domain, !opts.org) : orderStatusLines(order!, !opts.org)) info(line)
 }
 
-// ---- records ----
+// ---- nameservers and transferring out ----
 
-type RecordsOpts = { org?: string; json?: boolean }
+const domainPath = (orgId: string, domainName: string): string =>
+  `/orgs/${orgId}/domains/${encodeURIComponent(domainName)}`
+
+export async function domainNameserversSet(domainName: string, hosts: string[], opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
+  const nameservers = hosts.flatMap((h) => h.split(/[\s,]+/)).map((h) => h.replace(/\.$/, '')).filter(Boolean)
+  if (!nameservers.length) die("name at least one nameserver, or `insta domain nameservers reset <domain>` to restore the registrar's own")
+  const { api, orgId } = await orgDeps(opts, deps)
+  const r = await api.request<Purchased>('PUT', `${domainPath(orgId, domainName)}/nameservers`, { nameservers })
+  if (opts.json) return printJson(r)
+  for (const line of domainLines(r, !opts.org)) info(line)
+}
+
+export async function domainNameserversReset(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
+  const r = await api.request<Purchased>('DELETE', `${domainPath(orgId, domainName)}/nameservers`)
+  if (opts.json) return printJson(r)
+  for (const line of domainLines(r, !opts.org)) info(line)
+}
+
+export async function domainTransferLock(domainName: string, mode: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
+  if (mode !== 'on' && mode !== 'off') die('mode must be on or off')
+  const locked = mode === 'on'
+  const { api, orgId } = await orgDeps(opts, deps)
+  const r = await api.request<Purchased>('PATCH', domainPath(orgId, domainName), { locked })
+  if (opts.json) return printJson(r)
+  info(`${r.domainName}  transfer lock ${r.locked ? 'on' : 'off'}`)
+  if (!r.locked) {
+    // ICANN's post-registration lock outranks this one and nothing here can waive it.
+    if (r.transferLockExpiresAt && new Date(r.transferLockExpiresAt).getTime() > Date.now()) {
+      info(`  ICANN holds the registration until ${r.transferLockExpiresAt.slice(0, 10)} whatever this says`)
+    }
+    if (!opts.org) info(`  authorization code: insta domain transfer code ${r.domainName}`)
+  }
+}
+
+export async function domainTransferCode(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
+  const r = await api.request<{ authCode: string }>('POST', `${domainPath(orgId, domainName)}/auth-code`)
+  if (opts.json) return printJson(r)
+  info(r.authCode)
+}
+
+// ---- records ----
 
 export function recordLines(records: DnsRecord[]): string[] {
   const w = (pick: (r: DnsRecord) => string) => Math.max(...records.map((r) => pick(r).length))
