@@ -50,7 +50,7 @@ export function parseWatchPaths(raw: string): string[] {
   return out
 }
 
-// Build/start come from detection only: the platform's nixpacks lane fails a build whose commands differ from it.
+// Persisted commands constrain builder selection; automatic detection must leave them unset.
 // autoDeploy rides along only when switched off: a public repo 400s on autoDeploy: true.
 export function sourceBody(src: ConnectSource, c: Candidate, o: ConnectOpts) {
   const repo = src.source === 'app'
@@ -59,8 +59,6 @@ export function sourceBody(src: ConnectSource, c: Candidate, o: ConnectOpts) {
   return {
     ...repo,
     rootDir: c.rootDir,
-    buildCommand: c.buildCommand,
-    startCommand: c.startCommand,
     port: o.port !== undefined ? parsePort(o.port) : c.port,
     ...(o.repoBranch ? { branch: o.repoBranch } : {}),
     ...(o.autoDeploy === false ? { autoDeploy: false } : {}),
