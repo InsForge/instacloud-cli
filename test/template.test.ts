@@ -138,10 +138,12 @@ describe('validateManifest', () => {
   })
   // The three managed datastores are declared bare, exactly as postgres is. The platform owns their
   // image, port, sizing and credentials, so naming any of them here could only drift from the catalog.
+  // All eight bare-disallowed fields are asserted (not a subset) so a future edit that drops a name
+  // from that array ships with a red test, not a silently-narrower rule.
   it('accepts a bare managed datastore and refuses every field the platform owns', () => {
     for (const type of ['postgres', 'redis', 'mysql', 'mongodb'] as const) {
       expect(validateManifest({ code: 'x', version: '1', services: { store: { type } } } as unknown as TemplateManifest)).toEqual([])
-      for (const field of ['image', 'port', 'healthcheck', 'volume', 'spec', 'alwaysOn']) {
+      for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn']) {
         const m = { code: 'x', version: '1', services: { store: { type, [field]: true } } } as unknown as TemplateManifest
         expect(validateManifest(m).join('\n')).toContain(`a ${type} service is platform-managed and carries no ${field}`)
       }
@@ -151,6 +153,22 @@ describe('validateManifest', () => {
   it('names every accepted type when the type is wrong', () => {
     const m = { code: 'x', version: '1', services: { a: { type: 'redys', image: 'a:1' } } } as unknown as TemplateManifest
     expect(validateManifest(m).join('\n')).toContain('type must be one of web, worker, postgres, redis, mysql, mongodb')
+  })
+
+  // The env bare-shell rule generalized from postgres-only to all four managed types — the very
+  // line this task's diff moved — so it needs its own evidence for redis, mysql and mongodb, not
+  // just the pre-existing postgres-only test above.
+  it('refuses env on any managed datastore, but tolerates the exact empty shell, for every type', () => {
+    for (const type of ['postgres', 'redis', 'mysql', 'mongodb'] as const) {
+      const withEnv = { code: 'x', version: '1', services: { db: { type, env: { fixed: { A: '1' } } } } } as unknown as TemplateManifest
+      expect(validateManifest(withEnv).join('\n')).toContain(`a ${type} service is platform-managed and carries no env`)
+
+      const shell = {
+        code: 'x', version: '1',
+        services: { db: { type, env: { fixed: {}, generated: {}, platform: {}, required: {}, optional: {} } } },
+      } as unknown as TemplateManifest
+      expect(validateManifest(shell)).toEqual([])
+    }
   })
 
   it('requires web services to declare an absolute healthcheck path', () => {
