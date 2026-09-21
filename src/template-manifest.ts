@@ -22,7 +22,7 @@ export type ManifestEnv = {
 }
 
 export type ManifestService = {
-  type?: string // web | worker | postgres (postgres is declared bare: no image, port, volume or env)
+  type?: string // web | worker | postgres | redis | mysql | mongodb (the four managed types are declared bare: no image, port, volume or env)
   image?: string
   build?: string
   port?: number
@@ -59,6 +59,10 @@ export type TemplateVar = {
 const CODE_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
 export const ENV_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/
 const GENERATOR_RE = /^secret:([1-9]\d{0,2})$/
+
+// The platform provisions these and owns everything about them (platform templateManifest.ts).
+const MANAGED_TYPES = ['postgres', 'redis', 'mysql', 'mongodb']
+const MANIFEST_TYPES = ['web', 'worker', ...MANAGED_TYPES]
 
 // What counts as a digest is the PLATFORM's call, not ours: registry.ts's DIGEST regex, verbatim.
 const DIGEST = /^sha256:[a-f0-9]{64}$/
@@ -118,17 +122,17 @@ export function validateManifest(m: TemplateManifest): string[] {
   for (const name of names) {
     const svc = services[name] ?? {}
     const where = `services.${name}`
-    if (svc.type !== 'web' && svc.type !== 'worker' && svc.type !== 'postgres') {
-      problems.push(`${where}.type must be web, worker or postgres`)
+    if (!MANIFEST_TYPES.includes(String(svc.type))) {
+      problems.push(`${where}.type must be one of ${MANIFEST_TYPES.join(', ')}`)
     }
-    // A managed postgres service is BARE: the platform owns its image, port, sizing, credentials
-    // and env, so every other rule below would be asking about fields it must not carry. Mirrors
-    // the platform's own check (provisioning/templateManifest.ts) so an author hears it here.
-    if (svc.type === 'postgres') {
+    // A managed datastore is BARE: the platform owns its image, port, sizing, credentials and env,
+    // so every other rule below would be asking about fields it must not carry. Mirrors the
+    // platform's own check (provisioning/templateManifest.ts) so an author hears it here.
+    if (MANAGED_TYPES.includes(String(svc.type))) {
       const bare = svc as Record<string, unknown>
       for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn']) {
         if (bare[field] !== undefined) {
-          problems.push(`${where}.${field}: a postgres service is platform-managed and carries no ${field} — declare it bare ({ type: postgres })`)
+          problems.push(`${where}.${field}: a ${svc.type} service is platform-managed and carries no ${field} — declare it bare ({ type: ${svc.type} })`)
         }
       }
       const groups = ['fixed', 'generated', 'platform', 'required', 'optional']
@@ -138,7 +142,7 @@ export function validateManifest(m: TemplateManifest): string[] {
           && Object.entries(envShell as Record<string, unknown>).every(([g, v]) =>
             groups.includes(g) && !!v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length === 0)
         if (!emptyShell) {
-          problems.push(`${where}.env: a postgres service is platform-managed and carries no env — declare it bare ({ type: postgres })`)
+          problems.push(`${where}.env: a ${svc.type} service is platform-managed and carries no env — declare it bare ({ type: ${svc.type} })`)
         }
       }
       continue

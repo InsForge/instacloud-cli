@@ -84,11 +84,13 @@ describe('validateManifest', () => {
     const m = { ...MANIFEST, services: { app: { type: 'worker', image: 'nginx:latest' } } }
     expect(validateManifest(m).join('\n')).toMatch(/not a pin/)
   })
-  // The platform's service model (templateManifest.ts): type is web|worker, image XOR build.
+  // The platform's service model (templateManifest.ts): type is web|worker|postgres|redis|mysql|
+  // mongodb, image XOR build. `lambda` (not a managed type — see services.ts's own fixture) stands
+  // in for an unknown type so this stays about the enum + image/build rules, not the bare-datastore ones.
   it('requires a known type and exactly one of image/build', () => {
-    const m: TemplateManifest = { code: 'x', version: '1', services: { a: { type: 'redis' as any, image: 'a:1', build: 'b' }, b: {} } }
+    const m: TemplateManifest = { code: 'x', version: '1', services: { a: { type: 'lambda' as any, image: 'a:1', build: 'b' }, b: {} } }
     const problems = validateManifest(m)
-    expect(problems).toContain('services.a.type must be web, worker or postgres')
+    expect(problems).toContain('services.a.type must be one of web, worker, postgres, redis, mysql, mongodb')
     expect(problems).toContain('services.a: image and build are mutually exclusive')
     expect(problems).toContain('services.b: one of image or build is required')
   })
@@ -134,6 +136,23 @@ describe('validateManifest', () => {
     }
     expect(validateManifest(shell)).toEqual([])
   })
+  // The three managed datastores are declared bare, exactly as postgres is. The platform owns their
+  // image, port, sizing and credentials, so naming any of them here could only drift from the catalog.
+  it('accepts a bare managed datastore and refuses every field the platform owns', () => {
+    for (const type of ['postgres', 'redis', 'mysql', 'mongodb'] as const) {
+      expect(validateManifest({ code: 'x', version: '1', services: { store: { type } } } as unknown as TemplateManifest)).toEqual([])
+      for (const field of ['image', 'port', 'healthcheck', 'volume', 'spec', 'alwaysOn']) {
+        const m = { code: 'x', version: '1', services: { store: { type, [field]: true } } } as unknown as TemplateManifest
+        expect(validateManifest(m).join('\n')).toContain(`a ${type} service is platform-managed and carries no ${field}`)
+      }
+    }
+  })
+
+  it('names every accepted type when the type is wrong', () => {
+    const m = { code: 'x', version: '1', services: { a: { type: 'redys', image: 'a:1' } } } as unknown as TemplateManifest
+    expect(validateManifest(m).join('\n')).toContain('type must be one of web, worker, postgres, redis, mysql, mongodb')
+  })
+
   it('requires web services to declare an absolute healthcheck path', () => {
     const m: TemplateManifest = { code: 'x', version: '1', services: { a: { type: 'web', image: 'a:1' }, b: { type: 'web', image: 'b:1', healthcheck: 'health' } } }
     const problems = validateManifest(m)
