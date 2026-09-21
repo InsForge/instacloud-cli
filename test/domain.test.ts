@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest'
-import { domainSearch, domainBuy, domainAttach, domainCheck, domainDetach, domainList, domainStatus, domainRecordsAdd, domainRecordsList, domainRecordsRemove, domainRecordsSet, ownerOf, searchLines } from '../src/commands/domain.js'
+import { domainSearch, domainBuy, domainAttach, domainCheck, domainDetach, domainList, domainNameserversReset, domainNameserversSet, domainStatus, domainTransferCode, domainTransferLock, domainRecordsAdd, domainRecordsList, domainRecordsRemove, domainRecordsSet, ownerOf, searchLines } from '../src/commands/domain.js'
 import type { DomainDeps } from '../src/commands/compute.js'
 
 const services = [
@@ -317,5 +317,139 @@ describe('domain records', () => {
     expect(out()).toContain('removed record 103 from myapp.com')
     await domainRecordsRemove('myapp.com', '103', { json: true }, d)
     expect(JSON.parse(stdout.at(-1)!)).toEqual({ ok: true })
+  })
+})
+
+const bought = (over: Record<string, unknown> = {}) => ({
+  domainName: 'myapp.com',
+  status: 'active',
+  hostnames: [{ hostname: 'www.myapp.com', state: 'active', service: 'web' }],
+  expiresAt: null,
+  autorenew: true,
+  locked: true,
+  nameservers: [],
+  delegated: false,
+  transferLockExpiresAt: null,
+  ...over,
+})
+
+describe('domain nameservers', () => {
+  it('sends one list however the nameservers were separated, trailing dots and all', async () => {
+    const { deps: d, calls } = deps({ '/nameservers': bought() })
+    await domainNameserversSet('myapp.com', ['kate.ns.cloudflare.com.,rob.ns.cloudflare.com'], {}, d)
+    expect(calls[0]).toMatchObject({
+      method: 'PUT',
+      path: '/orgs/org1/domains/myapp.com/nameservers',
+      body: { nameservers: ['kate.ns.cloudflare.com', 'rob.ns.cloudflare.com'] },
+    })
+  })
+
+  it('refuses an empty list rather than sending one, and names the way back', async () => {
+    const { deps: d, calls } = deps({})
+    await expect(domainNameserversSet('myapp.com', ['  '], {}, d)).rejects.toThrow('exit 1')
+    expect(calls).toEqual([])
+    expect(stderr.join('')).toContain('nameservers reset')
+  })
+
+  // The answer is the domain, so the hostnames it just took down are printed by the one renderer
+  // `list` and `status` already use — reason included.
+  it('prints what the move took down, and why an attach is now refused', async () => {
+    const answer = bought({
+      nameservers: ['kate.ns.cloudflare.com'],
+      delegated: true,
+      hostnames: [{ hostname: 'www.myapp.com', state: 'failed', service: 'web', reason: 'myapp.com answers from kate.ns.cloudflare.com' }],
+    })
+    const { deps: d } = deps({ '/nameservers': answer })
+    await domainNameserversSet('myapp.com', ['kate.ns.cloudflare.com'], {}, d)
+    expect(out()).toContain('delegated to kate.ns.cloudflare.com')
+    expect(out()).toContain('insta domain nameservers reset myapp.com')
+    expect(out()).toContain('www.myapp.com  failed → web — myapp.com answers from kate.ns.cloudflare.com')
+  })
+
+  // The platform fails every hostname on the way out, so the "nothing serving" retry would fire on
+  // the success path and name an attach the same answer says is refused.
+  it('does not offer the attach it just made impossible', async () => {
+    const answer = bought({
+      nameservers: ['kate.ns.cloudflare.com'],
+      delegated: true,
+      hostnames: [{ hostname: 'www.myapp.com', state: 'failed', service: 'web' }],
+    })
+    const { deps: d } = deps({ '/nameservers': answer })
+    await domainNameserversSet('myapp.com', ['kate.ns.cloudflare.com'], {}, d)
+    expect(out()).not.toContain('insta domain attach')
+    expect(out()).toContain('insta domain nameservers reset myapp.com')
+  })
+
+  // `--org` names an org the printed commands would not act on, so they are dropped, not rewritten.
+  it('drops the follow-up commands when --org names another org', async () => {
+    const answer = bought({ nameservers: ['kate.ns.cloudflare.com'], delegated: true, hostnames: [] })
+    const { deps: d } = deps({ '/nameservers': answer })
+    await domainNameserversSet('myapp.com', ['kate.ns.cloudflare.com'], { org: 'org2' }, d)
+    expect(out()).toContain('delegated to kate.ns.cloudflare.com — attach is refused')
+    expect(out()).not.toContain('insta domain nameservers reset')
+  })
+
+  it('restores the registrar own, and then says nothing about being delegated', async () => {
+    const { deps: d, calls } = deps({ '/nameservers': bought() })
+    await domainNameserversReset('myapp.com', {}, d)
+    expect(calls[0]).toMatchObject({ method: 'DELETE', path: '/orgs/org1/domains/myapp.com/nameservers' })
+    expect(out()).not.toContain('delegated to')
+  })
+})
+
+describe('domain transfer', () => {
+  it('opens the lock and points at the code, naming ICANN while it still holds the registration', async () => {
+    const held = new Date(Date.now() + 86_400_000).toISOString()
+    const { deps: d, calls } = deps({ '/domains/myapp.com': bought({ locked: false, transferLockExpiresAt: held }) })
+    await domainTransferLock('myapp.com', 'off', {}, d)
+    expect(calls[0]).toMatchObject({ method: 'PATCH', path: '/orgs/org1/domains/myapp.com', body: { locked: false } })
+    expect(out()).toContain('transfer lock off')
+    expect(out()).toContain(`ICANN holds the registration until ${held.slice(0, 10)}`)
+    expect(out()).toContain('insta domain transfer code myapp.com')
+  })
+
+  // The platform never clears the date, so an old domain always carries a past one.
+  it('does not announce an ICANN lock that lapsed', async () => {
+    const { deps: d } = deps({ '/domains/myapp.com': bought({ locked: false, transferLockExpiresAt: '2020-01-01T00:00:00.000Z' }) })
+    await domainTransferLock('myapp.com', 'off', {}, d)
+    expect(out()).not.toContain('ICANN holds')
+    expect(out()).toContain('insta domain transfer code myapp.com')
+  })
+
+  it('drops the code hint when --org names another org', async () => {
+    const { deps: d } = deps({ '/domains/myapp.com': bought({ locked: false }) })
+    await domainTransferLock('myapp.com', 'off', { org: 'org2' }, d)
+    expect(out()).toContain('transfer lock off')
+    expect(out()).not.toContain('insta domain transfer code')
+  })
+
+  it('closes it again, and then points at neither', async () => {
+    const held = new Date(Date.now() + 86_400_000).toISOString()
+    const { deps: d, calls } = deps({ '/domains/myapp.com': bought({ locked: true, transferLockExpiresAt: held }) })
+    await domainTransferLock('myapp.com', 'on', {}, d)
+    expect(calls[0]).toMatchObject({ body: { locked: true } })
+    expect(out()).toContain('transfer lock on')
+    expect(out()).not.toContain('transfer code')
+    expect(out()).not.toContain('ICANN holds')
+  })
+
+  it('refuses a mode that is not on or off, and sends nothing', async () => {
+    const { deps: d, calls } = deps({})
+    await expect(domainTransferLock('myapp.com', 'yes', {}, d)).rejects.toThrow('exit 1')
+    expect(calls).toEqual([])
+  })
+
+  it('reads the code with a POST, so an agent credential is refused rather than shown it', async () => {
+    const { deps: d, calls } = deps({ '/auth-code': { authCode: 'EPP-123' } })
+    await domainTransferCode('myapp.com', {}, d)
+    expect(calls[0]).toMatchObject({ method: 'POST', path: '/orgs/org1/domains/myapp.com/auth-code' })
+    expect(out()).toContain('EPP-123')
+  })
+
+  // The one new shape that is not a purchased domain.
+  it('answers --json with the code object, not the domain', async () => {
+    const { deps: d } = deps({ '/auth-code': { authCode: 'EPP-123' } })
+    await domainTransferCode('myapp.com', { json: true }, d)
+    expect(JSON.parse(out())).toEqual({ authCode: 'EPP-123' })
   })
 })
