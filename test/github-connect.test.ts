@@ -40,12 +40,11 @@ describe('pickCandidate', () => {
 
 describe('sourceBody', () => {
   const app = { source: 'app' as const, installationId: 7, repoId: 42, owner: 'acme', repo: 'app' }
-  it('sends the picked directory and its detected config — no name, no env, no branch unless asked', () => {
-    expect(sourceBody(app, cand({ rootDir: 'apps/web' }), {})).toEqual({ installationId: 7, repoId: 42, owner: 'acme', repo: 'app', rootDir: 'apps/web', buildCommand: 'npm run build', startCommand: 'npm start', port: 3000 })
+  it('sends the detected directory and port without pinning automatic build/start commands', () => {
+    expect(sourceBody(app, cand({ rootDir: 'apps/web' }), {})).toEqual({ installationId: 7, repoId: 42, owner: 'acme', repo: 'app', rootDir: 'apps/web', port: 3000 })
   })
   it('a public repo sends owner/repo flagged public, never installation ids', () => {
-    expect(sourceBody({ source: 'public', owner: 'acme', repo: 'app' }, cand(), {})).toMatchObject({ public: true, owner: 'acme', repo: 'app' })
-    expect(sourceBody({ source: 'public', owner: 'acme', repo: 'app' }, cand(), {})).not.toHaveProperty('installationId')
+    expect(sourceBody({ source: 'public', owner: 'acme', repo: 'app' }, cand(), {})).toEqual({ public: true, owner: 'acme', repo: 'app', rootDir: null, port: 3000 })
   })
   it('--repo-branch, --no-auto-deploy and --watch-paths ride along only when given', () => {
     expect(sourceBody(app, cand(), { repoBranch: 'release', autoDeploy: false })).toMatchObject({ branch: 'release', autoDeploy: false })
