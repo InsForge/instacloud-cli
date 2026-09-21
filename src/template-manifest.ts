@@ -28,6 +28,7 @@ export type ManifestService = {
   port?: number
   healthcheck?: string
   volume?: boolean // needs a /data disk; the platform owns the size
+  alwaysOn?: boolean // idle mode; undeclared = the platform default (always-on for compute)
   env?: ManifestEnv
 }
 
@@ -155,6 +156,13 @@ export function validateManifest(m: TemplateManifest): string[] {
     }
     if (svc.port !== undefined && (!Number.isInteger(svc.port) || svc.port < 1 || svc.port > 65535)) {
       problems.push(`${where}: port must be an integer between 1 and 65535, got: ${svc.port}`)
+    }
+    // A worker is PORTLESS: the platform deploys it as its own port-0 service, so nothing is routed
+    // to it and nothing probes it. The server's three refusals, said here before the upload.
+    if (svc.type === 'worker') {
+      if (svc.port !== undefined) problems.push(`${where}.port: a worker has no routed port — remove it (a worker is portless; declare type: web to serve HTTP)`)
+      if (svc.healthcheck !== undefined) problems.push(`${where}.healthcheck: a worker has no HTTP endpoint to probe — its health is the machine's state; remove it (or declare type: web)`)
+      if (svc.alwaysOn === false) problems.push(`${where}.alwaysOn: a worker cannot scale to zero — nothing is routed to it, so nothing would wake it; remove alwaysOn or set it true`)
     }
     if (svc.type === 'web' && !svc.healthcheck) problems.push(`${where}: web services must declare a healthcheck path`)
     if (svc.healthcheck && !String(svc.healthcheck).startsWith('/')) problems.push(`${where}: healthcheck must be an absolute path (start with /)`)
