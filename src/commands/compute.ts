@@ -2057,3 +2057,20 @@ export function hostPatternFor(host: string, suffixes?: readonly string[]): stri
   const parts = host.split('.')
   return [parts[0], '*', ...parts.slice(2)].join('.')
 }
+
+export async function computeStartCommand(serviceName: string | undefined, opts: Opts & { set?: string; clear?: boolean }): Promise<void> {
+  if (opts.set !== undefined && opts.clear) throw new Error('use --set or --clear, not both')
+  const api = await ApiClient.load()
+  const p = await requireProject()
+  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(opts.branch ?? p.branch)}`)
+  const svc = resolveSoleService(services, 'compute', serviceName)
+  if (opts.set === undefined && !opts.clear) {
+    if (opts.json) return printJson({ service: svc })
+    info((svc as { start_command?: string | null }).start_command || '(image default)')
+    return
+  }
+  const res = await api.rawRequest('PATCH', `/projects/${p.projectId}/services/${svc.id}`, { startCommand: opts.clear ? '' : opts.set })
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body)
+  info('Startup command saved; deploy or restart after staging the volume path and variables.')
+}

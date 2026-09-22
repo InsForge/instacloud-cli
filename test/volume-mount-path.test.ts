@@ -6,7 +6,7 @@ vi.mock('../src/api.js', async (original) => ({
   requireProject: async () => ({ projectId: 'p1', branch: 'main' }),
 }))
 vi.mock('../src/util.js', async (original) => ({ ...await original<typeof import('../src/util.js')>(), info: vi.fn(), printJson: vi.fn() }))
-import { computeVolume } from '../src/commands/compute.js'
+import { computeVolume, computeStartCommand } from '../src/commands/compute.js'
 import { servicesAdd, serviceAddedLine, serviceListLine } from '../src/commands/services.js'
 beforeEach(() => {
   fake.request.mockReset(); fake.rawRequest.mockReset(); fake.load.mockReset().mockResolvedValue(fake)
@@ -47,5 +47,25 @@ describe('mount path validation and list display', () => {
     const line = serviceListLine({ type: 'compute', name: 'web', status: 'active', id: 's1', machine_count: 1, volume_gib: null, volume_mount_path: '/cache' })
     expect(line).not.toContain('vol ')
     expect(line).not.toContain('/cache')
+  })
+})
+
+describe('startup command staging', () => {
+  it('saves a command without deploying and honors branch selection', async () => {
+    await computeStartCommand('web', { set: 'exec postgres -D /new/pg', branch: 'preview' })
+    expect(fake.request).toHaveBeenCalledWith('GET', '/projects/p1/services?branch=preview')
+    expect(fake.rawRequest).toHaveBeenCalledTimes(1)
+    expect(fake.rawRequest).toHaveBeenCalledWith('PATCH', '/projects/p1/services/s1', { startCommand: 'exec postgres -D /new/pg' })
+  })
+  it('clears to the image default', async () => {
+    await computeStartCommand('web', { clear: true })
+    expect(fake.rawRequest).toHaveBeenCalledWith('PATCH', '/projects/p1/services/s1', { startCommand: '' })
+  })
+  it('reads without mutation and rejects conflicting options before loading credentials', async () => {
+    await computeStartCommand('web', {})
+    expect(fake.rawRequest).not.toHaveBeenCalled()
+    fake.load.mockClear()
+    await expect(computeStartCommand('web', { set: 'x', clear: true })).rejects.toThrow('not both')
+    expect(fake.load).not.toHaveBeenCalled()
   })
 })
