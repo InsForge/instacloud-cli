@@ -20,6 +20,7 @@ import * as services from './commands/services.js'
 import { resolveServiceArgs, serviceArgsDeps } from './resolve-service.js'
 import * as regions from './commands/regions.js'
 import * as secretsCmd from './commands/secrets.js'
+import * as cronCmd from './commands/cron.js'
 import { deploy } from './commands/deploy.js'
 import { build } from './commands/build.js'
 import { buildLogs } from './commands/build-logs.js'
@@ -190,6 +191,65 @@ sec.command('sources').description('List service credential sources available fo
   .action(guard((o) => secretsCmd.secretsSources(o)))
 sec.command('tree').description('Show secrets as project → branch → service → secrets').option('--json')
   .action(guard((o) => secretsCmd.secretsTree(o)))
+
+// ---- cron (branch-scoped schedules that send one HTTP request) ----
+// Every expression is evaluated in UTC and every time printed is UTC: a cron pinned to UTC does not
+// keep a fixed local time, so a localised column would quietly lie across a DST boundary.
+const cron = program.command('cron').description('Schedule HTTP calls on a branch — a compute service of the project, or an external URL. Expressions and every printed time are UTC')
+// The repeatable --header collector, declared once: commander needs the same reducer on create and
+// edit, and two copies is how they drift apart.
+const headerOption = (c: Command): Command => c.option(
+  '--header <name=value>',
+  'request header, repeatable (split on the first = so a value may contain one). Values are encrypted at rest and are NEVER returned by a read — `cron show` lists header names only',
+  (v: string, prev: string[]) => [...prev, v], [] as string[],
+)
+cron.command('list').description('List the branch\'s cron jobs: state, expression, next UTC run and target')
+  .option('--branch <branch>', 'branch (default: current)').option('--json')
+  .action(guard((o) => cronCmd.cronList(o)))
+headerOption(cron.command('create <name> <expression>'))
+  .description('Create a cron job. The expression is a 5-field cron expression in UTC (quote it — the shell eats the *). Name a target with --url or --service')
+  .option('--url <url>', 'external target: an absolute http(s) URL')
+  .option('--service <name>', "internal target: a compute service on this branch — the worker resolves its live route at send time, so a redeploy can't leave the job firing at a dead host")
+  .option('--path <path>', 'request path on the --service target, leading slash (default /)')
+  .option('--method <method>', 'GET or POST (default GET, or POST when --body is given)')
+  .option('--body <json>', 'request body — POST only')
+  .option('--timeout <ms>', 'request timeout, 1000..300000 ms; excludes cold start (the wake is timed separately)')
+  .option('--branch <branch>', 'branch (default: current)').option('--json')
+  .action(guard((name, expression, o) => cronCmd.cronCreate(name, expression, o)))
+cron.command('show <name>').description('Show one cron job: schedule, next UTC run, target, request (header NAMES only — values are write-only), retry policy and the revision an edit is conditioned on')
+  .option('--branch <branch>', 'branch (default: current)').option('--json')
+  .action(guard((name, o) => cronCmd.cronShow(name, o)))
+headerOption(cron.command('edit <name>'))
+  .description('Change a cron job. The request is REPLACED, not merged (header values cannot be read back, so anything --header does not re-supply is dropped — the command names what it drops). Conditioned on the revision just read: a concurrent edit fails rather than clobbering')
+  .option('--expression <expr>', 'new 5-field cron expression (UTC; quote it)')
+  .option('--name <new-name>', 'rename the job')
+  .option('--url <url>', 'external target: an absolute http(s) URL')
+  .option('--service <name>', 'internal target: a compute service on this branch')
+  .option('--path <path>', 'request path on the --service target (default: the path it already had)')
+  .option('--method <method>', 'GET or POST')
+  .option('--body <json>', 'request body — POST only')
+  .option('--timeout <ms>', 'request timeout, 1000..300000 ms')
+  .option('--branch <branch>', 'branch (default: current)').option('--json')
+  .action(guard((name, o) => cronCmd.cronEdit(name, o)))
+cron.command('pause <name>').description('Stop a cron job firing, keeping its definition and history')
+  .option('--branch <branch>', 'branch (default: current)').option('--json')
+  .action(guard((name, o) => cronCmd.cronPause(name, o)))
+cron.command('resume <name>').description('Let a paused cron job fire again from the next tick')
+  .option('--branch <branch>', 'branch (default: current)').option('--json')
+  .action(guard((name, o) => cronCmd.cronResume(name, o)))
+cron.command('delete <name>').description('Delete a cron job — it stops firing immediately; its run history is retained')
+  .option('-y, --yes', 'required: confirm the deletion (there is no prompt, in a terminal or out of one)')
+  .option('--branch <branch>', 'branch (default: current)').option('--json')
+  .action(guard((name, o) => cronCmd.cronDelete(name, o)))
+cron.command('run <name>').description('Trigger one run now. An EXTRA execution — the next scheduled run still happens. Sent with an Idempotency-Key minted once, so a retried request cannot fire the job twice')
+  .option('--branch <branch>', 'branch (default: current)').option('--json')
+  .action(guard((name, o) => cronCmd.cronRun(name, o)))
+cron.command('runs <name>').description('Run history, most recent first: status, trigger, attempts, the wake/request split (a slow wake is the platform, a slow request is your endpoint) and the HTTP status')
+  .option('--limit <n>', 'number of runs, 1..100 (default 20)')
+  .option('--branch <branch>', 'branch (default: current)').option('--json')
+  .action(guard((name, o) => cronCmd.cronRuns(name, o)))
+cron.command('preview <expression>').description('Validate an expression and print its next five UTC fire times — answered by the same parser the scheduler uses. Exits 1 when the expression is invalid')
+  .option('--json').action(guard((expression, o) => cronCmd.cronPreview(expression, o)))
 
 // ---- domain (bought here, or bring your own; hostnames on compute services; DNS of bought zones) ----
 const dom = program.command('domain').description('Domains: buy through InstaCloud or bring your own — attach / check / detach hostnames on compute services; DNS records of bought domains')

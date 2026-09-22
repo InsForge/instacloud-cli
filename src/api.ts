@@ -30,7 +30,12 @@ type RawResult = { status: number; body: any }
 // `signal` bounds one request: a poll loop hands in the time it has left, so a stalled endpoint
 // cannot hold the CLI past the caller's own deadline.
 // evidence: false sends the bearer alone; the /me probe at login uses it before the key's kind is known
-type RequestOpts = { auth?: boolean; signal?: AbortSignal; evidence?: boolean } & AgentScope
+// `headers` carries the per-request protocol headers some routes demand — If-Match (the revision a
+// PATCH is conditioned on) and Idempotency-Key (what keeps a retried trigger from firing a cron job
+// twice). They belong to the CALL, not to the client, and the 401 refresh below replays them
+// unchanged: a replay that minted a fresh Idempotency-Key would be the duplicate execution the
+// header exists to prevent. Auth and agent evidence are applied after, so neither can be overridden.
+type RequestOpts = { auth?: boolean; signal?: AbortSignal; evidence?: boolean; headers?: Record<string, string> } & AgentScope
 
 export class ApiClient {
   constructor(private cfg: GlobalConfig, private readonly fetchImpl: typeof fetch = fetch) {}
@@ -103,6 +108,7 @@ export class ApiClient {
 
   private async fetch(method: string, path: string, body: unknown, auth: boolean, scope: RequestOpts = {}): Promise<RawResult> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Insta-Hints': '1', 'User-Agent': USER_AGENT }
+    if (scope.headers) Object.assign(headers, scope.headers)
     if (auth && this.cfg.accessToken) headers.Authorization = `Bearer ${this.cfg.accessToken}`
     const payload = body === undefined ? undefined : JSON.stringify(body)
     if (auth && scope.evidence !== false) Object.assign(headers, await agentHeaders(this, method, path, payload ?? '', scope))
