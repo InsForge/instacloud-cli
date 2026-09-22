@@ -2,7 +2,7 @@
 // 2xx (including 202 approval_required) returns the parsed body; >=400 throws ApiError.
 import { readGlobal, readPersistedGlobal, writeGlobal, readProject, persistAutoLink, resolveProjectLink, foreignLinkMessage, type GlobalConfig, type ProjectConfig } from './config.js'
 import { autoResolveProject, promptChoice, type ProjectItem } from './resolve-project.js'
-import { die } from './util.js'
+import { approvalHint, die } from './util.js'
 import { USER_AGENT } from './version.js'
 import { agentHeaders, agentMode, type AgentScope } from './agent.js'
 
@@ -12,7 +12,8 @@ export class ApiError extends Error {
   constructor(public status: number, msg: string, public body?: any) { super(msg); this.name = 'ApiError' }
 }
 export class AgentApprovalRequired extends Error {
-  constructor(public body: any) { super(body.message ?? `approval required: ${body.approvalId}`) }
+  // The platform's message already carries the review link; a runtime that sends none gets the CLI's own hint.
+  constructor(public body: any) { super(body.message ?? approvalHint(body)) }
 }
 
 // Store a durable insta_ key as the credential: set it as the bearer and drop any refresh token (an insta_ key never rotates; a stale one would leak to /auth/refresh on a 401).

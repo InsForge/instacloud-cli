@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { CliExit, die, serializeEnv, handleApproval, nextActionsLines, isWebUrl, openUrl, openUrlSpawn } from '../src/util.js'
+import { CliExit, die, serializeEnv, handleApproval, approvalHint, nextActionsLines, isWebUrl, openUrl, openUrlSpawn } from '../src/util.js'
 
 // The OAuth authorize URL is hostile to BOTH Windows shells: cmd.exe splits an unquoted line at
 // every bare `&` (the tester-reported "querystring must have required property 'redirect'"), and
@@ -117,6 +117,18 @@ describe('handleApproval', () => {
     expect(stderr.join('')).toMatch(/approval required for deploy — run: insta agent approvals approve a1/)
     expect(stdout.join('')).toBe('')
     expect(process.exitCode).toBe(2)
+  })
+
+  it('202 with a console link: the page comes before the command, and the json envelope keeps it', () => {
+    const linked = { status: 202, body: { ...gated.body, url: 'https://console.test/projects/p?review=a1' } }
+    expect(handleApproval(linked, true)).toBe(true)
+    expect(stderr.join('')).toBe('approval required for deploy — review it at https://console.test/projects/p?review=a1 or run: insta agent approvals approve a1\n')
+    expect(JSON.parse(stdout.join('')).url).toBe('https://console.test/projects/p?review=a1')
+  })
+
+  // An older platform (or the OSS runtime) sends no url: the command alone, unchanged.
+  it('202 without a link: the command alone', () => {
+    expect(approvalHint(gated.body)).toBe('approval required for deploy — run: insta agent approvals approve a1')
   })
 
   it('202 + json: raw envelope on stdout, hint still on stderr, exit code 2', () => {

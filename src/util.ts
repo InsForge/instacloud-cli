@@ -208,11 +208,20 @@ export function info(msg: string): void {
 export function handleApproval(res: { status: number; body: any }, json?: boolean): boolean {
   if (res.status === 202 && res.body?.status === 'approval_required') {
     if (json) printJson(res.body)
-    process.stderr.write(`approval required for ${res.body.action} — run: insta agent approvals approve ${res.body.approvalId}\n`)
+    process.stderr.write(`${approvalHint(res.body)}\n`)
     process.exitCode = 2
     return true
   }
   return false
+}
+
+// The one-line hint for a gated request. `url` is the console page for THIS request, built by the
+// platform (only it knows which console fronts it — prod, staging, self-hosted); it comes first
+// because a click is the fastest route to approval and terminals link it. An older platform or the
+// OSS runtime sends no url, and the CLI command alone still stands.
+export function approvalHint(body: { action?: string; approvalId?: string; url?: string }): string {
+  const review = body.url ? `review it at ${body.url} or ` : ''
+  return `approval required for ${body.action} — ${review}run: insta agent approvals approve ${body.approvalId}`
 }
 
 export type NextAction = { op: string; reason: string; args?: Record<string, unknown>; gated?: boolean }
