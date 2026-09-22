@@ -16,7 +16,7 @@ const run = (args: string[], extraEnv: NodeJS.ProcessEnv = {}) =>
 const VISIBLE = [
   'login', 'logout', 'status',
   'org', 'project', 'branch',
-  'service', 'secrets', 'domain', 'compute', 'postgres', 'redis', 'mysql', 'mongodb', 'storage',
+  'service', 'secrets', 'cron', 'domain', 'compute', 'postgres', 'redis', 'mysql', 'mongodb', 'storage',
   'build', 'deploy', 'run', 'template',
   'billing', 'agent', 'config',
   'feedback', 'upgrade',
@@ -45,7 +45,7 @@ function commandNames(help: string): string[] {
 }
 
 describe('top-level surface', () => {
-  it('lists exactly the designed 24 commands, in order', () => {
+  it('lists exactly the designed 25 commands, in order', () => {
     const r = run(['--help'])
     expect(r.status).toBe(0)
     expect(commandNames(r.stdout)).toEqual(VISIBLE)
