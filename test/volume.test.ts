@@ -185,7 +185,26 @@ describe('custom mount paths', () => {
   it('rejects paths without an attachment and conflicting deletion flags before accessing config', async () => {
     await expect(servicesAdd('compute', 'web', { mountPath: '/app/storage' })).rejects.toThrow(/requires --volume/)
     await expect(servicesAdd('postgres', 'db', { mountPath: '/app/storage', volume: '1' })).rejects.toThrow(/compute/)
-    await expect(computeVolume('web', { mountPath: '/app/storage' })).rejects.toThrow(/requires --size/)
     await expect(computeVolume('web', { mountPath: '/app/storage', delete: true })).rejects.toThrow(/cannot be combined/)
+  })
+})
+
+describe('pending volume output', () => {
+  const cap = { volumeGib: 50 }
+  it('confirms growth as well as a pending remount', () => {
+    const line = volumeWriteLine('web', { volume: { sizeGib: 20, mountPath: '/new', appliedMountPath: '/data', pending: true }, cap, changed: true, attached: false })
+    expect(line).toContain('grown to 20Gi')
+    expect(line).toContain('/data → /new pending')
+  })
+  it('does not call a first attachment a remount', () => {
+    const volume = { sizeGib: 1, mountPath: '/data', appliedMountPath: null, pending: true }
+    expect(volumeWriteLine('web', { volume, cap, attached: true })).toContain('1Gi attached')
+    expect(volumeLines('web', volume, cap).join(' ')).not.toContain('pending:')
+    expect(volumeWriteLine('web', { volume, cap, changed: false })).toContain('unchanged: 1Gi')
+  })
+  it('shows actual path edits and does not claim path-only growth', () => {
+    const volume = { sizeGib: 1, mountPath: '/new', appliedMountPath: '/data', pending: true }
+    expect(volumeLines('web', volume, cap).join(' ')).toContain('/data → /new')
+    expect(volumeWriteLine('web', { volume, cap, changed: true }, 'compute', false)).not.toContain('grown')
   })
 })

@@ -653,7 +653,7 @@ export function parseCpu(raw: string): number {
 
 // Render the volume read. Pure, exported for tests (mirrors serviceListLine). Every plan may view;
 // only growth is paid — that gate is the backend's to enforce, so nothing here pre-blocks.
-export function volumeLines(name: string, volume: { sizeGib: number; mountPath: string } | null, cap: { volumeGib: number }, type: ManagedType = 'compute'): string[] {
+export function volumeLines(name: string, volume: { sizeGib: number; mountPath: string; appliedMountPath?: string | null; pending?: boolean } | null, cap: { volumeGib: number }, type: ManagedType = 'compute'): string[] {
   if (!volume) return [
     type === 'compute'
       ? `compute ${name}: no volume attached (attach one: \`insta compute volume ${name} --size <gi>\` — it mounts at /data on the next deploy)`
@@ -667,6 +667,7 @@ export function volumeLines(name: string, volume: { sizeGib: number; mountPath: 
     : 'grow with --size (grow-only); the volume cannot be deleted — remove the service instead'
   return [
     `${type} ${name}: volume ${volume.sizeGib}Gi at ${volume.mountPath}  (plan max ${cap.volumeGib}Gi)`,
+    ...(volume.pending && volume.appliedMountPath != null ? [`  pending: ${volume.appliedMountPath ?? '(not deployed)'} → ${volume.mountPath}; deploy to apply (restarts the service). Application configuration is not updated automatically.`] : []),
     `  billing is actual data stored — the size is a cap, not a price; ${grow}`,
   ]
 }
@@ -674,7 +675,10 @@ export function volumeLines(name: string, volume: { sizeGib: number; mountPath: 
 // Render the PUT result. Pure, exported for tests. `attached` comes from the backend and is what
 // tells a FIRST attach (no disk yet — it mounts on the next deploy) apart from a grow (the live
 // disk was already extended); the wire size is authoritative in both cases.
-export function volumeWriteLine(name: string, body: { volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }; attached?: boolean }, type: ManagedType = 'compute'): string {
+export function volumeWriteLine(name: string, body: { volume: { sizeGib: number; mountPath: string; appliedMountPath?: string | null; pending?: boolean }; cap: { volumeGib: number }; attached?: boolean; changed?: boolean }, type: ManagedType = 'compute', sizeRequested = true): string {
+  const pending = body.volume.pending && body.volume.appliedMountPath != null
+    ? `; mount path ${body.volume.appliedMountPath} → ${body.volume.mountPath} pending — deploy or restart to apply. Update application paths and startup commands yourself.` : ''
+  if (body.changed === false && !body.attached) return `${type} ${name}: volume unchanged: ${body.volume.sizeGib}Gi at ${body.volume.mountPath}${pending}`
   if (body.attached) {
     // Only a compute service has a deploy step for the mount to wait on; a managed database has
     // no deploy, so its disk is simply mounted.
@@ -683,7 +687,7 @@ export function volumeWriteLine(name: string, body: { volume: { sizeGib: number;
       : `mounts at ${body.volume.mountPath}`
     return `${type} ${name}: volume ${body.volume.sizeGib}Gi attached — ${mounts}  (plan max ${body.cap.volumeGib}Gi)`
   }
-  return `${type} ${name}: volume grown to ${body.volume.sizeGib}Gi at ${body.volume.mountPath}  (plan max ${body.cap.volumeGib}Gi)`
+  return `${type} ${name}: volume ${sizeRequested ? 'grown to ' : ''}${body.volume.sizeGib}Gi at ${body.volume.mountPath}  (plan max ${body.cap.volumeGib}Gi)${pending}`
 }
 
 // Render the DELETE result. Pure, exported for tests. Deleting is the only way off the volume
@@ -722,8 +726,8 @@ type VolumeOpts = LifeOpts & { size?: string; mountPath?: string; delete?: boole
 // 403/400 messages carry the upgrade hints and must reach the user verbatim (the guard prints
 // ApiError messages as-is).
 export async function serviceVolume(type: ManagedType, serviceName: string | undefined, opts: VolumeOpts): Promise<void> {
+  if (opts.size !== undefined && !opts.size.trim()) throw new Error('--size must not be empty; specify a whole Gi value or omit --size for a path-only edit')
   if (opts.delete && opts.mountPath !== undefined) throw new Error('--delete cannot be combined with --mount-path')
-  if (opts.mountPath !== undefined && !opts.size) throw new Error('--mount-path requires --size when attaching a volume')
   if (opts.delete && opts.size) throw new Error('--delete cannot be combined with --size (one changes the volume, the other destroys it)')
   const api = await ApiClient.load()
   const p = await requireProject()
@@ -741,18 +745,22 @@ export async function serviceVolume(type: ManagedType, serviceName: string | und
     return
   }
 
-  if (!opts.size) {
+  if (!opts.size && opts.mountPath === undefined) {
     const r = await api.request('GET', `/projects/${p.projectId}/services/${svc.id}/volume`)
     if (opts.json) return printJson(r)
     for (const line of volumeLines(svc.name, r.volume, r.cap, type)) info(line)
     return
   }
 
-  const sizeGib = parseVolumeGib(opts.size)
+  if (opts.mountPath !== undefined && opts.size === undefined) {
+    const current = await api.request('GET', `/projects/${p.projectId}/services/${svc.id}/volume`)
+    if (!current.volume) throw new Error(`no volume attached; attach one with insta compute volume ${svc.name} --size <gi> --mount-path ${opts.mountPath}`)
+  }
+  const sizeGib = opts.size === undefined ? undefined : parseVolumeGib(opts.size)
   const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${svc.id}/volume`, { sizeGib, ...(opts.mountPath !== undefined ? { mountPath: opts.mountPath } : {}) })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
-  info(volumeWriteLine(res.body.service?.name ?? svc.name, res.body, type))
+  info(volumeWriteLine(res.body.service?.name ?? svc.name, res.body, type, opts.size !== undefined))
 }
 export const computeVolume = (serviceName: string | undefined, opts: VolumeOpts): Promise<void> => serviceVolume('compute', serviceName, opts)
 
@@ -2054,4 +2062,21 @@ export function hostPatternFor(host: string, suffixes?: readonly string[]): stri
   if (!mayWidenCAHost(host, suffixes)) return host
   const parts = host.split('.')
   return [parts[0], '*', ...parts.slice(2)].join('.')
+}
+
+export async function computeStartCommand(serviceName: string | undefined, opts: Opts & { set?: string; clear?: boolean }): Promise<void> {
+  if (opts.set !== undefined && opts.clear) throw new Error('use --set or --clear, not both')
+  const api = await ApiClient.load()
+  const p = await requireProject()
+  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(opts.branch ?? p.branch)}`)
+  const svc = resolveSoleService(services, 'compute', serviceName)
+  if (opts.set === undefined && !opts.clear) {
+    if (opts.json) return printJson({ service: svc })
+    info(`compute ${svc.name}: startup command ${(svc as { start_command?: string | null }).start_command || '(image default)'}`)
+    return
+  }
+  const res = await api.rawRequest('PATCH', `/projects/${p.projectId}/services/${svc.id}`, { startCommand: opts.clear ? '' : opts.set })
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body)
+  info('Startup command saved; deploy or restart after staging the volume path. CLI secrets changes deploy immediately; use Console to combine variable, command and path changes.')
 }
