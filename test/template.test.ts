@@ -155,6 +155,17 @@ describe('validateManifest', () => {
     expect(validateManifest(m).join('\n')).toContain('type must be one of web, worker, postgres, redis, mysql, mongodb')
   })
 
+  // A YAML array like `type: [redis]` stringifies to exactly "redis", so a type check that reads
+  // it through String() would pass both the enum check and the managed-type branch, and ship the
+  // unchanged array to the platform. The type must be read as a real string instead.
+  it('rejects an array type instead of coercing it into a matching string', () => {
+    const m = { code: 'x', version: '1', services: { a: { type: ['redis'] } } } as unknown as TemplateManifest
+    const problems = validateManifest(m)
+    expect(problems).toContain('services.a.type must be one of web, worker, postgres, redis, mysql, mongodb')
+    // Must not have been read as bare-managed-redis (which would produce no other problems).
+    expect(problems.join('\n')).not.toMatch(/platform-managed/)
+  })
+
   // The env bare-shell rule generalized from postgres-only to all four managed types — the very
   // line this task's diff moved — so it needs its own evidence for redis, mysql and mongodb, not
   // just the pre-existing postgres-only test above.
@@ -171,6 +182,35 @@ describe('validateManifest', () => {
     }
   })
 
+  // A managed datastore has no url/host: the platform refuses a fixed-value ref to one
+  // (provisioning/templateManifest.ts), and this validator must catch it locally too, for every
+  // managed type and both address forms.
+  it('refuses a fixed-value url/host ref to a managed datastore, for every type', () => {
+    for (const type of ['postgres', 'redis', 'mysql', 'mongodb'] as const) {
+      for (const key of ['url', 'host'] as const) {
+        const m: TemplateManifest = {
+          code: 'x', version: '1',
+          services: {
+            store: { type },
+            app: { type: 'worker', image: 'a:1', env: { fixed: { TARGET: `\${services.store.${key}}` } } },
+          },
+        }
+        expect(validateManifest(m).join('\n')).toContain(
+          `services.app.env.fixed.TARGET: 'store' is a managed ${type}, so it has no url or host`,
+        )
+      }
+    }
+  })
+  it('accepts a fixed-value url/host ref to a non-managed service', () => {
+    const m: TemplateManifest = {
+      code: 'x', version: '1',
+      services: {
+        web: { type: 'web', image: 'a:1', healthcheck: '/' },
+        app: { type: 'worker', image: 'a:1', env: { fixed: { TARGET: '${services.web.url}' } } },
+      },
+    }
+    expect(validateManifest(m)).toEqual([])
+  })
   it('requires web services to declare an absolute healthcheck path', () => {
     const m: TemplateManifest = { code: 'x', version: '1', services: { a: { type: 'web', image: 'a:1' }, b: { type: 'web', image: 'b:1', healthcheck: 'health' } } }
     const problems = validateManifest(m)

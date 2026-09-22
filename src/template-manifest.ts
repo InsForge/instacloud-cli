@@ -122,17 +122,19 @@ export function validateManifest(m: TemplateManifest): string[] {
   for (const name of names) {
     const svc = services[name] ?? {}
     const where = `services.${name}`
-    if (!MANIFEST_TYPES.includes(String(svc.type))) {
+    // typeof, not String(): a YAML array like [redis] would otherwise stringify to its lone element.
+    const type = typeof svc.type === 'string' ? svc.type : undefined
+    if (!type || !MANIFEST_TYPES.includes(type)) {
       problems.push(`${where}.type must be one of ${MANIFEST_TYPES.join(', ')}`)
     }
     // A managed datastore is BARE: the platform owns its image, port, sizing, credentials and env,
     // so every other rule below would be asking about fields it must not carry. Mirrors the
     // platform's own check (provisioning/templateManifest.ts) so an author hears it here.
-    if (MANAGED_TYPES.includes(String(svc.type))) {
+    if (type && MANAGED_TYPES.includes(type)) {
       const bare = svc as Record<string, unknown>
       for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn']) {
         if (bare[field] !== undefined) {
-          problems.push(`${where}.${field}: a ${svc.type} service is platform-managed and carries no ${field} — declare it bare ({ type: ${svc.type} })`)
+          problems.push(`${where}.${field}: a ${type} service is platform-managed and carries no ${field} — declare it bare ({ type: ${type} })`)
         }
       }
       const groups = ['fixed', 'generated', 'platform', 'required', 'optional']
@@ -142,7 +144,7 @@ export function validateManifest(m: TemplateManifest): string[] {
           && Object.entries(envShell as Record<string, unknown>).every(([g, v]) =>
             groups.includes(g) && !!v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length === 0)
         if (!emptyShell) {
-          problems.push(`${where}.env: a ${svc.type} service is platform-managed and carries no env — declare it bare ({ type: ${svc.type} })`)
+          problems.push(`${where}.env: a ${type} service is platform-managed and carries no env — declare it bare ({ type: ${type} })`)
         }
       }
       continue
@@ -201,6 +203,22 @@ export function validateManifest(m: TemplateManifest): string[] {
         // A required var is a question put to the deployer — without a description (or a generator
         // that answers it for them) there is nothing to ask with. Authoring lint, CLI-only.
         if (group === 'required' && !spec.description && !spec.generate) problems.push(`${where}.env.required.${varName}: a description is required (unless generate is set)`)
+      }
+    }
+  }
+  // A managed datastore has no url or host to address, mirroring the platform's env.fixed check.
+  for (const name of names) {
+    const svc = services[name] ?? {}
+    for (const [varName, raw] of Object.entries(svc.env?.fixed ?? {})) {
+      for (const m of String(raw).matchAll(/\$\{([^}]+)\}/g)) {
+        const ref = m[1]!.trim()
+        const svcRef = /^services\.([a-z0-9-]+)\.(url|host)$/.exec(ref)
+        if (!svcRef) continue
+        const target = services[svcRef[1]!]
+        const targetType = target && typeof target.type === 'string' ? target.type : undefined
+        if (targetType && MANAGED_TYPES.includes(targetType)) {
+          problems.push(`services.${name}.env.fixed.${varName}: '${svcRef[1]}' is a managed ${targetType}, so it has no url or host. Reference its credentials via env.platform instead (\${${ref}})`)
+        }
       }
     }
   }
