@@ -17,12 +17,13 @@ export type VarSpec = { description?: string; default?: string; generate?: strin
 export type ManifestEnv = {
   fixed?: Record<string, unknown>
   generated?: Record<string, unknown> // ENV_NAME → "${<declared generator>}"
+  platform?: Record<string, unknown> // ENV_NAME → "${{services.<name>.<KEY>}}"
   required?: Record<string, VarSpec | string>
   optional?: Record<string, VarSpec | string>
 }
 
 export type ManifestService = {
-  type?: string // web | worker | postgres (postgres is declared bare: no image, port, volume or env)
+  type?: string // web | worker | postgres | redis | mysql | mongodb (the four managed types are declared bare: no image, port, volume or env)
   image?: string
   build?: string
   port?: number
@@ -59,6 +60,10 @@ export type TemplateVar = {
 const CODE_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
 export const ENV_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/
 const GENERATOR_RE = /^secret:([1-9]\d{0,2})$/
+
+// The platform provisions these and owns everything about them (platform templateManifest.ts).
+const MANAGED_TYPES = ['postgres', 'redis', 'mysql', 'mongodb']
+const MANIFEST_TYPES = ['web', 'worker', ...MANAGED_TYPES]
 
 // What counts as a digest is the PLATFORM's call, not ours: registry.ts's DIGEST regex, verbatim.
 const DIGEST = /^sha256:[a-f0-9]{64}$/
@@ -118,17 +123,19 @@ export function validateManifest(m: TemplateManifest): string[] {
   for (const name of names) {
     const svc = services[name] ?? {}
     const where = `services.${name}`
-    if (svc.type !== 'web' && svc.type !== 'worker' && svc.type !== 'postgres') {
-      problems.push(`${where}.type must be web, worker or postgres`)
+    // typeof, not String(): a YAML array like [redis] would otherwise stringify to its lone element.
+    const type = typeof svc.type === 'string' ? svc.type : undefined
+    if (!type || !MANIFEST_TYPES.includes(type)) {
+      problems.push(`${where}.type must be one of ${MANIFEST_TYPES.join(', ')}`)
     }
-    // A managed postgres service is BARE: the platform owns its image, port, sizing, credentials
-    // and env, so every other rule below would be asking about fields it must not carry. Mirrors
-    // the platform's own check (provisioning/templateManifest.ts) so an author hears it here.
-    if (svc.type === 'postgres') {
+    // A managed datastore is BARE: the platform owns its image, port, sizing, credentials and env,
+    // so every other rule below would be asking about fields it must not carry. Mirrors the
+    // platform's own check (provisioning/templateManifest.ts) so an author hears it here.
+    if (type && MANAGED_TYPES.includes(type)) {
       const bare = svc as Record<string, unknown>
       for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn']) {
         if (bare[field] !== undefined) {
-          problems.push(`${where}.${field}: a postgres service is platform-managed and carries no ${field} — declare it bare ({ type: postgres })`)
+          problems.push(`${where}.${field}: a ${type} service is platform-managed and carries no ${field} — declare it bare ({ type: ${type} })`)
         }
       }
       const groups = ['fixed', 'generated', 'platform', 'required', 'optional']
@@ -138,7 +145,7 @@ export function validateManifest(m: TemplateManifest): string[] {
           && Object.entries(envShell as Record<string, unknown>).every(([g, v]) =>
             groups.includes(g) && !!v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length === 0)
         if (!emptyShell) {
-          problems.push(`${where}.env: a postgres service is platform-managed and carries no env — declare it bare ({ type: postgres })`)
+          problems.push(`${where}.env: a ${type} service is platform-managed and carries no env — declare it bare ({ type: ${type} })`)
         }
       }
       continue
@@ -197,6 +204,22 @@ export function validateManifest(m: TemplateManifest): string[] {
         // A required var is a question put to the deployer — without a description (or a generator
         // that answers it for them) there is nothing to ask with. Authoring lint, CLI-only.
         if (group === 'required' && !spec.description && !spec.generate) problems.push(`${where}.env.required.${varName}: a description is required (unless generate is set)`)
+      }
+    }
+  }
+  // A managed datastore has no url or host to address, mirroring the platform's env.fixed check.
+  for (const name of names) {
+    const svc = services[name] ?? {}
+    for (const [varName, raw] of Object.entries(svc.env?.fixed ?? {})) {
+      for (const m of String(raw).matchAll(/\$\{([^}]+)\}/g)) {
+        const ref = m[1]!.trim()
+        const svcRef = /^services\.([a-z0-9-]+)\.(url|host)$/.exec(ref)
+        if (!svcRef) continue
+        const target = services[svcRef[1]!]
+        const targetType = target && typeof target.type === 'string' ? target.type : undefined
+        if (targetType && MANAGED_TYPES.includes(targetType)) {
+          problems.push(`services.${name}.env.fixed.${varName}: '${svcRef[1]}' is a managed ${targetType}, so it has no url or host. Use its platform credentials instead: \${{services.${svcRef[1]}.<KEY>}} under env.platform`)
+        }
       }
     }
   }
