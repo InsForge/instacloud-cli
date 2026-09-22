@@ -667,7 +667,7 @@ export function volumeLines(name: string, volume: { sizeGib: number; mountPath: 
     : 'grow with --size (grow-only); the volume cannot be deleted — remove the service instead'
   return [
     `${type} ${name}: volume ${volume.sizeGib}Gi at ${volume.mountPath}  (plan max ${cap.volumeGib}Gi)`,
-    ...(volume.pending ? [`  pending: ${volume.appliedMountPath ?? '(not deployed)'} → ${volume.mountPath}; deploy to apply (restarts the service). Application configuration is not updated automatically.`] : []),
+    ...(volume.pending && volume.appliedMountPath != null ? [`  pending: ${volume.appliedMountPath ?? '(not deployed)'} → ${volume.mountPath}; deploy to apply (restarts the service). Application configuration is not updated automatically.`] : []),
     `  billing is actual data stored — the size is a cap, not a price; ${grow}`,
   ]
 }
@@ -675,9 +675,10 @@ export function volumeLines(name: string, volume: { sizeGib: number; mountPath: 
 // Render the PUT result. Pure, exported for tests. `attached` comes from the backend and is what
 // tells a FIRST attach (no disk yet — it mounts on the next deploy) apart from a grow (the live
 // disk was already extended); the wire size is authoritative in both cases.
-export function volumeWriteLine(name: string, body: { volume: { sizeGib: number; mountPath: string; appliedMountPath?: string | null; pending?: boolean }; cap: { volumeGib: number }; attached?: boolean; changed?: boolean }, type: ManagedType = 'compute'): string {
-  if (body.volume.pending && !body.attached) return `${type} ${name}: mount path ${body.volume.appliedMountPath ?? '(not deployed)'} → ${body.volume.mountPath} pending — deploy to apply (restarts the service). Update application paths, variables and startup commands yourself.`
-  if (body.changed === false) return `${type} ${name}: volume unchanged at ${body.volume.mountPath}`
+export function volumeWriteLine(name: string, body: { volume: { sizeGib: number; mountPath: string; appliedMountPath?: string | null; pending?: boolean }; cap: { volumeGib: number }; attached?: boolean; changed?: boolean }, type: ManagedType = 'compute', sizeRequested = true): string {
+  const pending = body.volume.pending && body.volume.appliedMountPath != null
+    ? `; mount path ${body.volume.appliedMountPath} → ${body.volume.mountPath} pending — deploy or restart to apply. Update application paths and startup commands yourself.` : ''
+  if (body.changed === false && !body.attached) return `${type} ${name}: volume unchanged: ${body.volume.sizeGib}Gi at ${body.volume.mountPath}${pending}`
   if (body.attached) {
     // Only a compute service has a deploy step for the mount to wait on; a managed database has
     // no deploy, so its disk is simply mounted.
@@ -686,7 +687,7 @@ export function volumeWriteLine(name: string, body: { volume: { sizeGib: number;
       : `mounts at ${body.volume.mountPath}`
     return `${type} ${name}: volume ${body.volume.sizeGib}Gi attached — ${mounts}  (plan max ${body.cap.volumeGib}Gi)`
   }
-  return `${type} ${name}: volume grown to ${body.volume.sizeGib}Gi at ${body.volume.mountPath}  (plan max ${body.cap.volumeGib}Gi)`
+  return `${type} ${name}: volume ${sizeRequested ? 'grown to ' : ''}${body.volume.sizeGib}Gi at ${body.volume.mountPath}  (plan max ${body.cap.volumeGib}Gi)${pending}`
 }
 
 // Render the DELETE result. Pure, exported for tests. Deleting is the only way off the volume
@@ -725,6 +726,7 @@ type VolumeOpts = LifeOpts & { size?: string; mountPath?: string; delete?: boole
 // 403/400 messages carry the upgrade hints and must reach the user verbatim (the guard prints
 // ApiError messages as-is).
 export async function serviceVolume(type: ManagedType, serviceName: string | undefined, opts: VolumeOpts): Promise<void> {
+  if (opts.size !== undefined && !opts.size.trim()) throw new Error('--size must not be empty; specify a whole Gi value or omit --size for a path-only edit')
   if (opts.delete && opts.mountPath !== undefined) throw new Error('--delete cannot be combined with --mount-path')
   if (opts.delete && opts.size) throw new Error('--delete cannot be combined with --size (one changes the volume, the other destroys it)')
   const api = await ApiClient.load()
@@ -750,11 +752,15 @@ export async function serviceVolume(type: ManagedType, serviceName: string | und
     return
   }
 
+  if (opts.mountPath !== undefined && opts.size === undefined) {
+    const current = await api.request('GET', `/projects/${p.projectId}/services/${svc.id}/volume`)
+    if (!current.volume) throw new Error(`no volume attached; attach one with insta compute volume ${svc.name} --size <gi> --mount-path ${opts.mountPath}`)
+  }
   const sizeGib = opts.size === undefined ? undefined : parseVolumeGib(opts.size)
   const res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${svc.id}/volume`, { sizeGib, ...(opts.mountPath !== undefined ? { mountPath: opts.mountPath } : {}) })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
-  info(volumeWriteLine(res.body.service?.name ?? svc.name, res.body, type))
+  info(volumeWriteLine(res.body.service?.name ?? svc.name, res.body, type, opts.size !== undefined))
 }
 export const computeVolume = (serviceName: string | undefined, opts: VolumeOpts): Promise<void> => serviceVolume('compute', serviceName, opts)
 
@@ -2066,11 +2072,11 @@ export async function computeStartCommand(serviceName: string | undefined, opts:
   const svc = resolveSoleService(services, 'compute', serviceName)
   if (opts.set === undefined && !opts.clear) {
     if (opts.json) return printJson({ service: svc })
-    info((svc as { start_command?: string | null }).start_command || '(image default)')
+    info(`compute ${svc.name}: startup command ${(svc as { start_command?: string | null }).start_command || '(image default)'}`)
     return
   }
   const res = await api.rawRequest('PATCH', `/projects/${p.projectId}/services/${svc.id}`, { startCommand: opts.clear ? '' : opts.set })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
-  info('Startup command saved; deploy or restart after staging the volume path and variables.')
+  info('Startup command saved; deploy or restart after staging the volume path. CLI secrets changes deploy immediately; use Console to combine variable, command and path changes.')
 }

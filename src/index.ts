@@ -308,7 +308,7 @@ compute.command('watch-paths [service]').description("Show or change which paths
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => githubCmd.computeWatchPaths(service, o)))
 compute.command('disconnect-repo [service]').description('Disconnect the GitHub repository from a compute service. The service keeps running its current image; pushes no longer deploy it, and its build history stays')
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => githubCmd.computeDisconnectRepo(service, o)))
-compute.command('start-command [service]').description('Show or stage a compute startup command for the next deployment. Runs through sh -c; --clear restores the image default. Stage volume paths and variables before deploying once.')
+compute.command('start-command [service]').description('Show or stage a compute startup command for the next deployment. Runs through sh -c; --clear restores the image default. Stage the volume path and command before deploying. CLI secrets writes redeploy immediately; use Console to combine variables, path and command in one deployment.')
   .option('--set <command>', 'startup command to use on the next deploy')
   .option('--clear', 'use the image default command on the next deploy')
   .option('--json').option('--branch <branch>', 'branch (default: current)')

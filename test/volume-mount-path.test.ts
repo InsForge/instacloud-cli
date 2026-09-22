@@ -6,6 +6,7 @@ vi.mock('../src/api.js', async (original) => ({
   requireProject: async () => ({ projectId: 'p1', branch: 'main' }),
 }))
 vi.mock('../src/util.js', async (original) => ({ ...await original<typeof import('../src/util.js')>(), info: vi.fn(), printJson: vi.fn() }))
+import { info, printJson } from '../src/util.js'
 import { computeVolume, computeStartCommand } from '../src/commands/compute.js'
 import { servicesAdd, serviceAddedLine, serviceListLine } from '../src/commands/services.js'
 beforeEach(() => {
@@ -36,6 +37,7 @@ describe('volume mount path requests', () => {
 
 describe('mount path validation and list display', () => {
   it('sends a path-only edit without an implicit resize', async () => {
+    fake.request.mockResolvedValueOnce({ services: [{ id: 's1', type: 'compute', name: 'web' }] }).mockResolvedValueOnce({ volume: { sizeGib: 1, mountPath: '/data' } })
     await computeVolume('web', { mountPath: '/cache' })
     expect(fake.rawRequest).toHaveBeenCalledWith('PUT', '/projects/p1/services/s1/volume', { mountPath: '/cache', sizeGib: undefined })
   })
@@ -68,4 +70,23 @@ describe('startup command staging', () => {
     await expect(computeStartCommand('web', { set: 'x', clear: true })).rejects.toThrow('not both')
     expect(fake.load).not.toHaveBeenCalled()
   })
+})
+
+it('rejects path-only attachment before issuing a write', async () => {
+  fake.request.mockResolvedValueOnce({ services: [{ id: 's1', type: 'compute', name: 'web' }] }).mockResolvedValueOnce({ volume: null })
+  await expect(computeVolume('web', { mountPath: '/cache' })).rejects.toThrow('no volume attached')
+  expect(fake.rawRequest).not.toHaveBeenCalled()
+})
+it('rejects an explicitly empty size', async () => {
+  await expect(computeVolume('web', { size: '', mountPath: '/cache' })).rejects.toThrow('--size must not be empty')
+  expect(fake.load).not.toHaveBeenCalled()
+})
+
+it('reads the saved startup command in text and JSON', async () => {
+  const service = { id: 's1', type: 'compute', name: 'web', start_command: 'exec app' }
+  fake.request.mockResolvedValue({ services: [service] })
+  await computeStartCommand('web', {})
+  expect(info).toHaveBeenCalledWith('compute web: startup command exec app')
+  await computeStartCommand('web', { json: true })
+  expect(printJson).toHaveBeenCalledWith({ service })
 })
