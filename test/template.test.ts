@@ -201,6 +201,21 @@ describe('validateManifest', () => {
       }
     }
   })
+  it('shows the double-brace platform credential form, not the broken single-brace fix', () => {
+    const m: TemplateManifest = {
+      code: 'x', version: '1',
+      services: {
+        store: { type: 'redis' },
+        app: { type: 'worker', image: 'a:1', env: { fixed: { TARGET: '${services.store.url}' } } },
+      },
+    }
+    const msg = validateManifest(m).join('\n')
+    expect(msg).toContain("'store' is a managed redis, so it has no url or host")
+    expect(msg).toContain('${{services.store.<KEY>}}')
+    expect(msg).toContain('under env.platform')
+    expect(msg).not.toMatch(/instead \(\$\{services\.store\.url\}\)/)
+  })
+
   it('accepts a fixed-value url/host ref to a non-managed service', () => {
     const m: TemplateManifest = {
       code: 'x', version: '1',

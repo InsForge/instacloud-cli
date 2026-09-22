@@ -17,6 +17,7 @@ export type VarSpec = { description?: string; default?: string; generate?: strin
 export type ManifestEnv = {
   fixed?: Record<string, unknown>
   generated?: Record<string, unknown> // ENV_NAME → "${<declared generator>}"
+  platform?: Record<string, unknown> // ENV_NAME → "${{services.<name>.<KEY>}}"
   required?: Record<string, VarSpec | string>
   optional?: Record<string, VarSpec | string>
 }
@@ -217,7 +218,7 @@ export function validateManifest(m: TemplateManifest): string[] {
         const target = services[svcRef[1]!]
         const targetType = target && typeof target.type === 'string' ? target.type : undefined
         if (targetType && MANAGED_TYPES.includes(targetType)) {
-          problems.push(`services.${name}.env.fixed.${varName}: '${svcRef[1]}' is a managed ${targetType}, so it has no url or host. Reference its credentials via env.platform instead (\${${ref}})`)
+          problems.push(`services.${name}.env.fixed.${varName}: '${svcRef[1]}' is a managed ${targetType}, so it has no url or host. Use its platform credentials instead: \${{services.${svcRef[1]}.<KEY>}} under env.platform`)
         }
       }
     }
