@@ -328,8 +328,8 @@ function browserOauth(apiUrl: string, provider: string): Promise<string> {
  *  Built from the PERSISTED config, not from `ApiClient.load()`'s override-resolved view. There is
  *  exactly one stored session, so a runtime `--api-url` (or INSTA_API_URL / INSTA_ENV) has no
  *  subject here — and readGlobal() scrubs a foreign deployment's tokens, which would skip the
- *  revoke below for want of a refresh token while the local tokens were deleted anyway, leaving
- *  the session valid on the server with nothing left here to revoke it with. `persist()` keeps
+ *  revoke below for want of a refresh token yet still delete the local tokens, leaving the
+ *  session valid on the server with nothing left here to revoke it with. `persist()` keeps
  *  the stored URL (see its comment): logout never sets one explicitly. */
 export async function logout(): Promise<void> {
   const stored = await readPersistedGlobal()

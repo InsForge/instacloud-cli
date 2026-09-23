@@ -1911,11 +1911,10 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
   let installed = false
   try {
     // --setup PROMISES a trust anchor, so a response without one cannot be
-    // reported as configured. Skipping installCA and carrying on left plain
-    // `ssh`/`scp` facing a host-key prompt on every new node behind the load
-    // balancer -- the exact failure the anchor exists to prevent -- while the
-    // command printed the short alias and claimed success. Checked before
-    // anything is installed, so the refusal is clean.
+    // reported as configured: without installCA, plain `ssh`/`scp` face a
+    // host-key prompt on every new node behind the load balancer -- the exact
+    // failure the anchor exists to prevent. Checked before anything is
+    // installed, so the refusal is clean.
     if (opts.setup && !out.caPublicKey) {
       throw new Error(
         'the platform did not return an ssh certificate authority key, so `--setup` cannot install the trust anchor it promises.\n' +
@@ -1965,17 +1964,14 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
       const commitAll = () => commitWithUndo(steps)
 
       // The ROLLBACK is inside the anchor's lock too, not just the write it
-      // takes back. Holding the lock per edit and dropping it before the
-      // transaction settled made the undo a decision about a file someone else
-      // had meanwhile committed against: this command rotates CA_PREV to CA and
-      // keeps an undo restoring CA_PREV; a renewal arriving after that write
-      // sees CA already anchored, is handed a do-nothing undo for it, and
-      // commits a certificate signed by CA; this command then fails, its undo
-      // retires CA -- and the renewal's certificate, minted and committed
-      // perfectly correctly, now authenticates nothing. The renewal hook now
-      // queues on aliases.lock for its own commit too, so that interleaving is
-      // excluded twice over; this lock stays because it guards the FILE,
-      // whoever the writer turns out to be.
+      // takes back: an undo run after the lock is dropped acts on a file
+      // another writer may have committed against since. Here that writer is
+      // a renewal landing between this command's CA_PREV->CA rotation and its
+      // failed commit -- it sees CA anchored and commits a certificate signed
+      // by CA, which the undo restoring CA_PREV would then strand. The renewal
+      // hook also queues on aliases.lock, so the interleaving is excluded
+      // twice over; this lock stays because it guards the FILE, whoever the
+      // writer turns out to be.
       //
       // Held only when there is an anchor to rotate. A re-issue that writes no
       // anchor has nothing for a rollback to strand, and taking the lock anyway

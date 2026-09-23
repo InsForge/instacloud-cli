@@ -193,10 +193,9 @@ export function renderConfigBlock(o: ConfigBlockOpts): string {
     // The socket is keyed on %C -- a hash of (local host, remote host, port,
     // user) -- not %r@%h:%p. A ControlPath is a Unix-domain socket, whose path
     // is capped at 104 bytes on macOS (108 on Linux), and the route-key user
-    // plus the regional gateway hostname sailed past that: a real prod alias
-    // rendered a 109-byte path and every `ssh` died on `ControlPath too long`.
+    // plus the regional gateway hostname exceed that on a real prod alias.
     // %C is a fixed 40 hex chars however long the host and user grow, so the
-    // path cannot overflow.
+    // path cannot overflow, and it carries no `:`.
     //
     // OMITTED ON WINDOWS, where it is not an optimisation but a broken config:
     // Win32-OpenSSH does not implement ControlMaster (PowerShell/Win32-OpenSSH
