@@ -1,8 +1,9 @@
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildPayload, feedback, submit } from '../src/commands/feedback.js'
+import { ApiError } from '../src/api.js'
 import { clean, redactSensitive, truncateMiddle } from '../src/redact.js'
 
 const valid = {
@@ -19,6 +20,21 @@ function fetchOk(body: unknown, status = 200): { fetchImpl: typeof fetch; calls:
     return new Response(JSON.stringify(body), { status })
   }) as typeof fetch
   return { fetchImpl, calls }
+}
+
+// The control plane feedback() asks who is sending: signed in to cloud by default.
+function controlPlane(opts: { apiUrl?: string; signedIn?: boolean; answer?: () => Promise<unknown> } = {}) {
+  const asked: string[] = []
+  const apiUrl = opts.apiUrl ?? 'https://api.instacloud.com'
+  const client = {
+    apiUrl,
+    config: { apiUrl, ...(opts.signedIn === false ? {} : { accessToken: 'session' }) },
+    request: (async (method: string, path: string) => {
+      asked.push(`${method} ${path}`)
+      return (opts.answer ?? (async () => ({ token: 'platform.signed.token' })))()
+    }) as any,
+  }
+  return { client, asked }
 }
 
 describe('buildPayload', () => {
@@ -157,13 +173,13 @@ describe('feedback command', () => {
   })
 
   it('non-interactive + missing required flags throws instead of prompting (agents must never hang)', async () => {
-    await expect(feedback({ title: 'x' }, { interactive: false, cliVersion: 'x' })).rejects.toThrow(
+    await expect(feedback({ title: 'x' }, { interactive: false, cliVersion: 'x', client: controlPlane().client })).rejects.toThrow(
       /--type must be one of/,
     )
   })
 
   it('--json validation errors stay machine-readable: JSON on stdout + exit code 1, no throw', async () => {
-    await expect(feedback({ title: 'x', json: true }, { interactive: false, cliVersion: 'x' })).resolves.toBeUndefined()
+    await expect(feedback({ title: 'x', json: true }, { interactive: false, cliVersion: 'x', client: controlPlane().client })).resolves.toBeUndefined()
     expect(process.exitCode).toBe(1)
   })
 
@@ -171,7 +187,7 @@ describe('feedback command', () => {
     const fetchImpl = (async () => {
       throw new Error('connect ECONNREFUSED')
     }) as unknown as typeof fetch
-    await expect(feedback({ ...valid, json: true }, { interactive: false, cliVersion: 'x', fetchImpl })).resolves.toBeUndefined()
+    await expect(feedback({ ...valid, json: true }, { interactive: false, cliVersion: 'x', fetchImpl, client: controlPlane().client })).resolves.toBeUndefined()
   })
 
   it('an unconfirmed timeout does not throw either', async () => {
@@ -180,8 +196,59 @@ describe('feedback command', () => {
       e.name = 'TimeoutError'
       throw e
     }) as unknown as typeof fetch
-    await expect(feedback({ ...valid, json: true }, { interactive: false, cliVersion: 'x', fetchImpl })).resolves.toBeUndefined()
+    await expect(feedback({ ...valid, json: true }, { interactive: false, cliVersion: 'x', fetchImpl, client: controlPlane().client })).resolves.toBeUndefined()
     expect(process.exitCode ?? 0).toBe(0)
+  })
+})
+
+describe('who is sending', () => {
+  afterEach(() => {
+    process.exitCode = 0
+    vi.restoreAllMocks()
+  })
+  const run = (plane: ReturnType<typeof controlPlane>, fetchImpl = fetchOk({ id: 'f-1', status: 'received' }).fetchImpl) =>
+    feedback({ ...valid, json: true }, { interactive: false, cliVersion: 'x', fetchImpl, client: plane.client })
+  const sent = (calls: Array<{ init: RequestInit }>) => calls[0]?.init.headers as Record<string, string> | undefined
+
+  it('proves a signed-in cloud user with a token from the control plane', async () => {
+    const plane = controlPlane()
+    const { fetchImpl, calls } = fetchOk({ id: 'f-1', status: 'received' })
+    await run(plane, fetchImpl)
+    expect(plane.asked).toEqual(['GET /me/feedback-assertion'])
+    expect(sent(calls)?.['Insta-User-Assertion']).toBe('platform.signed.token')
+  })
+
+  it('refuses a signed-out cloud user with exit 2, before sending anything', async () => {
+    const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    for (const plane of [
+      controlPlane({ signedIn: false }),
+      controlPlane({ answer: async () => { throw new ApiError(401, 'invalid token') } }),
+    ]) {
+      const { fetchImpl, calls } = fetchOk({ id: 'f-1', status: 'received' })
+      await expect(run(plane, fetchImpl)).rejects.toThrow('exit 1')
+      expect(process.exitCode).toBe(2)
+      expect(calls).toHaveLength(0)
+      expect(JSON.parse(String(out.mock.calls.at(-1)?.[0]))).toMatchObject({ status: 'refused', submitted: false })
+    }
+  })
+
+  it('still sends when the control plane cannot vouch, just without a token', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const { fetchImpl, calls } = fetchOk({ id: 'f-1', status: 'received' })
+    await run(controlPlane({ answer: async () => { throw new ApiError(503, 'unavailable') } }), fetchImpl)
+    expect(calls).toHaveLength(1)
+    expect(sent(calls)?.['Insta-User-Assertion']).toBeUndefined()
+    expect(process.exitCode ?? 0).toBe(0)
+  })
+
+  it('never asks a self-hosted control plane, signed in or not', async () => {
+    const plane = controlPlane({ apiUrl: 'https://insta.example.internal', signedIn: false })
+    const { fetchImpl, calls } = fetchOk({ id: 'f-1', status: 'received' })
+    await run(plane, fetchImpl)
+    expect(plane.asked).toEqual([])
+    expect(calls).toHaveLength(1)
+    expect(sent(calls)?.['Insta-User-Assertion']).toBeUndefined()
   })
 })
 

@@ -5,14 +5,15 @@
 //
 // The backend is InstaCloud dogfooding itself: the "InstaCloud Agent Feedback" project runs the
 // ingest service (InsForge/instacloud-feedback repo) on a postgres + compute pair. It is NOT the
-// control-plane API on purpose — feedback must work logged-out, unlinked, and from insta-oss,
-// and a control-plane outage is exactly when we most want reports to still arrive.
+// control-plane API on purpose — feedback must work unlinked, from insta-oss, and through a
+// control-plane outage, which is exactly when we most want reports to still arrive.
 import { readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import * as clack from '@clack/prompts'
+import { ApiClient, ApiError } from '../api.js'
 import { readGlobal, readProject } from '../config.js'
 import { envForApiUrl } from '../env.js'
-import { info, printJson, CliCancel } from '../util.js'
+import { info, printJson, refuse, CliCancel } from '../util.js'
 import { clean } from '../redact.js'
 import { cliVersion } from '../version.js'
 
@@ -69,6 +70,8 @@ export type FeedbackDeps = {
   /** Prompts run on a real terminal only — an agent's stdin is not one, and must never block. */
   interactive?: boolean
   cliVersion?: string
+  /** The control plane, which vouches for a cloud user. */
+  client?: Pick<ApiClient, 'apiUrl' | 'config' | 'request'>
 }
 
 function requireEnum(value: string, allowed: readonly string[], flag: string): string {
@@ -191,7 +194,7 @@ export type SubmitResult =
 /** One POST, one bounded attempt (FEEDBACK_TIMEOUT_MS), zero retries — feedback is a side quest and must never hang the CLI.
  *  Transport and server failures come back as a result, not an exception: the caller downgrades
  *  them to a warning so a broken feedback backend can't fail the user's actual task. */
-export async function submit(payload: Record<string, unknown>, fetchImpl: typeof fetch): Promise<SubmitResult> {
+export async function submit(payload: Record<string, unknown>, fetchImpl: typeof fetch, assertion?: string): Promise<SubmitResult> {
   let res: Response
   try {
     res = await fetchImpl(FEEDBACK_ENDPOINT, {
@@ -199,6 +202,7 @@ export async function submit(payload: Record<string, unknown>, fetchImpl: typeof
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${FEEDBACK_INGEST_TOKEN}`,
+        ...(assertion ? { 'Insta-User-Assertion': assertion } : {}),
       },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(FEEDBACK_TIMEOUT_MS),
@@ -217,7 +221,22 @@ export async function submit(payload: Record<string, unknown>, fetchImpl: typeof
   return { status: body?.status === 'duplicate' ? 'duplicate' : 'received', id: body?.id ?? null }
 }
 
+const SIGNED_OUT = 'not signed in to InstaCloud — run `insta login`, then send this again so the team can reply to you'
+
+// Exit 2 on both surfaces: the submit failure path below exits 0 with "do not retry", which is
+// the opposite of what a caller who only has to sign in should hear.
+function refuseSignedOut(json?: boolean): never {
+  if (json) printJson({ status: 'refused', submitted: false, error: SIGNED_OUT })
+  refuse([`insta feedback: ${SIGNED_OUT}`])
+}
+
 export async function feedback(opts: FeedbackOpts, deps: FeedbackDeps = {}): Promise<void> {
+  const client = deps.client ?? await ApiClient.load()
+  // A custom host is insta-oss (or a preview): nobody there can be answered, so nobody is asked.
+  const cloud = !!envForApiUrl(client.apiUrl)
+  // Before the prompts, so nobody types out a report only to be told to sign in.
+  if (cloud && !client.config.accessToken) refuseSignedOut(opts.json)
+
   const interactive = deps.interactive ?? (!opts.json && !!process.stdin.isTTY && !!process.stdout.isTTY)
   const missingRequired = !opts.type || !opts.component || !opts.title || (!opts.detail && !opts.file)
   if (missingRequired && interactive) await promptMissing(opts)
@@ -236,7 +255,18 @@ export async function feedback(opts: FeedbackOpts, deps: FeedbackDeps = {}): Pro
     return
   }
 
-  const result = await submit(payload, deps.fetchImpl ?? fetch)
+  // Fetched after the prompts: it lives five minutes, and a person can take longer than that to type.
+  let assertion: string | undefined
+  if (cloud) {
+    try {
+      assertion = (await client.request<{ token: string }>('GET', '/me/feedback-assertion', undefined, { signal: AbortSignal.timeout(5000) })).token
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) refuseSignedOut(opts.json)
+      process.stderr.write(`warning: could not confirm who you are (${e instanceof Error ? e.message : String(e)}) — sending anyway, but nobody can reply to this report\n`)
+    }
+  }
+
+  const result = await submit(payload, deps.fetchImpl ?? fetch, assertion)
 
   if (result.status === 'unconfirmed') {
     // NOT a failure claim: the request was still in flight at the deadline and the server
