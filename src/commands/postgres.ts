@@ -157,12 +157,10 @@ export function dbStatsLines(group: string, body: any): string[] {
 }
 
 // Point-in-time stats snapshot for a postgres service: connections vs the server's ceiling, cache
-// hit rate, database size. Read-only. insta-db-backed: a suspended instance answers from the
-// provider's control plane (shown as "(suspended)" with structural zeros), never dialed. That is
-// every environment today — the Neon-backed contrast below is historical: Neon is no longer used
-// anywhere, and the code that handled it is retained, not live. Neon-backed: the platform read
-// over a direct SQL connection, so a one-shot call could wake a suspended endpoint — acceptable
-// for an explicit command, which is why nothing here polls.
+// hit rate, database size. Read-only: a suspended insta-db instance answers from the provider's
+// control plane (shown as "(suspended)" with structural zeros), never dialed. Nothing here polls: a
+// provider that reads over a direct SQL connection could wake a suspended endpoint, which is
+// acceptable only for a one-shot explicit command.
 export async function dbStats(service: string | undefined, opts: Opts): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()

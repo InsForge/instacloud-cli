@@ -322,8 +322,6 @@ export function cronEditWarnings(
 
   // The BODY cannot be read back either, so its loss cannot be detected by comparing; what CAN be
   // said is when the stored request was one that carries a body and the new flags supply none.
-  // Silence here was the actual gap: the command promised to name what it drops and named only
-  // headers, so a POST job edited with `--header` alone lost its payload without a word.
   if (current.method === 'POST' && next.body === undefined) {
     out.push('warning: the stored request body (write-only, and not readable here) is dropped — re-supply it with --body, or pass --method GET if the job should stop sending one')
   }

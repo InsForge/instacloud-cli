@@ -196,7 +196,7 @@ export function renderConfigBlock(o: ConfigBlockOpts): string {
     // plus the regional gateway hostname sailed past that: a real prod alias
     // rendered a 109-byte path and every `ssh` died on `ControlPath too long`.
     // %C is a fixed 40 hex chars however long the host and user grow, so the
-    // path can no longer overflow; it also drops the `:` the old token carried.
+    // path cannot overflow.
     //
     // OMITTED ON WINDOWS, where it is not an optimisation but a broken config:
     // Win32-OpenSSH does not implement ControlMaster (PowerShell/Win32-OpenSSH

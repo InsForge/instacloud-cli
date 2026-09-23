@@ -384,8 +384,6 @@ export async function autoupdate(mode?: string): Promise<void> {
   info(`autoupdate: ${enabled ? 'on' : 'off'} (default on while the CLI is pre-1.0 — \`insta config autoupdate off\` to disable)`)
 }
 
-// Called once at CLI start-up. Never blocks: reads the cache synchronously, prints at most one
-// stderr line, and (when due) spawns detached children for the registry check / quiet upgrade.
 /** Commands that must never nudge about an update or spawn a background one.
  *
  *  `upgrade`/`autoupdate` are the update machinery itself. Every `__` command
@@ -398,14 +396,14 @@ export async function autoupdate(mode?: string): Promise<void> {
  *  mid-connection. Same prefix rule trackCommand already applies to telemetry.
  */
 export function skipsUpdateCheck(cmd: string | undefined, sub?: string | undefined): boolean {
-  // The autoupdate PREFERENCE moved to `insta config autoupdate` in the command re-organization,
-  // so the level-1 name alone stopped matching it: `insta config autoupdate off` would run the
-  // very check it is being typed to switch off (and could auto-upgrade before the handler lands).
-  // The retired top-level spelling stays exempt too — it costs nothing and cannot regress.
+  // `insta config autoupdate off` must not run the very check it is being typed to switch off
+  // (it could auto-upgrade before the handler lands); the retired top-level spelling stays exempt too.
   if (cmd === 'config' && sub === 'autoupdate') return true
   return cmd === 'upgrade' || cmd === 'autoupdate' || !!cmd?.startsWith('__')
 }
 
+// Called once at CLI start-up. Never blocks: reads the cache synchronously, prints at most one
+// stderr line, and (when due) spawns detached children for the registry check / quiet upgrade.
 export function maybeUpdate(current: string, argv: string[]): void {
   if (skipsUpdateCheck(argv[2], argv[3])) return
   const channel = detectChannel()

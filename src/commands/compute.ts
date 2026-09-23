@@ -1899,12 +1899,10 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
   const svc = resolveSoleService(services as ComputeRow[], 'compute', serviceName)
   const alias = aliasFor(svc.name)
 
-  // BEFORE the mint, and the order is the fix. mintCert writes
-  // `<alias>-cert.pub` as part of succeeding, so checking afterwards meant a
-  // collision had already overwritten the certificate of the alias it was
-  // about to refuse -- the previously working `api.insta` could no longer
-  // authenticate, and the command that broke it exited with an error saying it
-  // had done nothing. Nothing is written until the alias is known to be ours.
+  // BEFORE the mint: mintCert writes `<alias>-cert.pub` as part of succeeding,
+  // so a collision checked afterwards has already overwritten the certificate
+  // of the alias it is about to refuse. Nothing is written until the alias is
+  // known to be ours.
   assertAliasFree(readAliasStore(), alias, { projectId: p.projectId, serviceId: svc.id, branch })
 
   const out = await mint(api, p.projectId, svc.id, (deps.keyPair ?? ensureKeyPair)(), alias)
@@ -1940,17 +1938,12 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
       }
 
       // Whether ~/.ssh is BACKING this store, not merely whether --setup was
-      // passed. The store and the certificate are rewritten by every issuance,
-      // `--setup` or not; the config block and the anchor used to be rewritten
-      // only by `--setup`. So a plain re-issue that came back with a moved
-      // host, a renamed principal or a rotated CA updated half of what an
-      // installed `ssh api.insta` depends on and left the rest describing
-      // yesterday -- the alias went on routing to the old host holding a
-      // certificate minted for the new one, and the command printed success.
-      //
-      // Once the block exists it is a rendering of the whole store, so any
-      // store write has to re-render it. All four artifacts then move together
-      // under the one lock, with the same undo chain as a setup.
+      // passed. Once the block exists it is a rendering of the whole store, so
+      // any store write has to re-render it: a re-issue that comes back with a
+      // moved host, a renamed principal or a rotated CA must update the config
+      // block and the anchor along with the store and the certificate. All four
+      // artifacts move together under the one lock, with the same undo chain as
+      // a setup.
       installed = opts.setup || (deps.configInstalled ?? configBlockInstalled)()
 
       // Every step that can be taken back registers how -- see commitWithUndo.
