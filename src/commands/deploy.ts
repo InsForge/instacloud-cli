@@ -47,8 +47,9 @@ async function discoverLane(api: Pick<ApiClient, 'rawRequest'>, projectId: strin
   const q = new URLSearchParams({ branch, ...(opts.group ? { group: opts.group } : {}) })
   try {
     const res = await api.rawRequest('GET', `/projects/${projectId}/source-build?${q}`)
-    // Validated, not cast: an unknown lane is the server being ahead of us, and must fail here
-    // rather than fall through to the flyctl path below and fail somewhere unrelated.
+    // The cast only names the shape; the checks below are what enforce it. An unknown lane is the
+    // server being ahead of us, and must fail here rather than fall through to the flyctl path
+    // below and fail somewhere unrelated.
     const lane = (res.body ?? {}) as Lane
     const tag = (lane as { lane?: string }).lane ?? ''
     const known = ['flyctl', 'local-docker', 'archive', 'none']
