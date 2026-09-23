@@ -22,19 +22,20 @@ function fetchOk(body: unknown, status = 200): { fetchImpl: typeof fetch; calls:
   return { fetchImpl, calls }
 }
 
-// The control plane feedback() asks who is sending: signed in to cloud by default.
 function controlPlane(opts: { apiUrl?: string; signedIn?: boolean; answer?: () => Promise<unknown> } = {}) {
   const asked: string[] = []
+  const requestOpts: unknown[] = []
   const apiUrl = opts.apiUrl ?? 'https://api.instacloud.com'
-  const client = {
+  const api = {
     apiUrl,
     config: { apiUrl, ...(opts.signedIn === false ? {} : { accessToken: 'session' }) },
-    request: (async (method: string, path: string) => {
+    request: (async (method: string, path: string, _body: unknown, o: unknown) => {
       asked.push(`${method} ${path}`)
+      requestOpts.push(o)
       return (opts.answer ?? (async () => ({ token: 'platform.signed.token' })))()
     }) as any,
   }
-  return { client, asked }
+  return { api, asked, requestOpts }
 }
 
 describe('buildPayload', () => {
@@ -173,13 +174,13 @@ describe('feedback command', () => {
   })
 
   it('non-interactive + missing required flags throws instead of prompting (agents must never hang)', async () => {
-    await expect(feedback({ title: 'x' }, { interactive: false, cliVersion: 'x', client: controlPlane().client })).rejects.toThrow(
+    await expect(feedback({ title: 'x' }, { interactive: false, cliVersion: 'x', api: controlPlane().api })).rejects.toThrow(
       /--type must be one of/,
     )
   })
 
   it('--json validation errors stay machine-readable: JSON on stdout + exit code 1, no throw', async () => {
-    await expect(feedback({ title: 'x', json: true }, { interactive: false, cliVersion: 'x', client: controlPlane().client })).resolves.toBeUndefined()
+    await expect(feedback({ title: 'x', json: true }, { interactive: false, cliVersion: 'x', api: controlPlane().api })).resolves.toBeUndefined()
     expect(process.exitCode).toBe(1)
   })
 
@@ -187,7 +188,7 @@ describe('feedback command', () => {
     const fetchImpl = (async () => {
       throw new Error('connect ECONNREFUSED')
     }) as unknown as typeof fetch
-    await expect(feedback({ ...valid, json: true }, { interactive: false, cliVersion: 'x', fetchImpl, client: controlPlane().client })).resolves.toBeUndefined()
+    await expect(feedback({ ...valid, json: true }, { interactive: false, cliVersion: 'x', fetchImpl, api: controlPlane().api })).resolves.toBeUndefined()
   })
 
   it('an unconfirmed timeout does not throw either', async () => {
@@ -196,7 +197,7 @@ describe('feedback command', () => {
       e.name = 'TimeoutError'
       throw e
     }) as unknown as typeof fetch
-    await expect(feedback({ ...valid, json: true }, { interactive: false, cliVersion: 'x', fetchImpl, client: controlPlane().client })).resolves.toBeUndefined()
+    await expect(feedback({ ...valid, json: true }, { interactive: false, cliVersion: 'x', fetchImpl, api: controlPlane().api })).resolves.toBeUndefined()
     expect(process.exitCode ?? 0).toBe(0)
   })
 })
@@ -206,8 +207,8 @@ describe('who is sending', () => {
     process.exitCode = 0
     vi.restoreAllMocks()
   })
-  const run = (plane: ReturnType<typeof controlPlane>, fetchImpl = fetchOk({ id: 'f-1', status: 'received' }).fetchImpl) =>
-    feedback({ ...valid, json: true }, { interactive: false, cliVersion: 'x', fetchImpl, client: plane.client })
+  const run = (plane: ReturnType<typeof controlPlane>, fetchImpl: typeof fetch, opts = valid) =>
+    feedback({ ...opts, json: true }, { interactive: false, cliVersion: 'x', fetchImpl, api: plane.api })
   const sent = (calls: Array<{ init: RequestInit }>) => calls[0]?.init.headers as Record<string, string> | undefined
 
   it('proves a signed-in cloud user with a token from the control plane', async () => {
@@ -215,15 +216,17 @@ describe('who is sending', () => {
     const { fetchImpl, calls } = fetchOk({ id: 'f-1', status: 'received' })
     await run(plane, fetchImpl)
     expect(plane.asked).toEqual(['GET /me/feedback-assertion'])
+    expect(plane.requestOpts[0]).toMatchObject({ evidence: false })
     expect(sent(calls)?.['Insta-User-Assertion']).toBe('platform.signed.token')
   })
 
-  it('refuses a signed-out cloud user with exit 2, before sending anything', async () => {
+  it('refuses a signed-out cloud user, and staging, with exit 2, before sending anything', async () => {
     const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     for (const plane of [
       controlPlane({ signedIn: false }),
       controlPlane({ answer: async () => { throw new ApiError(401, 'invalid token') } }),
+      controlPlane({ apiUrl: 'https://api.staging.instacloud.com' }),
     ]) {
       const { fetchImpl, calls } = fetchOk({ id: 'f-1', status: 'received' })
       await expect(run(plane, fetchImpl)).rejects.toThrow('exit 1')
@@ -231,14 +234,18 @@ describe('who is sending', () => {
       expect(calls).toHaveLength(0)
       expect(JSON.parse(String(out.mock.calls.at(-1)?.[0]))).toMatchObject({ status: 'refused', submitted: false })
     }
+    // Ahead of input validation, and so of the prompts that precede it.
+    await expect(run(controlPlane({ signedIn: false }), fetchOk({}).fetchImpl, { title: 'x' } as typeof valid)).rejects.toThrow('exit 1')
+    expect(process.exitCode).toBe(2)
   })
 
-  it('still sends when the control plane cannot vouch, just without a token', async () => {
-    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  it('still sends when the control plane cannot vouch, just without a token, and says so', async () => {
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const { fetchImpl, calls } = fetchOk({ id: 'f-1', status: 'received' })
     await run(controlPlane({ answer: async () => { throw new ApiError(503, 'unavailable') } }), fetchImpl)
     expect(calls).toHaveLength(1)
-    expect(sent(calls)?.['Insta-User-Assertion']).toBeUndefined()
+    expect(sent(calls)).not.toHaveProperty('Insta-User-Assertion')
+    expect(String(err.mock.calls[0]?.[0])).toMatch(/could not confirm who you are/)
     expect(process.exitCode ?? 0).toBe(0)
   })
 
@@ -248,7 +255,7 @@ describe('who is sending', () => {
     await run(plane, fetchImpl)
     expect(plane.asked).toEqual([])
     expect(calls).toHaveLength(1)
-    expect(sent(calls)?.['Insta-User-Assertion']).toBeUndefined()
+    expect(sent(calls)).not.toHaveProperty('Insta-User-Assertion')
   })
 })
 
