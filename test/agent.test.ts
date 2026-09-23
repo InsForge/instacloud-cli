@@ -55,6 +55,10 @@ it('stores private material with ignore/permissions and signs exact request fiel
   await expect(api.request('PUT', '/projects/p/secrets/X', { value: 'secret' })).rejects.toBeInstanceOf(AgentApprovalRequired)
   expect(fetcher).toHaveBeenCalledOnce()
 })
+it('an approval envelope without a message still tells the agent where the human reviews it', () => {
+  const e = new AgentApprovalRequired({ status: 'approval_required', approvalId: 'a1', action: 'deploy', url: 'https://console.test/projects/p?review=a1' })
+  expect(e.message).toBe('approval required for deploy — review it at https://console.test/projects/p?review=a1 or run: insta agent approvals approve a1')
+})
 it('signs a project-owned request that lacks /projects/ in its path with the named project session', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'insta-agent-')); dirs.push(dir)
   const pair = generateKeyPairSync('ed25519')
