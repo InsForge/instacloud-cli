@@ -216,7 +216,7 @@ describe('who is sending', () => {
     const { fetchImpl, calls } = fetchOk({ id: 'f-1', status: 'received' })
     await run(plane, fetchImpl)
     expect(plane.asked).toEqual(['GET /me/feedback-assertion'])
-    expect(plane.requestOpts[0]).toMatchObject({ evidence: false })
+    expect(plane.requestOpts[0]).toMatchObject({ evidence: false, signal: expect.any(AbortSignal) })
     expect(sent(calls)?.['Insta-User-Assertion']).toBe('platform.signed.token')
   })
 
@@ -228,13 +228,15 @@ describe('who is sending', () => {
       controlPlane({ answer: async () => { throw new ApiError(401, 'invalid token') } }),
       controlPlane({ apiUrl: 'https://api.staging.instacloud.com' }),
     ]) {
+      out.mockClear()
+      process.exitCode = 0
       const { fetchImpl, calls } = fetchOk({ id: 'f-1', status: 'received' })
       await expect(run(plane, fetchImpl)).rejects.toThrow('exit 1')
       expect(process.exitCode).toBe(2)
       expect(calls).toHaveLength(0)
       expect(JSON.parse(String(out.mock.calls.at(-1)?.[0]))).toMatchObject({ status: 'refused', submitted: false })
     }
-    // Ahead of input validation, and so of the prompts that precede it.
+    // Ahead of input validation.
     await expect(run(controlPlane({ signedIn: false }), fetchOk({}).fetchImpl, { title: 'x' } as typeof valid)).rejects.toThrow('exit 1')
     expect(process.exitCode).toBe(2)
   })
@@ -250,12 +252,14 @@ describe('who is sending', () => {
   })
 
   it('never asks a self-hosted control plane, signed in or not', async () => {
-    const plane = controlPlane({ apiUrl: 'https://insta.example.internal', signedIn: false })
-    const { fetchImpl, calls } = fetchOk({ id: 'f-1', status: 'received' })
-    await run(plane, fetchImpl)
-    expect(plane.asked).toEqual([])
-    expect(calls).toHaveLength(1)
-    expect(sent(calls)).not.toHaveProperty('Insta-User-Assertion')
+    for (const signedIn of [true, false]) {
+      const plane = controlPlane({ apiUrl: 'https://insta.example.internal', signedIn })
+      const { fetchImpl, calls } = fetchOk({ id: 'f-1', status: 'received' })
+      await run(plane, fetchImpl)
+      expect(plane.asked).toEqual([])
+      expect(calls).toHaveLength(1)
+      expect(sent(calls)).not.toHaveProperty('Insta-User-Assertion')
+    }
   })
 })
 
