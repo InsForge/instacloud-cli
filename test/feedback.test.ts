@@ -236,7 +236,11 @@ describe('who is sending', () => {
       expect(calls).toHaveLength(0)
       expect(JSON.parse(String(out.mock.calls.at(-1)?.[0]))).toMatchObject({ status: 'refused', submitted: false })
     }
-    // Ahead of input validation.
+  })
+
+  it('refuses a signed-out user before validating their input', async () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     await expect(run(controlPlane({ signedIn: false }), fetchOk({}).fetchImpl, { title: 'x' } as typeof valid)).rejects.toThrow('exit 1')
     expect(process.exitCode).toBe(2)
   })
