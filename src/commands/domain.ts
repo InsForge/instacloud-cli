@@ -6,7 +6,7 @@ import { domainDeps, domainTarget, setDomain, checkDomain, removeDomain, type Do
 type Quote = { domainName: string; purchasable: boolean; priceCents?: number; renewalPriceCents?: number; reason?: string }
 type Order = { id: string; domainName: string; years: number; status: string; priceCents: number; renewalPriceCents: number | null; checkoutUrl?: string; failedReason: string | null }
 type HostnameState = { hostname: string; state: string; reason?: string; service: string | null }
-type Purchased = { domainName: string; status: string; hostnames: HostnameState[]; expiresAt: string | null; autorenew: boolean; locked: boolean; nameservers: string[]; delegated: boolean; transferLockExpiresAt: string | null }
+type Purchased = { domainName: string; status: string; hostnames: HostnameState[]; expiresAt: string | null; autorenew: boolean; locked: boolean; nameservers: string[]; delegated: boolean; custody?: 'registrar' | 'managed' | 'foreign'; transferLockExpiresAt: string | null }
 type DnsRecord = { id: number; type: string; fqdn: string; answer: string; ttl: number; priority?: number; managed: boolean; hostname?: string }
 
 type RecordsOpts = { org?: string; json?: boolean }
@@ -111,10 +111,14 @@ function domainLines(d: Purchased, linked = true): string[] {
   }
   // The zone answers elsewhere, so nothing published here resolves and an attach is refused. The
   // repair is a next action, so it follows `linked` like the others: under --org it would name this org.
+  // Managed custody is the opposite case — the zone answers from InstaCloud's own nameservers, and
+  // attach works exactly as under the registrar — so `delegated` stays false there and only the
+  // custody line says where the zone lives.
   if (d.delegated) {
     out.push(`  delegated to ${d.nameservers.join(', ')}${linked ? '' : ' — attach is refused'}`)
     if (linked) out.push(`  attach is refused until: insta domain nameservers reset ${d.domainName}`)
   }
+  if (d.custody === 'managed') out.push(`  zone managed by InstaCloud (${d.nameservers.join(', ')}) — attach works as usual`)
   const w = Math.max(0, ...d.hostnames.map((x) => x.hostname.length))
   for (const h of d.hostnames) out.push(`  ${h.hostname.padEnd(w)}  ${h.state}${h.service ? ` → ${h.service}` : ''}${h.reason ? ` — ${h.reason}` : ''}`)
   return out
@@ -152,6 +156,26 @@ export async function domainStatus(name: string, opts: { org?: string; json?: bo
 
 const domainPath = (orgId: string, domainName: string): string =>
   `/orgs/${orgId}/domains/${encodeURIComponent(domainName)}`
+
+/**
+ * Move a bought domain's DNS onto an InstaCloud-managed zone. This is what makes an APEX serve:
+ * under the registrar's nameservers the apex flattens to shared proxy addresses no certificate
+ * authority will vouch for, and the hostname can never verify. Delegation copies every record —
+ * the platform's and yours — into the managed zone first, then switches the nameservers, so a
+ * hostname that was serving keeps serving; a hostname that failed BECAUSE the zone had been
+ * delegated away is revived to pending on its own. 202 approval_required in agent mode
+ * (domain.delegate); the platform requires org admin either way.
+ */
+export async function domainDelegate(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
+  const res = await api.rawRequest('POST', `${domainPath(orgId, domainName)}/delegate`)
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body)
+  const d = res.body as Purchased
+  for (const line of domainLines(d, !opts.org)) info(line)
+  // Hostname re-verification is the platform's own loop; the reader's next move is to watch it.
+  info(`hostnames re-verify on the managed zone by themselves — watch: insta domain status ${d.domainName}`)
+}
 
 export async function domainNameserversSet(domainName: string, hosts: string[], opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
   const nameservers = hosts.flatMap((h) => h.split(/[\s,]+/)).map((h) => h.replace(/\.$/, '')).filter(Boolean)

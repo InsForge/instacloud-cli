@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest'
-import { domainSearch, domainBuy, domainAttach, domainCheck, domainDetach, domainList, domainNameserversReset, domainNameserversSet, domainStatus, domainTransferCode, domainTransferLock, domainRecordsAdd, domainRecordsList, domainRecordsRemove, domainRecordsSet, ownerOf, searchLines } from '../src/commands/domain.js'
+import { domainSearch, domainBuy, domainAttach, domainCheck, domainDelegate, domainDetach, domainList, domainNameserversReset, domainNameserversSet, domainStatus, domainTransferCode, domainTransferLock, domainRecordsAdd, domainRecordsList, domainRecordsRemove, domainRecordsSet, ownerOf, searchLines } from '../src/commands/domain.js'
 import type { DomainDeps } from '../src/commands/compute.js'
 
 const services = [
@@ -331,6 +331,37 @@ const bought = (over: Record<string, unknown> = {}) => ({
   delegated: false,
   transferLockExpiresAt: null,
   ...over,
+})
+
+describe('domain delegate', () => {
+  it('posts to the delegate route and prints managed custody with the watch hint', async () => {
+    const answer = bought({
+      custody: 'managed',
+      nameservers: ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'],
+      hostnames: [
+        { hostname: 'myapp.com', state: 'pending', service: 'web' },
+        { hostname: 'www.myapp.com', state: 'pending', service: 'web' },
+      ],
+    })
+    const { deps: d, calls } = deps({}, { status: 200, body: answer })
+    await domainDelegate('myapp.com', {}, d)
+    expect(calls[0]).toMatchObject({ method: 'POST', path: '/orgs/org1/domains/myapp.com/delegate' })
+    expect(out()).toContain('zone managed by InstaCloud (ada.ns.cloudflare.com, bob.ns.cloudflare.com) — attach works as usual')
+    expect(out()).toContain('insta domain status myapp.com')
+    // Managed custody is not the delegated-away state: nothing here refuses an attach.
+    expect(out()).not.toContain('attach is refused')
+  })
+  it('stops at approval_required like the other gated verbs', async () => {
+    const { deps: d } = deps({}, { status: 202, body: { status: 'approval_required', approvalId: 'ap1' } })
+    await domainDelegate('myapp.com', {}, d)
+    expect(process.exitCode).toBe(2)
+  })
+  it('--json is the platform body, verbatim', async () => {
+    const answer = bought({ custody: 'managed' })
+    const { deps: d } = deps({}, { status: 200, body: answer })
+    await domainDelegate('myapp.com', { json: true }, d)
+    expect(JSON.parse(out())).toMatchObject({ custody: 'managed' })
+  })
 })
 
 describe('domain nameservers', () => {
