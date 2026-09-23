@@ -1,5 +1,7 @@
 // The org verbs take `--org`; `buy` and `attach` do not, because both bind the linked project: buy
 // spends the org's money under that project's policy, and attach names one of its services.
+// `delegate` is an org verb that ALSO signs with the linked project when one exists (agent mode
+// reads its gate there), so it sits in the --org set.
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
@@ -8,7 +10,7 @@ const entry = fileURLToPath(new URL('../src/index.ts', import.meta.url))
 const run = (...args: string[]) => spawnSync(process.execPath, ['--import', 'tsx', entry, ...args], { encoding: 'utf8', timeout: 10000 })
 
 it('offers --org on the org-wide domain verbs and on neither write', () => {
-  for (const verb of [['list'], ['status'], ['search'], ['records', 'list'], ['records', 'add']]) {
+  for (const verb of [['list'], ['status'], ['search'], ['delegate'], ['records', 'list'], ['records', 'add']]) {
     expect(run('domain', ...verb, '--help').stdout, verb.join(' ')).toContain('--org')
   }
   for (const verb of ['buy', 'attach']) {

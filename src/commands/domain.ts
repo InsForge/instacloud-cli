@@ -179,8 +179,14 @@ export async function domainDelegate(domainName: string, opts: RecordsOpts, deps
   const d = res.body as Purchased
   for (const line of domainLines(d, !opts.org)) info(line)
   // Hostname re-verification is the platform's own loop; the reader's next move is to watch it —
-  // in the org the delegate just acted on, so an explicit --org rides along.
-  info(`hostnames re-verify on the managed zone by themselves — watch: insta domain status ${d.domainName}${opts.org ? ` --org ${opts.org}` : ''}`)
+  // in the org the delegate just acted on, so an explicit --org rides along. But the platform
+  // revives only delegation-caused failures: when every hostname is still failed in this very
+  // answer, nothing is converging and the watch hint would contradict the `nothing serving —
+  // attach` line domainLines just printed, which IS the remedy there (attach works as usual
+  // under managed custody).
+  if (!d.hostnames.length || d.hostnames.some((h) => h.state !== 'failed')) {
+    info(`hostnames re-verify on the managed zone by themselves — watch: insta domain status ${d.domainName}${opts.org ? ` --org ${opts.org}` : ''}`)
+  }
 }
 
 export async function domainNameserversSet(domainName: string, hosts: string[], opts: RecordsOpts, deps?: DomainDeps): Promise<void> {

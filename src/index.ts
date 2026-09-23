@@ -275,7 +275,7 @@ dom.command('list').description("Domains bought through InstaCloud in this org �
 dom.command('status <name>').description("A bought domain's order and attach state")
   .option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((name, o) => domainCmd.domainStatus(name, o)))
-dom.command('delegate <domain>').description("Move a bought domain's DNS onto an InstaCloud-managed zone — the way an apex hostname gets a certificate and serves. Every record is copied first and the nameservers switch after, so serving hostnames stay up and ones that failed by delegating away revive on their own (gated: domain.delegate; org admin)")
+dom.command('delegate <domain>').description("Move a bought domain's DNS onto an InstaCloud-managed zone — the way an apex hostname gets a certificate and serves. Every record is copied first and the nameservers switch after, so serving hostnames stay up and ones that failed by delegating away revive on their own. While managed, `domain records` answers 409 for every verb (managed-zone record editing is not covered yet); `nameservers reset` is the way back (org admin; gated: domain.delegate — agent mode gates from a linked project, an unlinked --org call falls under org administration instead)")
   .option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((domain, o) => domainCmd.domainDelegate(domain, o)))
 const ns = dom.command('nameservers').description("Delegate a bought domain's zone to nameservers you name, or put it back on InstaCloud's registrar — for InstaCloud's own managed zone, use `insta domain delegate`")

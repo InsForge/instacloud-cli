@@ -353,6 +353,19 @@ describe('domain delegate', () => {
     // Managed custody is not the delegated-away state: nothing here refuses an attach.
     expect(out()).not.toContain('attach is refused')
   })
+  // The platform revives only delegation-caused failures, so an answer where every hostname is
+  // still failed is not converging: the `nothing serving — attach` line is the remedy there, and
+  // a watch hint one line later would contradict it.
+  it('omits the watch hint when the answer shows nothing converging', async () => {
+    const answer = bought({
+      custody: 'managed',
+      hostnames: [{ hostname: 'myapp.com', state: 'failed', service: 'web', reason: 'already attached to another compute service' }],
+    })
+    const { deps: d } = deps({}, { status: 200, body: answer })
+    await domainDelegate('myapp.com', {}, d)
+    expect(out()).toContain('nothing serving')
+    expect(out()).not.toContain('re-verify on the managed zone')
+  })
   it('stops at approval_required like the other gated verbs', async () => {
     const { deps: d } = deps({}, { status: 202, body: { status: 'approval_required', approvalId: 'ap1' } })
     await domainDelegate('myapp.com', {}, d)
