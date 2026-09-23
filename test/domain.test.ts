@@ -345,7 +345,9 @@ describe('domain delegate', () => {
     })
     const { deps: d, calls } = deps({}, { status: 200, body: answer })
     await domainDelegate('myapp.com', {}, d)
-    expect(calls[0]).toMatchObject({ method: 'POST', path: '/orgs/org1/domains/myapp.com/delegate' })
+    // Same precedent as `buy`: the org route signs for the linked project in agent mode, where
+    // domain.delegate is read — without it a bootstrap session is refused instead of asked.
+    expect(calls[0]).toMatchObject({ method: 'POST', path: '/orgs/org1/domains/myapp.com/delegate', scope: { projectId: 'p1' } })
     expect(out()).toContain('zone managed by InstaCloud (ada.ns.cloudflare.com, bob.ns.cloudflare.com) — attach works as usual')
     expect(out()).toContain('insta domain status myapp.com')
     // Managed custody is not the delegated-away state: nothing here refuses an attach.
@@ -356,11 +358,14 @@ describe('domain delegate', () => {
     await domainDelegate('myapp.com', {}, d)
     expect(process.exitCode).toBe(2)
   })
-  it('--json is the platform body, verbatim', async () => {
+  it('--json is the platform body, verbatim, and the hint carries --org', async () => {
     const answer = bought({ custody: 'managed' })
     const { deps: d } = deps({}, { status: 200, body: answer })
     await domainDelegate('myapp.com', { json: true }, d)
-    expect(JSON.parse(out())).toMatchObject({ custody: 'managed' })
+    expect(JSON.parse(out())).toEqual(answer)
+    stdout.length = 0
+    await domainDelegate('myapp.com', { org: 'org9' }, d)
+    expect(out()).toContain('insta domain status myapp.com --org org9')
   })
 })
 

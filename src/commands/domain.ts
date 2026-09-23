@@ -1,4 +1,5 @@
 import { ApiClient } from '../api.js'
+import { readProject } from '../config.js'
 import { info, printJson, handleApproval, die } from '../util.js'
 import { presentUrl, resolveOrgId } from './billing.js'
 import { domainDeps, domainTarget, setDomain, checkDomain, removeDomain, type DomainDeps } from './compute.js'
@@ -168,13 +169,18 @@ const domainPath = (orgId: string, domainName: string): string =>
  */
 export async function domainDelegate(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
   const { api, orgId } = await orgDeps(opts, deps)
-  const res = await api.rawRequest('POST', `${domainPath(orgId, domainName)}/delegate`)
+  // The org route still signs for a PROJECT in agent mode — `domain.delegate` is read there, the
+  // same precedent `buy` documents above — but a user token needs none, so the link stays optional
+  // and the verb keeps working from an unlinked directory.
+  const projectId = deps?.project?.projectId ?? (await readProject())?.projectId ?? undefined
+  const res = await api.rawRequest('POST', `${domainPath(orgId, domainName)}/delegate`, undefined, projectId ? { projectId } : undefined)
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const d = res.body as Purchased
   for (const line of domainLines(d, !opts.org)) info(line)
-  // Hostname re-verification is the platform's own loop; the reader's next move is to watch it.
-  info(`hostnames re-verify on the managed zone by themselves — watch: insta domain status ${d.domainName}`)
+  // Hostname re-verification is the platform's own loop; the reader's next move is to watch it —
+  // in the org the delegate just acted on, so an explicit --org rides along.
+  info(`hostnames re-verify on the managed zone by themselves — watch: insta domain status ${d.domainName}${opts.org ? ` --org ${opts.org}` : ''}`)
 }
 
 export async function domainNameserversSet(domainName: string, hosts: string[], opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
