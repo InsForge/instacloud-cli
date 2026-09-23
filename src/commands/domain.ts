@@ -171,8 +171,12 @@ export async function domainDelegate(domainName: string, opts: RecordsOpts, deps
   const { api, orgId } = await orgDeps(opts, deps)
   // The org route still signs for a PROJECT in agent mode — `domain.delegate` is read there, the
   // same precedent `buy` documents above — but a user token needs none, so the link stays optional
-  // and the verb keeps working from an unlinked directory.
-  const projectId = deps?.project?.projectId ?? (await readProject())?.projectId ?? undefined
+  // and the verb keeps working from an unlinked directory. The link only counts when it belongs to
+  // the org being mutated: under `--org` naming ANOTHER org, signing with this directory's project
+  // would evaluate authorization against the wrong project's policy, so the call goes projectless
+  // and the platform's org-administration path judges it instead.
+  const link = deps?.project ?? (await readProject()) ?? undefined
+  const projectId = link && link.orgId === orgId ? link.projectId : undefined
   const res = await api.rawRequest('POST', `${domainPath(orgId, domainName)}/delegate`, undefined, projectId ? { projectId } : undefined)
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)

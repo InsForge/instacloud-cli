@@ -380,6 +380,17 @@ describe('domain delegate', () => {
     await domainDelegate('myapp.com', { org: 'org9' }, d)
     expect(out()).toContain('insta domain status myapp.com --org org9')
   })
+  // The link signs the call only for ITS OWN org: under --org naming another org, signing with
+  // this directory's project would judge the mutation against the wrong project's policy.
+  it('does not sign a mismatched --org with the linked project', async () => {
+    const answer = bought({ custody: 'managed' })
+    const { deps: d, calls } = deps({}, { status: 200, body: answer })
+    await domainDelegate('myapp.com', { org: 'org9' }, d)
+    expect(calls[0]).toMatchObject({ method: 'POST', path: '/orgs/org9/domains/myapp.com/delegate' })
+    expect(calls[0]!.scope).toBeUndefined()
+    await domainDelegate('myapp.com', { org: 'org1' }, d)
+    expect(calls[1]).toMatchObject({ path: '/orgs/org1/domains/myapp.com/delegate', scope: { projectId: 'p1' } })
+  })
 })
 
 describe('domain nameservers', () => {
