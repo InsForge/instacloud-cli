@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest'
-import { domainSearch, domainBuy, domainAttach, domainCheck, domainDetach, domainList, domainNameserversReset, domainNameserversSet, domainStatus, domainTransferCode, domainTransferLock, domainRecordsAdd, domainRecordsList, domainRecordsRemove, domainRecordsSet, ownerOf, searchLines } from '../src/commands/domain.js'
+import { domainSearch, domainBuy, domainAttach, domainCheck, domainDelegate, domainDetach, domainList, domainNameserversReset, domainNameserversSet, domainStatus, domainTransferCode, domainTransferLock, domainRecordsAdd, domainRecordsList, domainRecordsRemove, domainRecordsSet, ownerOf, searchLines } from '../src/commands/domain.js'
 import type { DomainDeps } from '../src/commands/compute.js'
 
 const services = [
@@ -331,6 +331,66 @@ const bought = (over: Record<string, unknown> = {}) => ({
   delegated: false,
   transferLockExpiresAt: null,
   ...over,
+})
+
+describe('domain delegate', () => {
+  it('posts to the delegate route and prints managed custody with the watch hint', async () => {
+    const answer = bought({
+      custody: 'managed',
+      nameservers: ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'],
+      hostnames: [
+        { hostname: 'myapp.com', state: 'pending', service: 'web' },
+        { hostname: 'www.myapp.com', state: 'pending', service: 'web' },
+      ],
+    })
+    const { deps: d, calls } = deps({}, { status: 200, body: answer })
+    await domainDelegate('myapp.com', {}, d)
+    // Same precedent as `buy`: the org route signs for the linked project in agent mode, where
+    // domain.delegate is read — without it a bootstrap session is refused instead of asked.
+    expect(calls[0]).toMatchObject({ method: 'POST', path: '/orgs/org1/domains/myapp.com/delegate', scope: { projectId: 'p1' } })
+    expect(out()).toContain('zone managed by InstaCloud (ada.ns.cloudflare.com, bob.ns.cloudflare.com) — attach works as usual')
+    expect(out()).toContain('insta domain status myapp.com')
+    // Managed custody is not the delegated-away state: nothing here refuses an attach.
+    expect(out()).not.toContain('attach is refused')
+  })
+  // The platform revives only delegation-caused failures, so an answer where every hostname is
+  // still failed is not converging: the `nothing serving — attach` line is the remedy there, and
+  // a watch hint one line later would contradict it.
+  it('omits the watch hint when the answer shows nothing converging', async () => {
+    const answer = bought({
+      custody: 'managed',
+      hostnames: [{ hostname: 'myapp.com', state: 'failed', service: 'web', reason: 'already attached to another compute service' }],
+    })
+    const { deps: d } = deps({}, { status: 200, body: answer })
+    await domainDelegate('myapp.com', {}, d)
+    expect(out()).toContain('nothing serving')
+    expect(out()).not.toContain('re-verify on the managed zone')
+  })
+  it('stops at approval_required like the other gated verbs', async () => {
+    const { deps: d } = deps({}, { status: 202, body: { status: 'approval_required', approvalId: 'ap1' } })
+    await domainDelegate('myapp.com', {}, d)
+    expect(process.exitCode).toBe(2)
+  })
+  it('--json is the platform body, verbatim, and the hint carries --org', async () => {
+    const answer = bought({ custody: 'managed' })
+    const { deps: d } = deps({}, { status: 200, body: answer })
+    await domainDelegate('myapp.com', { json: true }, d)
+    expect(JSON.parse(out())).toEqual(answer)
+    stdout.length = 0
+    await domainDelegate('myapp.com', { org: 'org9' }, d)
+    expect(out()).toContain('insta domain status myapp.com --org org9')
+  })
+  // The link signs the call only for ITS OWN org: under --org naming another org, signing with
+  // this directory's project would judge the mutation against the wrong project's policy.
+  it('does not sign a mismatched --org with the linked project', async () => {
+    const answer = bought({ custody: 'managed' })
+    const { deps: d, calls } = deps({}, { status: 200, body: answer })
+    await domainDelegate('myapp.com', { org: 'org9' }, d)
+    expect(calls[0]).toMatchObject({ method: 'POST', path: '/orgs/org9/domains/myapp.com/delegate' })
+    expect(calls[0]!.scope).toBeUndefined()
+    await domainDelegate('myapp.com', { org: 'org1' }, d)
+    expect(calls[1]).toMatchObject({ path: '/orgs/org1/domains/myapp.com/delegate', scope: { projectId: 'p1' } })
+  })
 })
 
 describe('domain nameservers', () => {
