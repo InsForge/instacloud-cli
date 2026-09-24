@@ -287,7 +287,7 @@ ns.command('reset <domain>').description("Put the zone back on the registrar's o
   .action(guard((domain, o) => domainCmd.domainNameserversReset(domain, o)))
 
 const zone = dom.command('zone').description("Bring-your-own domains served from an InstaCloud-managed zone (nameserver delegation): point the domain's registrar at the pair `zone delegate` answers, and every attach's records — apexes included — are published for you. The alternative stays available: `insta domain attach` alone prints records to paste into your own zone")
-zone.command('delegate <domain>').description("Delegate a domain you own elsewhere: builds its managed zone (seeded by a provider record scan — a HEURISTIC, so review `zone records` and add anything missing at your current provider BEFORE switching nameservers; re-running delegate re-imports) and answers the two nameservers to set at your registrar. A domain carrying live MX records is refused — move mail first or keep the records path (org admin; gated: zone.delegate)")
+zone.command('delegate <domain>').description("Delegate a domain you own elsewhere: builds its managed zone (seeded by a provider record scan — a HEURISTIC, so review `zone records` and add anything missing at your current provider BEFORE switching nameservers; re-running delegate re-imports) and answers the two nameservers to set at your registrar. A domain carrying live MX records is refused — move mail first or keep the records path (org admin; gated: zone.delegate — agent mode gates from a linked project, an unlinked --org call falls under org administration instead)")
   .option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((domain, o) => domainCmd.zoneDelegate(domain, o)))
 zone.command('list').description("The org's delegated zones: which are still waiting for the nameserver switch and which are serving")
@@ -296,7 +296,7 @@ zone.command('list').description("The org's delegated zones: which are still wai
 zone.command('records <domain>').description("Every record in the delegated zone — the pre-switch review. The scan seeds common records but is not exhaustive: compare against your current DNS and add what is missing at your CURRENT provider, then re-run `zone delegate` to re-import")
   .option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((domain, o) => domainCmd.zoneRecords(domain, o)))
-zone.command('release <domain>').description("Release a delegated zone: the platform's records are pruned and the zone deleted. Point the nameservers back at your own provider; hostnames re-verify on the records path (org admin; gated: zone.delegate)")
+zone.command('release <domain>').description("Release a delegated zone: the platform's records are pruned and the zone deleted. Point the nameservers back at your own provider; hostnames re-verify on the records path (org admin; gated: zone.delegate — agent mode gates from a linked project, an unlinked --org call falls under org administration instead)")
   .option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((domain, o) => domainCmd.zoneRelease(domain, o)))
 
