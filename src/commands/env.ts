@@ -66,6 +66,7 @@ export async function envUse(name: string, opts: { json?: boolean } = {}): Promi
   delete next.refreshToken
   delete next.user
   delete next.agentCredential
+  delete next.tokenScope // belongs to the dropped key; status must not report a scope while logged out
   await writeGlobal(next)
 
   if (opts.json) return printJson(envUseResult(target, from ?? null, true, hadSession))

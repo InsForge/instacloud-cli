@@ -121,7 +121,7 @@ tk.command('create <name>').description('Mint a token; defaults to the current o
   .option('--project <id>', 'bind to this project (implies its org)')
   .option('--account', 'account-wide token: everything your account can do (mutually exclusive with --org/--project)')
   .option('--read-only', 'GET only; cannot run SQL or change anything')
-  .option('--expires <dur>', '30d | 90d | 1y | never', '90d')
+  .option('--expires <dur>', '30d | 90d | 1y | never — any <n>d or <n>y works', '90d')
   .option('--json')
   .action(guard((name, o) => tokens.tokensCreate(name, o)))
 tk.command('revoke <id>').description('Revoke a token — it stops working immediately').option('--json').action(guard((id, o) => tokens.tokensRevoke(id, o)))

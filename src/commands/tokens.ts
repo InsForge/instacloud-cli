@@ -32,15 +32,17 @@ export type TokensDeps = { api?: TokensApi; linked?: () => Promise<ProjectConfig
 
 const loadApi = async (deps: TokensDeps): Promise<TokensApi> => deps.api ?? ApiClient.load()
 
-/** `--expires` → `expiresInDays`: '30d' → 30, '1y' → 365, 'never' (or absent) → undefined, i.e.
- *  the field is not sent. Anything else is a usage error, raised before any request is made. */
+/** `--expires` → `expiresInDays`: `<n>d` → n, `<n>y` → n×365, 'never' (or absent) → undefined, i.e.
+ *  the field is not sent. 30d / 90d / 1y are the documented presets; any positive `<n>d` / `<n>y` is
+ *  accepted because the platform takes any day count (it caps at its own maximum). Anything else is
+ *  a usage error, raised before any request is made. */
 export function parseExpires(v: string | undefined): number | undefined {
   if (v === undefined) return undefined
   const s = v.trim().toLowerCase()
   if (s === 'never') return undefined
   const m = /^(\d+)([dy])$/.exec(s)
   const n = m ? Number(m[1]) : 0
-  if (!m || !Number.isSafeInteger(n) || n <= 0) throw new Error(`--expires expects 30d | 90d | 1y | never, got "${v}"`)
+  if (!m || !Number.isSafeInteger(n) || n <= 0) throw new Error(`--expires expects a duration like 30d, 90d, 1y (any <n>d or <n>y) or never, got "${v}"`)
   return m[2] === 'y' ? n * 365 : n
 }
 
@@ -127,6 +129,9 @@ async function resolveBinding(api: TokensApi, opts: TokensCreateOpts, linked: ()
     return { orgId: project.org_id, projectId: project.id }
   }
   if (opts.org) return { orgId: opts.org }
+  // A project-scoped login cannot mint at all (the platform answers 403 token_scope on POST /tokens);
+  // say so here rather than requesting an org token it could never be granted.
+  if (api.config.tokenScope?.projectId) die(`this login is a project-scoped token (${describeTokenScope(api.config.tokenScope)}) and cannot mint tokens — log in with an org or account credential first`)
   const bound = api.config.tokenScope?.orgId
   if (bound) return { orgId: bound }
   const link = await linked()

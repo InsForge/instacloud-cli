@@ -174,6 +174,14 @@ describe('tokensCreate — default org', () => {
     expect(calls.some((c) => c.path === '/orgs')).toBe(false)
   })
 
+  it('logged in with a project-scoped token, create stops with a clear error — it never asks for an org token', async () => {
+    const { err } = capture()
+    const { api, calls } = fakeApi({ orgs: [ORG_A], tokenScope: { scope: 'project', orgId: ORG_A.id, projectId: 'proj-1', access: 'read_only' } })
+    await expect(tokensCreate('ci', { json: true }, { api, linked: unlinked })).rejects.toThrow(/exit 1/)
+    expect(err()).toMatch(/project-scoped token .* cannot mint/)
+    expect(calls).toEqual([])
+  })
+
   it('--expires becomes expiresInDays (default 90d); never omits it', async () => {
     capture()
     const dflt = fakeApi({ orgs: [ORG_A] })
