@@ -1,7 +1,7 @@
 // Thin API client over the platform control-plane. Handles bearer auth + one-shot refresh on 401.
 // 2xx (including 202 approval_required) returns the parsed body; >=400 throws ApiError.
-import { readGlobal, readPersistedGlobal, writeGlobal, readProject, persistAutoLink, resolveProjectLink, foreignLinkMessage, type GlobalConfig, type ProjectConfig } from './config.js'
-import { autoResolveProject, promptChoice, type ProjectItem } from './resolve-project.js'
+import { readGlobal, readPersistedGlobal, writeGlobal, readProject, persistAutoLink, resolveProjectLink, foreignLinkMessage, type GlobalConfig, type ProjectConfig, type TokenScopeInfo } from './config.js'
+import { autoResolveProject, promptChoice, type ProjectItem, type ResolveDeps } from './resolve-project.js'
 import { approvalHint, die } from './util.js'
 import { USER_AGENT } from './version.js'
 import { agentHeaders, agentMode, type AgentScope } from './agent.js'
@@ -17,12 +17,16 @@ export class AgentApprovalRequired extends Error {
 }
 
 // Store a durable insta_ key as the credential: set it as the bearer and drop any refresh token (an insta_ key never rotates; a stale one would leak to /auth/refresh on a 401).
-export function storeApiKeyCredential(cfg: GlobalConfig, token: string, user?: GlobalConfig['user'], agentCredential = false): void {
+// `tokenScope` is the key's binding from /me (spec §6). It belongs to THIS key: a plain key replacing a
+// scoped one must not inherit a binding that would steer project resolution for the wrong credential.
+export function storeApiKeyCredential(cfg: GlobalConfig, token: string, user?: GlobalConfig['user'], agentCredential = false, tokenScope?: TokenScopeInfo): void {
   cfg.accessToken = token
   delete cfg.refreshToken
   if (user) cfg.user = user
   if (agentCredential) cfg.agentCredential = true
   else delete cfg.agentCredential
+  if (tokenScope) cfg.tokenScope = tokenScope
+  else delete cfg.tokenScope
 }
 
 type RawResult = { status: number; body: any }
@@ -69,11 +73,12 @@ export class ApiClient {
     this.cfg.refreshToken = tokens.refreshToken
     if (user) this.cfg.user = user
     delete this.cfg.agentCredential
+    delete this.cfg.tokenScope
   }
 
   // Adopt a durable insta_ key as the credential (non-interactive `login --api-key`).
-  setApiKey(token: string, user?: GlobalConfig['user'], agentCredential?: boolean): void {
-    storeApiKeyCredential(this.cfg, token, user, agentCredential)
+  setApiKey(token: string, user?: GlobalConfig['user'], agentCredential?: boolean, tokenScope?: TokenScopeInfo): void {
+    storeApiKeyCredential(this.cfg, token, user, agentCredential, tokenScope)
   }
 
   get agentCredential(): boolean { return this.cfg.agentCredential === true }
@@ -83,6 +88,7 @@ export class ApiClient {
     delete this.cfg.refreshToken
     delete this.cfg.user
     delete this.cfg.agentCredential
+    delete this.cfg.tokenScope
   }
 
   // Returns parsed body for status < 400 (incl. 202); throws ApiError otherwise.
@@ -165,11 +171,7 @@ export async function requireProject(deps: RequireProjectDeps = {}): Promise<Pro
   // one-keystroke picker when several) and persist the choice so this happens once per dir.
   const api = await ApiClient.load()
   try {
-    const orgs = (await api.request<{ orgs: Array<{ id: string }> }>('GET', '/orgs')).orgs
-    const orgId = orgs[0]?.id ?? 'local'
-    return await autoResolveProject(orgId, {
-      listProjects: async () =>
-        (await api.request<{ projects: ProjectItem[] }>('GET', `/orgs/${orgId}/projects`)).projects,
+    return await resolveProjectFromApi(api, {
       promptChoice,
       save: async (c) => {
         // stderr: this is a diagnostic that can precede ANY command's output — under --json,
@@ -190,4 +192,33 @@ export async function requireProject(deps: RequireProjectDeps = {}): Promise<Pro
     }
     die(e instanceof Error ? e.message : String(e))
   }
+}
+
+export type ApiResolveDeps = Pick<ResolveDeps, 'promptChoice' | 'save' | 'tty'>
+
+// The unlinked resolution given a client — exported, with the client injectable, so the scoped
+// paths are testable over a fake fetch. The stored tokenScope is read FIRST (spec §9.2): a
+// project-scoped key gets 403 token_scope from GET /orgs and has exactly one project anyway, so
+// its link is built from the project itself; an org-scoped key sees exactly one org, so /orgs is
+// skipped for the bound one. No scope (a session, or a key adopted before scopes were recorded)
+// keeps the original path.
+export async function resolveProjectFromApi(api: ApiClient, deps: ApiResolveDeps): Promise<ProjectConfig> {
+  const scope = api.config.tokenScope
+  if (scope?.projectId) {
+    const { project, branches } = await api.request<{
+      project: { id: string; org_id: string }
+      branches?: Array<{ name: string; is_default?: boolean }>
+    }>('GET', `/projects/${scope.projectId}`)
+    // The default branch comes from the project detail (Branch.is_default); `main` is only the
+    // fallback an older platform without the list would get, like `project link` assumes.
+    const link: ProjectConfig = { projectId: project.id, orgId: project.org_id, branch: branches?.find((b) => b.is_default)?.name ?? 'main' }
+    await deps.save(link)
+    return link
+  }
+  const orgId = scope?.orgId ?? (await api.request<{ orgs: Array<{ id: string }> }>('GET', '/orgs')).orgs[0]?.id ?? 'local'
+  return autoResolveProject(orgId, {
+    listProjects: async () =>
+      (await api.request<{ projects: ProjectItem[] }>('GET', `/orgs/${orgId}/projects`)).projects,
+    ...deps,
+  })
 }

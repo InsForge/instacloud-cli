@@ -1,7 +1,8 @@
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { ApiClient, ApiError, linkedProject } from '../api.js'
-import { readGlobal, readPersistedGlobal } from '../config.js'
+import { readGlobal, readPersistedGlobal, type TokenScopeInfo } from '../config.js'
+import { describeTokenScope } from './tokens.js'
 import { agentMode } from '../agent.js'
 import { ENVS, ENV_NAMES, envForApiUrl, isEnvName, normalizeUrl } from '../env.js'
 import { info, die, printJson, promptPassword, openUrl } from '../util.js'
@@ -110,6 +111,9 @@ export async function loginApiKey(key: string, opts: { apiUrl?: string; env?: st
   const user = await applyApiKeyLogin(api, key)
   await api.persist()
   info(`logged in as ${user.email ?? user.id} @ ${api.apiUrl}`)
+  // Say what this credential can reach: a scoped token's 403s later are easier to place.
+  const scope = api.config.tokenScope
+  if (scope && (scope.scope !== 'account' || scope.access !== 'full')) info(`  token scope: ${describeTokenScope(scope)}`)
 }
 
 export type AuthedUser = { id: string; email: string | null; name: string | null }
@@ -117,15 +121,31 @@ export type AuthedUser = { id: string; email: string | null; name: string | null
 // The client surface applyApiKeyLogin needs — ApiClient in prod, faked in tests.
 export type ApiKeyClient = {
   request: (method: string, path: string, body?: unknown, opts?: { evidence?: boolean }) => Promise<any>
-  setApiKey: (token: string, user?: AuthedUser, agentCredential?: boolean) => void
+  setApiKey: (token: string, user?: AuthedUser, agentCredential?: boolean, tokenScope?: TokenScopeInfo) => void
 }
 
-// Verify an insta_ key with a bare /me probe (an agent-minted key cannot enroll a session, and /me says which kind this is), then store it with the user and that kind.
+// The binding /me reports for an insta_ key (`token`, spec §6), validated rather than cast. A shape
+// this CLI does not know is stored as NO scope — account-wide behaviour, which the platform still
+// enforces against, and the guard's token_scope hint covers the surprise — never as a half-parsed one.
+export function parseTokenScope(v: unknown): TokenScopeInfo | undefined {
+  if (!v || typeof v !== 'object') return undefined
+  const t = v as Record<string, unknown>
+  if (t.scope !== 'account' && t.scope !== 'org' && t.scope !== 'project') return undefined
+  if (t.access !== 'full' && t.access !== 'read_only') return undefined
+  const out: TokenScopeInfo = { scope: t.scope, access: t.access }
+  if (typeof t.orgId === 'string' && t.orgId) out.orgId = t.orgId
+  if (typeof t.projectId === 'string' && t.projectId) out.projectId = t.projectId
+  if (out.scope !== 'account' && !out.orgId) return undefined
+  if (out.scope === 'project' && !out.projectId) return undefined
+  return out
+}
+
+// Verify an insta_ key with a bare /me probe (an agent-minted key cannot enroll a session, and /me says which kind this is), then store it with the user, that kind, and the key's scope.
 export async function applyApiKeyLogin(client: ApiKeyClient, key: string): Promise<AuthedUser> {
   key = key.trim() // tolerate a trailing newline / stray whitespace from `--api-key "$(cat token)"`
-  if (!key.startsWith('insta_')) throw new Error('--api-key expects an insta_ token (mint one with POST /tokens)')
+  if (!key.startsWith('insta_')) throw new Error('--api-key expects an insta_ token (mint one with `insta tokens create <name>`)')
   client.setApiKey(key)
-  let me: { user?: AuthedUser; agentCredential?: boolean }
+  let me: { user?: AuthedUser; agentCredential?: boolean; token?: unknown }
   try {
     me = await client.request('GET', '/me', undefined, { evidence: false })
   } catch (e) {
@@ -133,7 +153,7 @@ export async function applyApiKeyLogin(client: ApiKeyClient, key: string): Promi
     throw e
   }
   if (!me?.user) throw new Error('unexpected response while verifying the API key')
-  client.setApiKey(key, me.user, me.agentCredential === true)
+  client.setApiKey(key, me.user, me.agentCredential === true, parseTokenScope(me.token))
   return me.user
 }
 
@@ -358,9 +378,12 @@ export async function status(opts: { json?: boolean }): Promise<void> {
   // Surface the environment name alongside the URL: "api: https://api.staging.instacloud.com" is
   // easy to skim past, and mistaking staging for prod is the mistake worth making loud.
   const env = envForApiUrl(api.apiUrl)
-  if (opts.json) return printJson({ env, apiUrl: api.apiUrl, user, project })
+  const tokenScope = api.config.tokenScope ?? null
+  if (opts.json) return printJson({ env, apiUrl: api.apiUrl, user, project, tokenScope })
   info(`env:     ${env ?? '(custom)'}`)
   info(`api:     ${api.apiUrl}`)
   info(`user:    ${user ? (user.email ?? user.id) : '(not logged in)'}`)
+  // Only a scoped insta_ key has one; a session login is the account itself.
+  if (tokenScope) info(`token:   ${describeTokenScope(tokenScope)}`)
   info(`project: ${project ? `${project.projectId} (branch ${project.branch})` : '(none linked)'}`)
 }
