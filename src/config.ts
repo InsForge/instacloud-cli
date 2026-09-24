@@ -69,9 +69,8 @@ export function setApiUrlOverride(url: string | undefined): void {
  *  a preview) is treated the same way — its session is equally foreign. */
 export function pickApiUrl(parsed: GlobalConfig | null, env: NodeJS.ProcessEnv, cliOverride?: string): GlobalConfig {
   // `env` is the environment this call is deciding for, so an ABSENT property means unset — not
-  // "ask the real process". envFromEnvVar defaults its parameter to process.env.INSTA_ENV, so
-  // passing it `env.INSTA_ENV` unguarded made a caller handing in `{}` (every test, and any future
-  // caller with a synthetic environment) silently read the ambient one instead.
+  // "ask the real process": envFromEnvVar defaults its parameter to process.env.INSTA_ENV, so it
+  // must never be handed `undefined`.
   const named = env.INSTA_ENV === undefined ? null : envFromEnvVar(env.INSTA_ENV)
   const override = cliOverride ?? env.INSTA_API_URL ?? (named ? ENVS[named].api : undefined)
   if (!parsed) return { apiUrl: override ?? DEFAULT_API }
@@ -182,8 +181,8 @@ export async function findProjectRoot(cwd = process.cwd()): Promise<string | nul
   let dir = resolve(cwd)
   for (;;) {
     // Stop AT the home directory rather than skipping it: a link above home is not a project for
-    // home or anything below it, and climbing past home let `insta project link` run in ~ resolve
-    // to, and overwrite, an ancestor's link after the home-directory check had passed.
+    // home or anything below it, and climbing past home would let `insta project link` run in ~
+    // resolve to, and overwrite, an ancestor's link after the home-directory check has passed.
     if (isHomeDir(dir)) return null
     try {
       await readFile(join(dir, PROJECT_DIR, PROJECT_FILE), 'utf8')

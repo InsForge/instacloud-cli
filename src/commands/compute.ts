@@ -1899,12 +1899,10 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
   const svc = resolveSoleService(services as ComputeRow[], 'compute', serviceName)
   const alias = aliasFor(svc.name)
 
-  // BEFORE the mint, and the order is the fix. mintCert writes
-  // `<alias>-cert.pub` as part of succeeding, so checking afterwards meant a
-  // collision had already overwritten the certificate of the alias it was
-  // about to refuse -- the previously working `api.insta` could no longer
-  // authenticate, and the command that broke it exited with an error saying it
-  // had done nothing. Nothing is written until the alias is known to be ours.
+  // BEFORE the mint: mintCert writes `<alias>-cert.pub` as part of succeeding,
+  // so a collision checked afterwards has already overwritten the certificate
+  // of the alias it is about to refuse. Nothing is written until the alias is
+  // known to be ours.
   assertAliasFree(readAliasStore(), alias, { projectId: p.projectId, serviceId: svc.id, branch })
 
   const out = await mint(api, p.projectId, svc.id, (deps.keyPair ?? ensureKeyPair)(), alias)
@@ -1913,11 +1911,10 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
   let installed = false
   try {
     // --setup PROMISES a trust anchor, so a response without one cannot be
-    // reported as configured. Skipping installCA and carrying on left plain
-    // `ssh`/`scp` facing a host-key prompt on every new node behind the load
-    // balancer -- the exact failure the anchor exists to prevent -- while the
-    // command printed the short alias and claimed success. Checked before
-    // anything is installed, so the refusal is clean.
+    // reported as configured: without installCA, plain `ssh`/`scp` face a
+    // host-key prompt on every new node behind the load balancer -- the exact
+    // failure the anchor exists to prevent. Checked before anything is
+    // installed, so the refusal is clean.
     if (opts.setup && !out.caPublicKey) {
       throw new Error(
         'the platform did not return an ssh certificate authority key, so `--setup` cannot install the trust anchor it promises.\n' +
@@ -1940,17 +1937,12 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
       }
 
       // Whether ~/.ssh is BACKING this store, not merely whether --setup was
-      // passed. The store and the certificate are rewritten by every issuance,
-      // `--setup` or not; the config block and the anchor used to be rewritten
-      // only by `--setup`. So a plain re-issue that came back with a moved
-      // host, a renamed principal or a rotated CA updated half of what an
-      // installed `ssh api.insta` depends on and left the rest describing
-      // yesterday -- the alias went on routing to the old host holding a
-      // certificate minted for the new one, and the command printed success.
-      //
-      // Once the block exists it is a rendering of the whole store, so any
-      // store write has to re-render it. All four artifacts then move together
-      // under the one lock, with the same undo chain as a setup.
+      // passed. Once the block exists it is a rendering of the whole store, so
+      // any store write has to re-render it: a re-issue that comes back with a
+      // moved host, a renamed principal or a rotated CA must update the config
+      // block and the anchor along with the store and the certificate. All four
+      // artifacts move together under the one lock, with the same undo chain as
+      // a setup.
       installed = opts.setup || (deps.configInstalled ?? configBlockInstalled)()
 
       // Every step that can be taken back registers how -- see commitWithUndo.
@@ -1972,17 +1964,14 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
       const commitAll = () => commitWithUndo(steps)
 
       // The ROLLBACK is inside the anchor's lock too, not just the write it
-      // takes back. Holding the lock per edit and dropping it before the
-      // transaction settled made the undo a decision about a file someone else
-      // had meanwhile committed against: this command rotates CA_PREV to CA and
-      // keeps an undo restoring CA_PREV; a renewal arriving after that write
-      // sees CA already anchored, is handed a do-nothing undo for it, and
-      // commits a certificate signed by CA; this command then fails, its undo
-      // retires CA -- and the renewal's certificate, minted and committed
-      // perfectly correctly, now authenticates nothing. The renewal hook now
-      // queues on aliases.lock for its own commit too, so that interleaving is
-      // excluded twice over; this lock stays because it guards the FILE,
-      // whoever the writer turns out to be.
+      // takes back: an undo run after the lock is dropped acts on a file
+      // another writer may have committed against since. Here that writer is
+      // a renewal landing between this command's CA_PREV->CA rotation and its
+      // failed commit -- it sees CA anchored and commits a certificate signed
+      // by CA, which the undo restoring CA_PREV would then strand. The renewal
+      // hook also queues on aliases.lock, so the interleaving is excluded
+      // twice over; this lock stays because it guards the FILE, whoever the
+      // writer turns out to be.
       //
       // Held only when there is an anchor to rotate. A re-issue that writes no
       // anchor has nothing for a rollback to strand, and taking the lock anyway

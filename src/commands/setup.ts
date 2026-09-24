@@ -338,13 +338,6 @@ export function shouldOfferLogin(yes: boolean, loggedIn: boolean, stdinTty: bool
   return !yes && !loggedIn && stdinTty && stdoutTty
 }
 
-// One Enter continues into the browser login; only an explicit n/no declines. Matches the
-// curl-installer feel: the single command carries you as far as automation can go, and the one
-// genuinely human step (authorizing in the browser) starts itself instead of being homework.
-// Where to read the answer from. Under `curl … | sh` stdin is the SCRIPT pipe, not the human —
-// but the controlling terminal can still answer, via /dev/tty (the standard installer trick;
-// Homebrew prompts the same way). Never on Windows (no /dev/tty, and the curl path doesn't exist
-// there), and never without one (agents, CI, cron — openSync fails, so they can't be prompted).
 /** Wrap an already-open fd as a prompt input with SINGLE-OWNER cleanup: the stream owns the fd
  *  (autoClose), close() only destroys the stream, and post-close stream errors are swallowed.
  *  ReadStream.destroy() closes the fd asynchronously on Node 20, so a second closeSync here
@@ -355,6 +348,10 @@ export function makePromptSource(fd: number): { input: NodeJS.ReadableStream; cl
   return { input: stream, close: () => { try { stream.destroy() } catch { /* already destroyed */ } } }
 }
 
+// Where to read the answer from. Under `curl … | sh` stdin is the SCRIPT pipe, not the human —
+// but the controlling terminal can still answer, via /dev/tty (the standard installer trick;
+// Homebrew prompts the same way). Never on Windows (no /dev/tty, and the curl path doesn't exist
+// there), and never without one (agents, CI, cron — openSync fails, so they can't be prompted).
 const openPromptInput = (): { input: NodeJS.ReadableStream; close: () => void } | null => {
   if (process.stdin.isTTY) return { input: process.stdin, close: () => {} }
   if (process.platform === 'win32') return null
@@ -372,6 +369,9 @@ export function canPromptViaTty(): boolean {
   try { closeSync(openSync('/dev/tty', 'r')); return true } catch { return false }
 }
 
+// One Enter continues into the browser login; only an explicit n/no declines. Matches the
+// curl-installer feel: the single command carries you as far as automation can go, and the one
+// genuinely human step (authorizing in the browser) starts itself instead of being homework.
 const defaultAsk = async (question: string): Promise<boolean> => {
   const src = openPromptInput()
   if (!src) return false // gate said yes but the terminal vanished — decline, never hang

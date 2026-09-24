@@ -47,10 +47,9 @@ async function discoverLane(api: Pick<ApiClient, 'rawRequest'>, projectId: strin
   const q = new URLSearchParams({ branch, ...(opts.group ? { group: opts.group } : {}) })
   try {
     const res = await api.rawRequest('GET', `/projects/${projectId}/source-build?${q}`)
-    // Validated, not cast. Every value other than the four we know silently fell through to the
-    // flyctl path below, so a server that grew a fifth lane would send this CLI down the wrong
-    // one and fail somewhere unrelated. An unknown answer is the server being ahead of us, and
-    // saying that is more useful than guessing.
+    // The cast only names the shape; the checks below are what enforce it. An unknown lane is the
+    // server being ahead of us, and must fail here rather than fall through to the flyctl path
+    // below and fail somewhere unrelated.
     const lane = (res.body ?? {}) as Lane
     const tag = (lane as { lane?: string }).lane ?? ''
     const known = ['flyctl', 'local-docker', 'archive', 'none']
@@ -168,8 +167,8 @@ export async function deploy(dir: string | undefined, opts: DeployOpts): Promise
   const log = note(opts)
 
   // Junk fails here, before a directory is packed and uploaded for a body the platform would only
-  // refuse: the same parser every other --port in this CLI runs. `Number()` alone sent NaN as
-  // `null` and let 0 or 70000 travel to the server.
+  // refuse: the same parser every other --port in this CLI runs (`Number()` alone would serialize
+  // NaN as `null` and let 0 or 70000 travel to the server).
   let port: number | undefined
   try {
     port = opts.port === undefined ? undefined : parsePort(opts.port)
