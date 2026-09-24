@@ -341,3 +341,91 @@ export async function domainDetach(host: string, opts: HostOpts, deps?: DomainDe
   }
   return removeDomain(name, opts, d)
 }
+
+// ---- BYO delegated zones: option B for domains owned at an outside registrar ----------------
+
+type OrgZone = { domainName: string; status: 'awaiting_ns' | 'active'; nameservers: string[]; delegated: boolean }
+type ZoneRecord = { type: string; host: string; answer: string; ttl?: number; priority?: number; proxied?: boolean }
+
+const zonePath = (orgId: string, domainName?: string): string =>
+  `/orgs/${encodeURIComponent(orgId)}/zones${domainName ? `/${encodeURIComponent(domainName.trim().toLowerCase())}` : ''}`
+
+export function zoneLines(z: OrgZone, orgFlag?: string): string[] {
+  const orgArg = orgFlag ? ` --org ${orgFlag}` : ''
+  if (z.status === 'active') return [`${z.domainName}  delegated (${z.nameservers.join(', ')})`]
+  return [
+    `${z.domainName}  waiting for nameservers`,
+    `  set these at your domain's registrar: ${z.nameservers.join(', ')}`,
+    `  review the zone BEFORE switching: insta domain zone records ${z.domainName}${orgArg}`,
+  ]
+}
+
+export function zoneRecordLines(records: ZoneRecord[]): string[] {
+  if (!records.length) return ['no records in the zone yet — the provider scan runs shortly after delegating; run this again in a moment']
+  const w = (pick: (r: ZoneRecord) => string) => Math.max(...records.map((r) => pick(r).length))
+  const typeW = w((r) => r.type), hostW = w((r) => r.host), answerW = w((r) => r.answer)
+  return records.map((r) =>
+    `  ${r.type.padEnd(typeW)}  ${r.host.padEnd(hostW)}  ${r.answer.padEnd(answerW)}${r.ttl !== undefined ? `  ttl ${r.ttl}` : ''}${r.priority !== undefined ? `  prio ${r.priority}` : ''}${r.proxied ? '  (proxied)' : ''}`)
+}
+
+/**
+ * Delegate a bring-your-own domain: the platform builds a managed zone for it and answers the two
+ * nameservers to set at the domain's own registrar. From then on every attach publishes its records
+ * into the zone itself — apexes included — instead of printing them for hand-copying. The zone is
+ * SEEDED by the provider's record scan, which is a heuristic: the review-then-switch contract
+ * (printed, and enforced by nothing else) is to compare `zone records` against the domain's current
+ * DNS and add what is missing at the CURRENT provider — re-running delegate re-imports — before
+ * re-pointing. A domain carrying live MX records is refused outright: a DNS move that can drop
+ * mail is never done implicitly. 202 approval_required in agent mode (zone.delegate); org admin
+ * either way.
+ */
+const orgArgOf = (opts: RecordsOpts): string => (opts.org ? ` --org ${opts.org}` : '')
+
+export async function zoneDelegate(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
+  // Same precedent as `domain delegate`: the org route signs for the linked project in agent mode
+  // (zone.delegate is read at the session project), but only when the link belongs to the org
+  // being mutated — under `--org` naming another org the call goes projectless and the platform's
+  // org-administration path judges it.
+  const link = deps?.project ?? (await readProject()) ?? undefined
+  const projectId = link && link.orgId === orgId ? link.projectId : undefined
+  const res = await api.rawRequest('POST', zonePath(orgId), { domainName }, projectId ? { projectId } : undefined)
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body)
+  const z = res.body as OrgZone
+  for (const line of zoneLines(z, opts.org)) info(line)
+  info(`the zone was seeded by a provider scan — a heuristic. Check \`insta domain zone records ${z.domainName}${orgArgOf(opts)}\` against your current DNS, add anything missing at your CURRENT provider (re-running delegate re-imports), and only then switch the nameservers.`)
+}
+
+export async function zoneList(opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
+  const r = await api.request<{ items: OrgZone[] }>('GET', zonePath(orgId))
+  if (opts.json) return printJson(r)
+  if (!r.items.length) return info('no delegated zones — start one: insta domain zone delegate <domain>')
+  for (const z of r.items) for (const line of zoneLines(z, opts.org)) info(line)
+}
+
+export async function zoneRecords(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
+  const r = await api.request<{ items: ZoneRecord[] }>('GET', `${zonePath(orgId, domainName)}/records`)
+  if (opts.json) return printJson(r)
+  for (const line of zoneRecordLines(r.items)) info(line)
+  if (r.items.length) info(`every type shows here (the scan is a heuristic) — add anything missing at your current DNS provider and re-run \`insta domain zone delegate ${domainName.trim().toLowerCase()}${orgArgOf(opts)}\` to re-import before switching nameservers`)
+}
+
+/**
+ * Release a delegated zone: the platform prunes the records it published and deletes the managed
+ * zone. The customer's next step — printed — is pointing the domain's nameservers back at their
+ * own provider; hostnames then re-verify on the records path.
+ */
+export async function zoneRelease(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
+  const { api, orgId } = await orgDeps(opts, deps)
+  const link = deps?.project ?? (await readProject()) ?? undefined
+  const projectId = link && link.orgId === orgId ? link.projectId : undefined
+  const res = await api.rawRequest('DELETE', zonePath(orgId, domainName), undefined, projectId ? { projectId } : undefined)
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body)
+  const r = res.body as { domainName: string; released: boolean }
+  info(`${r.domainName}  released`)
+  info(`point the domain's nameservers back at your DNS provider — hostnames re-verify on the records path (insta domain attach prints them)`)
+}
