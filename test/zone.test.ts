@@ -88,7 +88,11 @@ describe('domain zone records', () => {
     expect(calls[0]).toMatchObject({ method: 'GET', path: '/orgs/org1/zones/byo.example/records' })
     expect(out()).toContain('CAA')
     expect(out()).toContain('(proxied)')
-    expect(out()).toContain('re-run `insta domain zone delegate` to re-import')
+    // The instruction is copy-pasteable VERBATIM: domain and org scope included.
+    expect(out()).toContain('re-run `insta domain zone delegate byo.example` to re-import')
+    stdout.length = 0
+    await zoneRecords('Byo.Example', { org: 'org9' }, d)
+    expect(out()).toContain('re-run `insta domain zone delegate byo.example --org org9` to re-import')
   })
   it('says plainly when the scan has not landed yet', () => {
     expect(zoneRecordLines([])[0]).toContain('run this again in a moment')
@@ -114,5 +118,10 @@ describe('zoneLines', () => {
   it('carries --org into the review hint so the copy-paste works from any directory', () => {
     const lines = zoneLines(awaiting, 'org9')
     expect(lines.join('\n')).toContain('insta domain zone records byo.example --org org9')
+  })
+  it('the delegate answer\'s review hint carries --org too — every printed command is runnable as-is', async () => {
+    const { deps: d } = deps({}, { status: 200, body: awaiting })
+    await zoneDelegate('byo.example', { org: 'org9' }, d)
+    expect(out()).toContain('insta domain zone records byo.example --org org9')
   })
 })

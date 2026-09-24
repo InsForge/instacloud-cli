@@ -379,6 +379,8 @@ export function zoneRecordLines(records: ZoneRecord[]): string[] {
  * mail is never done implicitly. 202 approval_required in agent mode (zone.delegate); org admin
  * either way.
  */
+const orgArgOf = (opts: RecordsOpts): string => (opts.org ? ` --org ${opts.org}` : '')
+
 export async function zoneDelegate(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
   const { api, orgId } = await orgDeps(opts, deps)
   // Same precedent as `domain delegate`: the org route signs for the linked project in agent mode
@@ -392,7 +394,7 @@ export async function zoneDelegate(domainName: string, opts: RecordsOpts, deps?:
   if (opts.json) return printJson(res.body)
   const z = res.body as OrgZone
   for (const line of zoneLines(z, opts.org)) info(line)
-  info(`the zone was seeded by a provider scan — a heuristic. Check \`insta domain zone records ${z.domainName}\` against your current DNS, add anything missing at your CURRENT provider (re-running delegate re-imports), and only then switch the nameservers.`)
+  info(`the zone was seeded by a provider scan — a heuristic. Check \`insta domain zone records ${z.domainName}${orgArgOf(opts)}\` against your current DNS, add anything missing at your CURRENT provider (re-running delegate re-imports), and only then switch the nameservers.`)
 }
 
 export async function zoneList(opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
@@ -408,7 +410,7 @@ export async function zoneRecords(domainName: string, opts: RecordsOpts, deps?: 
   const r = await api.request<{ items: ZoneRecord[] }>('GET', `${zonePath(orgId, domainName)}/records`)
   if (opts.json) return printJson(r)
   for (const line of zoneRecordLines(r.items)) info(line)
-  if (r.items.length) info('every type shows here (the scan is a heuristic) — add anything missing at your current DNS provider and re-run `insta domain zone delegate` to re-import before switching nameservers')
+  if (r.items.length) info(`every type shows here (the scan is a heuristic) — add anything missing at your current DNS provider and re-run \`insta domain zone delegate ${domainName.trim().toLowerCase()}${orgArgOf(opts)}\` to re-import before switching nameservers`)
 }
 
 /**
