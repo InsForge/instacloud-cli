@@ -601,7 +601,7 @@ withSetupAgentOptions(setupCompat.command('agent').description('Alias of `insta 
 
 // ---- feedback (agent + human hurdle reports → the InstaCloud team) ----
 program.command('feedback')
-  .description('Report an InstaCloud-side hurdle (bug / missing feature / friction) to the InstaCloud team — about the insta toolkit itself, NEVER about the app you are building. Works logged-out and unlinked.')
+  .description('Report an InstaCloud-side hurdle (bug / missing feature / friction) to the InstaCloud team — about the insta toolkit itself, NEVER about the app you are building. On InstaCloud it needs `insta login`, so the team can reply; works unlinked.')
   .option('--type <type>', `what kind of hurdle: ${feedbackCmd.TYPES.join(' | ')}`)
   .option('--component <component>', `which part of the toolkit: ${feedbackCmd.COMPONENTS.join(' | ')}`)
   .option('--title <title>', 'one-line summary (≤200 chars)')

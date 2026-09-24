@@ -5,14 +5,15 @@
 //
 // The backend is InstaCloud dogfooding itself: the "InstaCloud Agent Feedback" project runs the
 // ingest service (InsForge/instacloud-feedback repo) on a postgres + compute pair. It is NOT the
-// control-plane API on purpose — feedback must work logged-out, unlinked, and from insta-oss,
-// and a control-plane outage is exactly when we most want reports to still arrive.
+// control-plane API on purpose — feedback must work unlinked, from insta-oss, and through a
+// control-plane outage, which is exactly when we most want reports to still arrive.
 import { readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import * as clack from '@clack/prompts'
+import { ApiClient, ApiError } from '../api.js'
 import { readGlobal, readProject } from '../config.js'
 import { envForApiUrl } from '../env.js'
-import { info, printJson, CliCancel } from '../util.js'
+import { info, printJson, refuse, CliCancel } from '../util.js'
 import { clean } from '../redact.js'
 import { cliVersion } from '../version.js'
 
@@ -46,6 +47,8 @@ const FEEDBACK_INGEST_TOKEN = process.env.INSTA_FEEDBACK_TOKEN || 'insta-feedbac
 // the DB wake and persists, so a report can land after a shorter deadline gave up on it).
 // An expired deadline is reported as UNCONFIRMED, not failed — the report may well be stored.
 const FEEDBACK_TIMEOUT_MS = 15_000
+// A slow control plane may cost a report its ticket, never the report itself.
+const ASSERTION_TIMEOUT_MS = 5_000
 const MAX_FILE_BYTES = 256 * 1024
 
 export type FeedbackOpts = {
@@ -69,6 +72,7 @@ export type FeedbackDeps = {
   /** Prompts run on a real terminal only — an agent's stdin is not one, and must never block. */
   interactive?: boolean
   cliVersion?: string
+  api?: Pick<ApiClient, 'apiUrl' | 'config' | 'request'>
 }
 
 function requireEnum(value: string, allowed: readonly string[], flag: string): string {
@@ -191,7 +195,7 @@ export type SubmitResult =
 /** One POST, one bounded attempt (FEEDBACK_TIMEOUT_MS), zero retries — feedback is a side quest and must never hang the CLI.
  *  Transport and server failures come back as a result, not an exception: the caller downgrades
  *  them to a warning so a broken feedback backend can't fail the user's actual task. */
-export async function submit(payload: Record<string, unknown>, fetchImpl: typeof fetch): Promise<SubmitResult> {
+export async function submit(payload: Record<string, unknown>, fetchImpl: typeof fetch, assertion?: string): Promise<SubmitResult> {
   let res: Response
   try {
     res = await fetchImpl(FEEDBACK_ENDPOINT, {
@@ -199,6 +203,7 @@ export async function submit(payload: Record<string, unknown>, fetchImpl: typeof
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${FEEDBACK_INGEST_TOKEN}`,
+        ...(assertion ? { 'Insta-User-Assertion': assertion } : {}),
       },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(FEEDBACK_TIMEOUT_MS),
@@ -217,7 +222,33 @@ export async function submit(payload: Record<string, unknown>, fetchImpl: typeof
   return { status: body?.status === 'duplicate' ? 'duplicate' : 'received', id: body?.id ?? null }
 }
 
+const SIGNED_OUT = 'not signed in to InstaCloud — run `insta login`, then send this again so the team can reply to you'
+const STAGING = 'not accepted from staging — send InstaCloud feedback from production'
+
+// Exit 2, not the submit path's 0: the caller can act on this one.
+function refuseFeedback(message: string, json?: boolean): never {
+  if (json) printJson({ status: 'refused', submitted: false, error: message })
+  refuse([`insta feedback: ${message}`])
+}
+
+function inputError(e: unknown, json?: boolean): void {
+  if (!json) throw e
+  printJson({ status: 'error', submitted: false, error: e instanceof Error ? e.message : String(e) })
+  process.exitCode = 1
+}
+
 export async function feedback(opts: FeedbackOpts, deps: FeedbackDeps = {}): Promise<void> {
+  let api: NonNullable<FeedbackDeps['api']>
+  try {
+    api = deps.api ?? await ApiClient.load()
+  } catch (e) {
+    return inputError(e, opts.json)
+  }
+  const env = envForApiUrl(api.apiUrl)
+  if (env === 'staging') refuseFeedback(STAGING, opts.json)
+  // Before the prompts, so nobody types out a report only to be told to sign in.
+  if (env === 'prod' && !api.config.accessToken) refuseFeedback(SIGNED_OUT, opts.json)
+
   const interactive = deps.interactive ?? (!opts.json && !!process.stdin.isTTY && !!process.stdout.isTTY)
   const missingRequired = !opts.type || !opts.component || !opts.title || (!opts.detail && !opts.file)
   if (missingRequired && interactive) await promptMissing(opts)
@@ -230,13 +261,22 @@ export async function feedback(opts: FeedbackOpts, deps: FeedbackDeps = {}): Pro
   try {
     payload = await buildPayload(opts, { cliVersion: deps.cliVersion ?? cliVersion() })
   } catch (e) {
-    if (!opts.json) throw e
-    printJson({ status: 'error', submitted: false, error: e instanceof Error ? e.message : String(e) })
-    process.exitCode = 1
-    return
+    return inputError(e, opts.json)
   }
 
-  const result = await submit(payload, deps.fetchImpl ?? fetch)
+  // Fetched after the prompts: it lives five minutes, and a person can take longer than that to type.
+  let assertion: string | undefined
+  if (env === 'prod') {
+    try {
+      // Bearer only: agent evidence adds a session round trip the timeout cannot bound, and 401s signing in cannot fix.
+      assertion = (await api.request<{ token: string }>('GET', '/me/feedback-assertion', undefined, { evidence: false, signal: AbortSignal.timeout(ASSERTION_TIMEOUT_MS) })).token
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) refuseFeedback(SIGNED_OUT, opts.json)
+      process.stderr.write(`warning: could not confirm who you are (${e instanceof Error ? e.message : String(e)}) — sending anyway, but nobody can reply to this report\n`)
+    }
+  }
+
+  const result = await submit(payload, deps.fetchImpl ?? fetch, assertion)
 
   if (result.status === 'unconfirmed') {
     // NOT a failure claim: the request was still in flight at the deadline and the server
