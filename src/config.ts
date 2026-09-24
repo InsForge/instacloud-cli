@@ -18,6 +18,13 @@ const PROJECT_FILE = 'project.json'
 // committed and this file is not: a pull or checkout can replace the project underneath it.
 const LINK_PLANE_FILE = 'link-plane.json'
 
+/** An insta_ key's binding as `GET /me` reports it (`token`) for the key the CLI logged in with.
+ *  Stored by `login --api-key` so the implicit project resolution (api.ts) never calls a route the
+ *  key cannot reach: a project token gets 403 token_scope from GET /orgs, an org token sees exactly
+ *  one org. Absent for a session login and for a key adopted before the CLI recorded scopes — both
+ *  behave as account-wide, which is what they are. The platform enforces the real scope either way. */
+export type TokenScopeInfo = { scope: 'account' | 'org' | 'project'; orgId?: string; projectId?: string; access: 'full' | 'read_only' }
+
 export type GlobalConfig = {
   apiUrl: string
   accessToken?: string
@@ -25,6 +32,7 @@ export type GlobalConfig = {
   user?: { id: string; email: string | null; name: string | null }
   autoUpdate?: boolean // self-update on new releases (default true while pre-1.0)
   agentCredential?: boolean // the stored insta_ key was minted by agent auth: the platform already treats it as an agent, so agent mode sends no enrollment evidence
+  tokenScope?: TokenScopeInfo // the stored insta_ key's binding (see TokenScopeInfo); belongs to the key, so it travels and is scrubbed with it
 }
 
 export type ProjectConfig = { projectId: string; orgId: string; branch: string }
@@ -74,6 +82,7 @@ export function pickApiUrl(parsed: GlobalConfig | null, env: NodeJS.ProcessEnv, 
     delete scrubbed.refreshToken
     delete scrubbed.user
     delete scrubbed.agentCredential
+    delete scrubbed.tokenScope
     return scrubbed
   }
   return { ...parsed, apiUrl: override ?? persisted }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Command, Option } from 'commander'
 import { configureAgent, detectAgent } from './agent.js'
-import { setApiUrlOverride } from './config.js'
+import { readGlobal, setApiUrlOverride } from './config.js'
 import * as agentPolicy from './commands/agent-policy.js'
 import { ApiError, AgentApprovalRequired } from './api.js'
 import { CliCancel, CliExit, fail, relayedExitCode } from './util.js'
@@ -14,6 +14,7 @@ import * as setup from './commands/setup.js'
 import * as mcp from './commands/mcp.js'
 import * as runCmd from './commands/run.js'
 import * as org from './commands/org.js'
+import * as tokens from './commands/tokens.js'
 import * as project from './commands/project.js'
 import * as branch from './commands/branch.js'
 import * as services from './commands/services.js'
@@ -40,7 +41,7 @@ import * as domainCmd from './commands/domain.js'
 import * as selfUpdate from './commands/upgrade.js'
 import * as feedbackCmd from './commands/feedback.js'
 
-function onError(e: unknown): void {
+async function onError(e: unknown): Promise<void> {
   if (e instanceof AgentApprovalRequired) {
     if (process.argv.includes('--json')) process.stdout.write(JSON.stringify(e.body) + '\n')
     else process.stderr.write(e.message + '\n')
@@ -48,7 +49,12 @@ function onError(e: unknown): void {
     return
   }
   if (e instanceof CliExit || e instanceof CliCancel) return
-  if (e instanceof ApiError) return fail(`${e.message} (HTTP ${e.status})`)
+  if (e instanceof ApiError) {
+    // A scope refusal is not a permissions problem (spec 2026-09-23-scoped-api-tokens §5.2): relay
+    // the platform's words and name the credential this login holds, so nobody goes checking roles.
+    if (e.body?.error === 'token_scope') return fail(tokens.tokenScopeErrorLines(e.body, (await readGlobal()).tokenScope))
+    return fail(`${e.message} (HTTP ${e.status})`)
+  }
   fail(e instanceof Error ? e.message : String(e))
 }
 
@@ -57,7 +63,7 @@ function onError(e: unknown): void {
 const guard = (fn: (...a: any[]) => Promise<unknown>) => async (...a: any[]): Promise<void> => {
   const started = Date.now()
   let error: unknown
-  try { await fn(...a) } catch (e) { error = e; onError(e) }
+  try { await fn(...a) } catch (e) { error = e; await onError(e) }
   await trackCommand(a[a.length - 1] as Command, a.slice(0, -2), {
     error, durationMs: Date.now() - started, exitCode: Number(process.exitCode ?? 0), childExitCode: relayedExitCode(),
   }, cliVersion())
@@ -106,6 +112,19 @@ envCmd.command('use <name>').description(`Switch environment (${ENV_NAMES.join('
 const orgCmd = program.command('org').description('Manage organizations')
 orgCmd.command('list').option('--json').action(guard((o) => org.orgList(o)))
 orgCmd.command('create <name>').option('--json').action(guard((name, o) => org.orgCreate(name, o)))
+
+// ---- tokens ----
+const tk = program.command('tokens').description('Manage API tokens (account, org or project scoped)')
+tk.command('list').description('List your API tokens: scope, access, expiry, last use').option('--json').action(guard((o) => tokens.tokensList(o)))
+tk.command('create <name>').description('Mint a token; defaults to the current org — pass --account for an account-wide token. The plaintext is printed once')
+  .option('--org <id>', "bind to this org (default: linked project's org, or your only org)")
+  .option('--project <id>', 'bind to this project (implies its org)')
+  .option('--account', 'account-wide token: everything your account can do (mutually exclusive with --org/--project)')
+  .option('--read-only', 'GET only; cannot run SQL or change anything')
+  .option('--expires <dur>', '30d | 90d | 1y | never', '90d')
+  .option('--json')
+  .action(guard((name, o) => tokens.tokensCreate(name, o)))
+tk.command('revoke <id>').description('Revoke a token — it stops working immediately').option('--json').action(guard((id, o) => tokens.tokensRevoke(id, o)))
 
 // ---- project ----
 const pj = program.command('project').description('Manage projects')
@@ -552,7 +571,7 @@ function withSetupAgentOptions(cmd: Command): Command {
   return cmd
     .option('-y, --yes', 'non-interactive')
     .option('--env <prod|staging>', 'deployment to set this machine up for (default: prod — switches and persists, like `insta env use`)')
-    .option('--mcp-token', 'register Claude Code with a minted insta_ API token instead of OAuth (requires login and token-creation permission)')
+    .option('--mcp-token', 'register Claude Code with a minted account-wide insta_ API token (everything your account can do) instead of OAuth (requires login and token-creation permission)')
     .option('--project <id>', 'also link this directory to an existing project after setup (flows through login first if needed)')
     .option('--create [name]', 'also create a new project and link this directory after setup (default name: this directory; mutually exclusive with --project)')
     .action(guard((o) => setup.setupAgent(o)))
@@ -587,7 +606,7 @@ agent.command('events').description('Show the audit + agent-event timeline').opt
 const cfg = program.command('config').description('CLI configuration: register the remote MCP server with coding agents, list regions, auto-update')
 cfg.command('install-mcp').description('Register the remote MCP server with coding agents (default: Claude Code + all detected)')
   .option('--agent <slug>', 'one agent: claude-code, cursor, codex, opencode, copilot, factory-droid')
-  .option('--mcp-token', 'claude-code only: minted insta_ API token instead of OAuth (requires login and token-creation permission)')
+  .option('--mcp-token', 'claude-code only: a minted account-wide insta_ API token (everything your account can do) instead of OAuth (requires login and token-creation permission)')
   .action(guard((o) => mcp.mcpInstall(o)))
 cfg.command('regions').description('List regions available for postgres/compute services').option('--json').action(guard((o) => regions.regionsList(o)))
 cfg.command('autoupdate [mode]').description('Show or set auto-update: on | off (default: on while pre-1.0)').action(guard((mode) => selfUpdate.autoupdate(mode)))

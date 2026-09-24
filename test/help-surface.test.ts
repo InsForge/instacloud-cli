@@ -15,7 +15,7 @@ const run = (args: string[], extraEnv: NodeJS.ProcessEnv = {}) =>
 // .claude/skills/developing-insta-cli/SKILL.md.
 const VISIBLE = [
   'login', 'logout', 'status',
-  'org', 'project', 'branch',
+  'org', 'tokens', 'project', 'branch',
   'service', 'secrets', 'cron', 'domain', 'compute', 'postgres', 'redis', 'mysql', 'mongodb', 'storage',
   'build', 'deploy', 'run', 'template',
   'billing', 'agent', 'config',
@@ -45,7 +45,7 @@ function commandNames(help: string): string[] {
 }
 
 describe('top-level surface', () => {
-  it('lists exactly the designed 25 commands, in order', () => {
+  it('lists exactly the designed 26 commands, in order', () => {
     const r = run(['--help'])
     expect(r.status).toBe(0)
     expect(commandNames(r.stdout)).toEqual(VISIBLE)
@@ -173,7 +173,7 @@ describe('--api-url placement', () => {
   // these fails on the connection — that is the SUCCESS condition here: the process got past
   // commander's option parsing, which is the only thing being asserted.
   const LEAVES: string[][] = [
-    ['status'], ['org', 'list'], ['project', 'list'], ['branch', 'list'],
+    ['status'], ['org', 'list'], ['tokens', 'list'], ['project', 'list'], ['branch', 'list'],
     ['service', 'list'], ['secrets', 'list'], ['domain', 'list'], ['compute', 'status'],
     ['postgres', 'url'], ['redis', 'status'], ['mysql', 'status'], ['mongodb', 'status'],
     ['storage', 'list'], ['template', 'list'], ['billing', 'usage'], ['agent', 'manifest'],
