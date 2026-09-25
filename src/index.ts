@@ -635,6 +635,8 @@ const fb = program.command('feedback')
   .option('--severity <severity>', `${feedbackCmd.SEVERITIES.join(' | ')} (default: minor)`)
   .option('--json')
   .action(guard((o) => feedbackCmd.feedback(o)))
+// As with billing: a mistyped subcommand must fail, not open the report wizard.
+fb.allowExcessArguments(false)
 fb.command('status <ticket-id>')
   .description('Show the status of a ticket `insta feedback` opened: New, In Progress, Resolved or Closed. The replies are read and answered in the console.')
   .option('--json')

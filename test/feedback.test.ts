@@ -251,6 +251,18 @@ describe('who is sending', () => {
     expect(process.exitCode).toBe(2)
   })
 
+  it('hands back the ticket the report opened, with its console link', async () => {
+    const ticket = { id: 'st-1', url: 'https://console.instacloud.com/support/st-1' }
+    const o = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    await run(controlPlane(), fetchOk({ id: 'f-1', status: 'received', ticket }).fetchImpl)
+    expect(JSON.parse(String(o.mock.calls.at(-1)?.[0]))).toEqual({ status: 'received', id: 'f-1', ticket })
+    o.mockClear()
+    await feedback(valid, { interactive: false, cliVersion: 'x', fetchImpl: fetchOk({ id: 'f-1', status: 'received', ticket }).fetchImpl, api: controlPlane().api })
+    const printed = o.mock.calls.map((c) => String(c[0])).join('')
+    expect(printed).toContain(ticket.url)
+    expect(printed).toContain('insta feedback status st-1')
+  })
+
   it('still sends when the control plane cannot vouch, just without a token, and says so', async () => {
     const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const { fetchImpl, calls } = fetchOk({ id: 'f-1', status: 'received' })
@@ -290,7 +302,10 @@ describe('feedback status', () => {
     expect(plane.asked).toEqual(['GET /me/feedback-assertion'])
     expect(calls[0]!.url).toBe(`https://feedback.instacloud.com/v1/tickets/${TICKET}`)
     expect(calls[0]!.init.method ?? 'GET').toBe('GET')
-    expect(calls[0]!.init.headers).toMatchObject({ Authorization: 'Bearer insta-feedback-public-v1', 'Insta-User-Assertion': 'platform.signed.token' })
+    expect(calls[0]!.init).toMatchObject({
+      headers: { Authorization: 'Bearer insta-feedback-public-v1', 'Insta-User-Assertion': 'platform.signed.token' },
+      signal: expect.any(AbortSignal),
+    })
     const printed = o.mock.calls.map((c) => String(c[0])).join('')
     expect(printed).toContain('In Progress')
     expect(printed).toContain(URL_)
@@ -320,6 +335,14 @@ describe('feedback status', () => {
       expect(o.mock.calls).toHaveLength(1)
       expect(JSON.parse(String(o.mock.calls[0]?.[0]))).toMatchObject({ status: 'refused' })
     }
+  })
+
+  it('fails with exit 1 on a gateway error page, naming the answer', async () => {
+    const o = out()
+    const fetchImpl = (async () => new Response('<html>bad gateway</html>', { status: 502 })) as unknown as typeof fetch
+    await feedbackStatus(TICKET, { json: true }, { fetchImpl, api: controlPlane().api })
+    expect(process.exitCode).toBe(1)
+    expect(JSON.parse(String(o.mock.calls.at(-1)?.[0]))).toEqual({ status: 'error', error: 'the feedback service answered 502' })
   })
 
   it('fails with exit 1 on a ticket that is not theirs, saying which id to use', async () => {

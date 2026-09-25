@@ -185,10 +185,8 @@ export async function buildPayload(
   }
 }
 
-export type Ticket = { id: string; url: string }
-
 export type SubmitResult =
-  | { status: 'received' | 'duplicate'; id: string | null; ticket?: Ticket }
+  | { status: 'received' | 'duplicate'; id: string | null; ticket?: { id: string; url: string } }
   // unconfirmed = the deadline expired with the request in flight: the server does not abort
   // mid-request, so the report may have been stored — materially different from 'error'.
   | { status: 'unconfirmed'; error: string }
@@ -221,7 +219,7 @@ export async function submit(payload: Record<string, unknown>, fetchImpl: typeof
     body = await res.json()
   } catch { /* non-JSON body — fall through to status handling */ }
   if (!res.ok) return { status: 'error', error: body?.error ?? `HTTP ${res.status}` }
-  return { status: body?.status === 'duplicate' ? 'duplicate' : 'received', id: body?.id ?? null, ...(body?.ticket ? { ticket: body.ticket } : {}) }
+  return { status: body?.status === 'duplicate' ? 'duplicate' : 'received', id: body?.id ?? null, ticket: body?.ticket }
 }
 
 const SIGNED_OUT = 'not signed in to InstaCloud — run `insta login`, then send this again so the team can reply to you'
@@ -238,9 +236,9 @@ function refuseFeedback(message: string, json?: boolean): never {
   refuse([`insta feedback: ${message}`])
 }
 
-function inputError(e: unknown, json?: boolean): void {
+function inputError(e: unknown, json?: boolean, fields: object = { submitted: false }): void {
   if (!json) throw e
-  printJson({ status: 'error', submitted: false, error: e instanceof Error ? e.message : String(e) })
+  printJson({ status: 'error', ...fields, error: e instanceof Error ? e.message : String(e) })
   process.exitCode = 1
 }
 
@@ -299,7 +297,7 @@ export async function feedback(opts: FeedbackOpts, deps: FeedbackDeps = {}): Pro
     return
   }
 
-  if (opts.json) return printJson({ status: result.status, id: result.id, ...(result.ticket ? { ticket: result.ticket } : {}) })
+  if (opts.json) return printJson({ status: result.status, id: result.id, ticket: result.ticket })
   if (result.status === 'duplicate') {
     info(`already reported this week — bumped its count instead (id: ${result.id})`)
   } else {
@@ -320,14 +318,11 @@ function refuseStatus(message: string, json?: boolean): never {
   refuse([`insta feedback status: ${message}`])
 }
 
-/** `insta feedback status <ticket-id>`: the status only — the conversation is read in the console. */
 export async function feedbackStatus(id: string, opts: { json?: boolean }, deps: FeedbackDeps = {}): Promise<void> {
   try {
     const api = deps.api ?? await ApiClient.load()
     const env = envForApiUrl(api.apiUrl)
-    if (env === 'staging') refuseStatus(STAGING, opts.json)
-    // Tickets exist only on InstaCloud: a self-hosted control plane has none, and none to prove who you are.
-    if (env !== 'prod') refuseStatus('ticket status is only available on InstaCloud', opts.json)
+    if (env !== 'prod') refuseStatus('ticket status is only available on production InstaCloud', opts.json)
     if (!api.config.accessToken) refuseStatus(SIGNED_OUT_STATUS, opts.json)
     let assertion: string
     try {
@@ -342,13 +337,13 @@ export async function feedbackStatus(id: string, opts: { json?: boolean }, deps:
     })
     if (res.status === 404) throw new Error(`no ticket ${id} of yours — use the ticket id \`insta feedback\` printed`)
     const body = (await res.json().catch(() => ({}))) as { id?: string; status?: string; url?: string; error?: string }
-    if (!res.ok) throw new Error(`the feedback service answered ${res.status}${body.error ? `: ${body.error}` : ''}`)
+    if (!res.ok || !body.status) throw new Error(`the feedback service answered ${res.status}${body.error ? `: ${body.error}` : ''}`)
     if (opts.json) return printJson({ id: body.id, status: body.status, url: body.url })
     info(`ticket ${body.id}: ${STATUS_LABEL[body.status ?? ''] ?? body.status}`)
-    info(`read and answer the team's replies in the console: ${body.url}`)
+    info(`open it in the console: ${body.url}`)
   } catch (e) {
     // A refusal has already printed and set exit 2; handled again it would print twice and exit 1.
-    if (e instanceof CliCancel || e instanceof CliExit) throw e
-    return inputError(e, opts.json)
+    if (e instanceof CliExit) throw e
+    return inputError(e, opts.json, {})
   }
 }
