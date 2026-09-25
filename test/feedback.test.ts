@@ -345,6 +345,13 @@ describe('feedback status', () => {
     expect(JSON.parse(String(o.mock.calls.at(-1)?.[0]))).toEqual({ status: 'error', error: 'the feedback service answered 502' })
   })
 
+  it('does not tell a signed-in user to sign in when the service cannot verify them', async () => {
+    const o = out()
+    await feedbackStatus(TICKET, { json: true }, { fetchImpl: fetchOk({ error: 'sign in to see your tickets' }, 401).fetchImpl, api: controlPlane().api })
+    expect(process.exitCode).toBe(1)
+    expect(JSON.parse(String(o.mock.calls.at(-1)?.[0])).error).toMatch(/could not verify who you are/)
+  })
+
   it('fails with exit 1 on a ticket that is not theirs, saying which id to use', async () => {
     const o = out()
     await feedbackStatus(TICKET, { json: true }, { fetchImpl: fetchOk({ error: 'not found' }, 404).fetchImpl, api: controlPlane().api })

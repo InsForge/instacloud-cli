@@ -331,15 +331,18 @@ export async function feedbackStatus(id: string, opts: { json?: boolean }, deps:
       if (e instanceof ApiError && e.status === 401) refuseStatus(SIGNED_OUT_STATUS, opts.json)
       throw e
     }
-    const res = await (deps.fetchImpl ?? fetch)(new URL(`/v1/tickets/${encodeURIComponent(id)}`, FEEDBACK_ENDPOINT), {
+    // Relative, so an endpoint served under a path prefix keeps it.
+    const res = await (deps.fetchImpl ?? fetch)(new URL(`tickets/${encodeURIComponent(id)}`, FEEDBACK_ENDPOINT), {
       headers: { Authorization: `Bearer ${FEEDBACK_INGEST_TOKEN}`, 'Insta-User-Assertion': assertion },
       signal: AbortSignal.timeout(FEEDBACK_TIMEOUT_MS),
     })
     if (res.status === 404) throw new Error(`no ticket ${id} of yours — use the ticket id \`insta feedback\` printed`)
+    // The platform vouched for this login a moment ago: a 401 here is the service's, not a signed-out user.
+    if (res.status === 401) throw new Error('the feedback service could not verify who you are — signing in again will not fix it')
     const body = (await res.json().catch(() => ({}))) as { id?: string; status?: string; url?: string; error?: string }
     if (!res.ok || !body.status) throw new Error(`the feedback service answered ${res.status}${body.error ? `: ${body.error}` : ''}`)
     if (opts.json) return printJson({ id: body.id, status: body.status, url: body.url })
-    info(`ticket ${body.id}: ${STATUS_LABEL[body.status ?? ''] ?? body.status}`)
+    info(`ticket ${body.id}: ${STATUS_LABEL[body.status] ?? body.status}`)
     info(`open it in the console: ${body.url}`)
   } catch (e) {
     // A refusal has already printed and set exit 2; handled again it would print twice and exit 1.
