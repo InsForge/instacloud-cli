@@ -611,7 +611,7 @@ export function removeTarget(count: string | undefined, service: string | undefi
   if (!INSTANCE_ID.test(opts.remove)) throw new Error(`invalid instance id: ${opts.remove} (expected inst-<12 hex digits>, the \`instance\` field of \`insta compute logs --json\`)`)
   if (opts.region !== undefined) throw new Error('--region does not apply to --remove')
   if (service !== undefined) {
-    throw new Error(/^\d+$/.test(count ?? '') ? '--remove lowers the replica count by one; pass no count' : `unexpected argument: ${service} (usage: insta compute scale [service] --remove <instance>)`)
+    throw new Error(count !== undefined && count.trim() !== '' && Number.isFinite(Number(count)) ? '--remove lowers the replica count by one; pass no count' : `unexpected argument: ${service} (usage: insta compute scale [service] --remove <instance>)`)
   }
   return count
 }

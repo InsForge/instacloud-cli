@@ -14,6 +14,8 @@ describe('removeTarget', () => {
 
   it('refuses a count, since --remove lowers it by one', () => {
     expect(() => removeTarget('2', 'api', { remove: INST })).toThrow(/pass no count/)
+    expect(() => removeTarget('2.0', 'api', { remove: INST })).toThrow(/pass no count/)
+    expect(() => removeTarget('+2', 'api', { remove: INST })).toThrow(/pass no count/)
   })
 
   it('takes an all-digit lone positional as the service', () => {

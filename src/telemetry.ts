@@ -77,8 +77,9 @@ export function redactOptions(opts: Record<string, unknown>): Record<string, unk
   return out
 }
 
-export function redactArgs(command: string, args: unknown[]): unknown[] {
-  const checks = SAFE_ARGS[command] ?? {}
+export function redactArgs(command: string, args: unknown[], options: Record<string, unknown> = {}): unknown[] {
+  // with --remove the count's slot holds the service name
+  const checks = command === 'compute scale' && options.remove !== undefined ? {} : SAFE_ARGS[command] ?? {}
   return args.map((a, i) => (a === undefined ? null : typeof a === 'string' && checks[i]?.(a) ? a : REDACTED))
 }
 
@@ -151,7 +152,7 @@ export function buildCommandEvent(
     timestamp: new Date().toISOString(),
     properties: {
       command,
-      args: redactArgs(command, args),
+      args: redactArgs(command, args, options),
       options: redactOptions(options),
       success: !cancelled && (outcome.exitCode === 0 || ranChild),
       cancelled,
