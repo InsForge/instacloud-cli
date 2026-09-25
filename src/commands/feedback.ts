@@ -13,7 +13,7 @@ import * as clack from '@clack/prompts'
 import { ApiClient, ApiError } from '../api.js'
 import { readGlobal, readProject } from '../config.js'
 import { envForApiUrl } from '../env.js'
-import { info, printJson, refuse, CliCancel } from '../util.js'
+import { info, printJson, refuse, CliCancel, CliExit } from '../util.js'
 import { clean } from '../redact.js'
 import { cliVersion } from '../version.js'
 
@@ -185,8 +185,10 @@ export async function buildPayload(
   }
 }
 
+export type Ticket = { id: string; url: string }
+
 export type SubmitResult =
-  | { status: 'received' | 'duplicate'; id: string | null }
+  | { status: 'received' | 'duplicate'; id: string | null; ticket?: Ticket }
   // unconfirmed = the deadline expired with the request in flight: the server does not abort
   // mid-request, so the report may have been stored — materially different from 'error'.
   | { status: 'unconfirmed'; error: string }
@@ -219,11 +221,16 @@ export async function submit(payload: Record<string, unknown>, fetchImpl: typeof
     body = await res.json()
   } catch { /* non-JSON body — fall through to status handling */ }
   if (!res.ok) return { status: 'error', error: body?.error ?? `HTTP ${res.status}` }
-  return { status: body?.status === 'duplicate' ? 'duplicate' : 'received', id: body?.id ?? null }
+  return { status: body?.status === 'duplicate' ? 'duplicate' : 'received', id: body?.id ?? null, ...(body?.ticket ? { ticket: body.ticket } : {}) }
 }
 
 const SIGNED_OUT = 'not signed in to InstaCloud — run `insta login`, then send this again so the team can reply to you'
 const STAGING = 'not accepted from staging — send InstaCloud feedback from production'
+
+// Bearer only: agent evidence adds a session round trip the timeout cannot bound, and 401s signing in cannot fix.
+async function userAssertion(api: NonNullable<FeedbackDeps['api']>): Promise<string> {
+  return (await api.request<{ token: string }>('GET', '/me/feedback-assertion', undefined, { evidence: false, signal: AbortSignal.timeout(ASSERTION_TIMEOUT_MS) })).token
+}
 
 // Exit 2, not the submit path's 0: the caller can act on this one.
 function refuseFeedback(message: string, json?: boolean): never {
@@ -268,8 +275,7 @@ export async function feedback(opts: FeedbackOpts, deps: FeedbackDeps = {}): Pro
   let assertion: string | undefined
   if (env === 'prod') {
     try {
-      // Bearer only: agent evidence adds a session round trip the timeout cannot bound, and 401s signing in cannot fix.
-      assertion = (await api.request<{ token: string }>('GET', '/me/feedback-assertion', undefined, { evidence: false, signal: AbortSignal.timeout(ASSERTION_TIMEOUT_MS) })).token
+      assertion = await userAssertion(api)
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) refuseFeedback(SIGNED_OUT, opts.json)
       process.stderr.write(`warning: could not confirm who you are (${e instanceof Error ? e.message : String(e)}) — sending anyway, but nobody can reply to this report\n`)
@@ -293,11 +299,56 @@ export async function feedback(opts: FeedbackOpts, deps: FeedbackDeps = {}): Pro
     return
   }
 
-  if (opts.json) return printJson({ status: result.status, id: result.id })
+  if (opts.json) return printJson({ status: result.status, id: result.id, ...(result.ticket ? { ticket: result.ticket } : {}) })
   if (result.status === 'duplicate') {
     info(`already reported this week — bumped its count instead (id: ${result.id})`)
   } else {
     info(`feedback submitted (id: ${result.id}) — thank you!`)
   }
+  if (result.ticket) {
+    info(`ticket ${result.ticket.id} — the team's replies are in the console: ${result.ticket.url}`)
+    info(`check its status with \`insta feedback status ${result.ticket.id}\``)
+  }
   info('PII (emails, tokens, keys, home paths) was redacted before sending.')
+}
+
+const STATUS_LABEL: Record<string, string> = { open: 'New', in_progress: 'In Progress', resolved: 'Resolved', closed: 'Closed' }
+const SIGNED_OUT_STATUS = 'not signed in to InstaCloud — run `insta login` to check your ticket'
+
+function refuseStatus(message: string, json?: boolean): never {
+  if (json) printJson({ status: 'refused', error: message })
+  refuse([`insta feedback status: ${message}`])
+}
+
+/** `insta feedback status <ticket-id>`: the status only — the conversation is read in the console. */
+export async function feedbackStatus(id: string, opts: { json?: boolean }, deps: FeedbackDeps = {}): Promise<void> {
+  try {
+    const api = deps.api ?? await ApiClient.load()
+    const env = envForApiUrl(api.apiUrl)
+    if (env === 'staging') refuseStatus(STAGING, opts.json)
+    // Tickets exist only on InstaCloud: a self-hosted control plane has none, and none to prove who you are.
+    if (env !== 'prod') refuseStatus('ticket status is only available on InstaCloud', opts.json)
+    if (!api.config.accessToken) refuseStatus(SIGNED_OUT_STATUS, opts.json)
+    let assertion: string
+    try {
+      assertion = await userAssertion(api)
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) refuseStatus(SIGNED_OUT_STATUS, opts.json)
+      throw e
+    }
+    const res = await (deps.fetchImpl ?? fetch)(new URL(`/v1/tickets/${encodeURIComponent(id)}`, FEEDBACK_ENDPOINT), {
+      headers: { Authorization: `Bearer ${FEEDBACK_INGEST_TOKEN}`, 'Insta-User-Assertion': assertion },
+      signal: AbortSignal.timeout(FEEDBACK_TIMEOUT_MS),
+    })
+    if (res.status === 404) throw new Error(`no ticket ${id} of yours — use the ticket id \`insta feedback\` printed`)
+    const body = (await res.json().catch(() => ({}))) as { id?: string; status?: string; url?: string; error?: string }
+    if (!res.ok) throw new Error(`the feedback service answered ${res.status}${body.error ? `: ${body.error}` : ''}`)
+    if (opts.json) return printJson({ id: body.id, status: body.status, url: body.url })
+    info(`ticket ${body.id}: ${STATUS_LABEL[body.status ?? ''] ?? body.status}`)
+    info(`read and answer the team's replies in the console: ${body.url}`)
+  } catch (e) {
+    // A refusal has already printed and set exit 2; handled again it would print twice and exit 1.
+    if (e instanceof CliCancel || e instanceof CliExit) throw e
+    return inputError(e, opts.json)
+  }
 }

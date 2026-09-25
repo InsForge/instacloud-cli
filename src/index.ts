@@ -619,7 +619,7 @@ const setupCompat = program.command('setup', { hidden: true }).description('Comp
 withSetupAgentOptions(setupCompat.command('agent').description('Alias of `insta agent setup`, kept for the console one-liner'))
 
 // ---- feedback (agent + human hurdle reports → the InstaCloud team) ----
-program.command('feedback')
+const fb = program.command('feedback')
   .description('Report an InstaCloud-side hurdle (bug / missing feature / friction) to the InstaCloud team — about the insta toolkit itself, NEVER about the app you are building. On InstaCloud it needs `insta login`, so the team can reply; works unlinked.')
   .option('--type <type>', `what kind of hurdle: ${feedbackCmd.TYPES.join(' | ')}`)
   .option('--component <component>', `which part of the toolkit: ${feedbackCmd.COMPONENTS.join(' | ')}`)
@@ -635,6 +635,10 @@ program.command('feedback')
   .option('--severity <severity>', `${feedbackCmd.SEVERITIES.join(' | ')} (default: minor)`)
   .option('--json')
   .action(guard((o) => feedbackCmd.feedback(o)))
+fb.command('status <ticket-id>')
+  .description('Show the status of a ticket `insta feedback` opened: New, In Progress, Resolved or Closed. The replies are read and answered in the console.')
+  .option('--json')
+  .action(guard((id, o) => feedbackCmd.feedbackStatus(id, o)))
 
 // ---- self-update ----
 program.command('upgrade').description('Update the insta CLI to the latest release (binary or npm install)')

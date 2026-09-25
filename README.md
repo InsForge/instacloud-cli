@@ -231,7 +231,8 @@ build never reaches a production installer.
 | `insta billing` | Current cycle overview; `subscribe <tier>` · `portal` · `usage` |
 | `insta agent` | `setup` (this machine's coding agents) · `manifest` · `policy …` · `approvals …` · `observe …` · `events` |
 | `insta config` | `install-mcp` · `regions` · `autoupdate` |
-| `insta feedback` | Report an InstaCloud-side hurdle (bug / feature-request / friction) to the team — never for the app you are building; on InstaCloud it needs `insta login`, so the team can reply |
+| `insta feedback` | Report an InstaCloud-side hurdle (bug / feature-request / friction) to the team — never for the app you are building; on InstaCloud it needs `insta login`, so the team can reply, and prints the ticket it opened |
+| `insta feedback status <ticket-id>` | The ticket's status (New / In Progress / Resolved / Closed); the replies are read and answered in the console |
 | `insta upgrade` | Update the CLI |
 
 Every command accepts `--api-url <url>` for this invocation only (internal debugging); for `compute exec`, place it before `compute`. `insta --help` documents it.

@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { buildPayload, feedback, submit } from '../src/commands/feedback.js'
+import { buildPayload, feedback, feedbackStatus, submit } from '../src/commands/feedback.js'
 import { ApiError } from '../src/api.js'
 import { clean, redactSensitive, truncateMiddle } from '../src/redact.js'
 
@@ -132,6 +132,12 @@ describe('submit', () => {
     expect(calls[0].init.method).toBe('POST')
     expect((calls[0].init.headers as Record<string, string>).Authorization).toMatch(/^Bearer /)
     expect(JSON.parse(String(calls[0].init.body))).toEqual({ a: 1 })
+  })
+
+  it('carries the ticket a signed report opened', async () => {
+    const ticket = { id: 'st-1', url: 'https://console.instacloud.com/support/st-1' }
+    const { fetchImpl } = fetchOk({ id: 'f-1', status: 'received', ticket })
+    expect(await submit({}, fetchImpl)).toEqual({ status: 'received', id: 'f-1', ticket })
   })
 
   it('maps duplicate folding', async () => {
@@ -264,6 +270,63 @@ describe('who is sending', () => {
       expect(calls).toHaveLength(1)
       expect(sent(calls)).not.toHaveProperty('Insta-User-Assertion')
     }
+  })
+})
+
+describe('feedback status', () => {
+  const TICKET = '3f2b6c1e-9a4d-4e8b-b1c2-7d5e6f8a9b0c'
+  const URL_ = `https://console.instacloud.com/support/${TICKET}`
+  afterEach(() => {
+    process.exitCode = 0
+    vi.restoreAllMocks()
+  })
+  const out = () => vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+
+  it('asks the feedback service, as the signed-in user, and names the status', async () => {
+    const plane = controlPlane()
+    const { fetchImpl, calls } = fetchOk({ id: TICKET, status: 'in_progress', url: URL_ })
+    const o = out()
+    await feedbackStatus(TICKET, {}, { fetchImpl, api: plane.api })
+    expect(plane.asked).toEqual(['GET /me/feedback-assertion'])
+    expect(calls[0]!.url).toBe(`https://feedback.instacloud.com/v1/tickets/${TICKET}`)
+    expect(calls[0]!.init.method ?? 'GET').toBe('GET')
+    expect(calls[0]!.init.headers).toMatchObject({ Authorization: 'Bearer insta-feedback-public-v1', 'Insta-User-Assertion': 'platform.signed.token' })
+    const printed = o.mock.calls.map((c) => String(c[0])).join('')
+    expect(printed).toContain('In Progress')
+    expect(printed).toContain(URL_)
+  })
+
+  it('--json prints the service answer as one object', async () => {
+    const o = out()
+    await feedbackStatus(TICKET, { json: true }, { fetchImpl: fetchOk({ id: TICKET, status: 'resolved', url: URL_ }).fetchImpl, api: controlPlane().api })
+    expect(JSON.parse(String(o.mock.calls.at(-1)?.[0]))).toEqual({ id: TICKET, status: 'resolved', url: URL_ })
+  })
+
+  it('refuses staging, a self-hosted plane and a signed-out user with one refusal and exit 2', async () => {
+    const o = out()
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    for (const plane of [
+      controlPlane({ apiUrl: 'https://api.staging.instacloud.com' }),
+      controlPlane({ apiUrl: 'https://insta.example.internal' }),
+      controlPlane({ signedIn: false }),
+      controlPlane({ answer: async () => { throw new ApiError(401, 'invalid token') } }),
+    ]) {
+      o.mockClear()
+      process.exitCode = 0
+      const { fetchImpl, calls } = fetchOk({})
+      await expect(feedbackStatus(TICKET, { json: true }, { fetchImpl, api: plane.api })).rejects.toThrow('exit 1')
+      expect(process.exitCode).toBe(2)
+      expect(calls).toHaveLength(0)
+      expect(o.mock.calls).toHaveLength(1)
+      expect(JSON.parse(String(o.mock.calls[0]?.[0]))).toMatchObject({ status: 'refused' })
+    }
+  })
+
+  it('fails with exit 1 on a ticket that is not theirs, saying which id to use', async () => {
+    const o = out()
+    await feedbackStatus(TICKET, { json: true }, { fetchImpl: fetchOk({ error: 'not found' }, 404).fetchImpl, api: controlPlane().api })
+    expect(process.exitCode).toBe(1)
+    expect(JSON.parse(String(o.mock.calls.at(-1)?.[0])).error).toMatch(/no ticket .* of yours/)
   })
 })
 
