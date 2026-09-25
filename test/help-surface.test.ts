@@ -119,7 +119,7 @@ describe('group shapes', () => {
     expect(compute).not.toEqual(expect.arrayContaining(['set-domain']))
     const domain = commandNames(run(['domain', '--help']).stdout)
     expect(domain).toEqual(expect.arrayContaining(['attach', 'check', 'detach', 'records']))
-    expect(run(['compute', 'scale', '--help']).stdout).toContain('Usage: insta compute scale [options] <count> [service]')
+    expect(run(['compute', 'scale', '--help']).stdout).toContain('Usage: insta compute scale [options] [count] [service]')
     expect(run(['storage', 'set-access', '--help']).stdout).toContain('Usage: insta storage set-access [options] <access>')
   }, 30_000)
   it('reads source-build output under `build logs`, not a top-level `build-logs`', () => {

@@ -41,7 +41,7 @@ const SAFE_ARGS: Record<string, Record<number, Check>> = {
   'env use': { 0: ENV }, 'project link': { 0: ID },
   'service add': { 0: SERVICE }, 'service remove': { 0: SERVICE }, 'service rename': { 0: SERVICE },
   'storage set-access': { 0: oneOf(['public', 'private']) },
-  'compute scale': { 0: NUMBER },
+  'compute scale': { 0: (v) => /^\d+$/.test(v) },
   'compute always-on': { 0: ON_OFF }, 'postgres always-on': { 0: ON_OFF },
   'redis always-on': { 0: ON_OFF }, 'mysql always-on': { 0: ON_OFF }, 'mongodb always-on': { 0: ON_OFF },
   'template info': { 0: SLUG }, 'billing subscribe': { 0: oneOf(['pro', 'team']) },
@@ -77,8 +77,9 @@ export function redactOptions(opts: Record<string, unknown>): Record<string, unk
   return out
 }
 
-export function redactArgs(command: string, args: unknown[]): unknown[] {
-  const checks = SAFE_ARGS[command] ?? {}
+export function redactArgs(command: string, args: unknown[], options: Record<string, unknown> = {}): unknown[] {
+  // with --remove the count's slot holds the service name
+  const checks = command === 'compute scale' && options.remove !== undefined ? {} : SAFE_ARGS[command] ?? {}
   return args.map((a, i) => (a === undefined ? null : typeof a === 'string' && checks[i]?.(a) ? a : REDACTED))
 }
 
@@ -151,7 +152,7 @@ export function buildCommandEvent(
     timestamp: new Date().toISOString(),
     properties: {
       command,
-      args: redactArgs(command, args),
+      args: redactArgs(command, args, options),
       options: redactOptions(options),
       success: !cancelled && (outcome.exitCode === 0 || ranChild),
       cancelled,

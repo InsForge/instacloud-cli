@@ -102,6 +102,8 @@ describe('redaction', () => {
   it('keeps positionals only where the command declares an id or enum', () => {
     expect(redactArgs('service add', ['postgres', 'main'])).toEqual(['postgres', '[REDACTED]'])
     expect(redactArgs('compute scale', ['3', 'api'])).toEqual(['3', '[REDACTED]'])
+    expect(redactArgs('compute scale', ['2fa']), 'a name shaped like a size is not a count').toEqual(['[REDACTED]'])
+    expect(redactArgs('compute scale', ['123'], { remove: 'inst-0123456789ab' }), 'with --remove the first positional is a service name').toEqual(['[REDACTED]'])
     expect(redactArgs('agent policy rule set', ['deploy', 'approve'])).toEqual(['deploy', 'approve'])
     expect(redactArgs('run', ['/Users/jane/bin/dev.sh', 'x'])).toEqual(['[REDACTED]', '[REDACTED]'])
     expect(redactArgs('branch create', ['feat/acme-pilot'])).toEqual(['[REDACTED]'])
