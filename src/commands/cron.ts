@@ -152,7 +152,15 @@ function findHeader(rec: Record<string, unknown>, name: string): string | undefi
  */
 export function parseSecretRefs(list: readonly string[]): Record<string, string> {
   const out = parseHeaders(list, '--secret-ref')
-  for (const k of Object.keys(out)) out[k] = out[k]!.trim()
+  for (const k of Object.keys(out)) {
+    const raw = out[k]!
+    const trimmed = raw.trim()
+    // Only a LITERALLY empty value means "remove" — that's what makes the spelling unambiguous.
+    // A value that is merely whitespace is a fat-fingered secret name, not that same intent, and
+    // trimming it to '' would silently take the removal branch instead of naming the typo.
+    if (raw !== '' && trimmed === '') throw new Error(`--secret-ref ${k}=${raw} names a blank secret — a secret name cannot be blank (use --secret-ref ${k}= with nothing after '=' to remove the ref)`)
+    out[k] = trimmed
+  }
   return out
 }
 

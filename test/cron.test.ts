@@ -94,6 +94,9 @@ describe('parseSecretRefs', () => {
   it('keeps an empty secret name — that is the removal spelling', () => {
     expect(parseSecretRefs(['x-api-key='])).toEqual({ 'x-api-key': '' })
   })
+  it('rejects a whitespace-only secret name instead of silently trimming it to a removal', () => {
+    expect(() => parseSecretRefs(['x-api-key=   '])).toThrow(/names a blank secret/)
+  })
 })
 
 describe('fmtUtc', () => {
@@ -325,6 +328,18 @@ describe('cronEditWarnings', () => {
     expect(w).toHaveLength(1)
     expect(w[0]).toContain('x-tenant')
     expect(w[0]).not.toContain('x-api-key')
+  })
+
+  it('does not warn about a ref removed via --secret-ref h=', () => {
+    const current: CronJob['request'] = { method: 'GET', headerNames: ['x-api-key'], secretRefs: { 'x-api-key': 'K' } }
+    const w = cronEditWarnings(current, buildRequest({ secretRef: ['x-api-key='] }, current)!)
+    expect(w).toHaveLength(0)
+  })
+
+  it('does not warn about a literal header promoted to a secret ref', () => {
+    const current: CronJob['request'] = { method: 'GET', headerNames: ['x-tenant'] }
+    const w = cronEditWarnings(current, buildRequest({ secretRef: ['x-tenant=TENANT'] }, current)!)
+    expect(w).toHaveLength(0)
   })
 
   // A GET job has no body to lose, so becoming a POST is a change but not a loss.
