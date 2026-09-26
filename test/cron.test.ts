@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   assertTargetFlags, buildRequest, conflictLines, cronDelete, cronEdit, cronEditWarnings, cronRun,
-  fmtUtc, jobListLine, jobShowLines, parseHeader, parseHeaders, parseMethod, parseRunLimit,
+  fmtUtc, jobListLine, jobShowLines, parseHeader, parseHeaders, parseMethod, parseRequestFlags, parseRunLimit, parseSecretRefs,
   parseTimeout, previewLines, resolveJob, runListLine, targetLine,
   type CronAttempt, type CronJob, type CronRun, type Resolved,
 } from '../src/commands/cron.js'
@@ -85,6 +85,17 @@ describe('parseHeader / parseHeaders', () => {
   })
 })
 
+describe('parseSecretRefs', () => {
+  it('parses header=SECRET_NAME with the --header grammar, naming its own flag in errors', () => {
+    expect(parseSecretRefs(['x-api-key=STRIPE_KEY'])).toEqual({ 'x-api-key': 'STRIPE_KEY' })
+    expect(() => parseSecretRefs(['STRIPE_KEY'])).toThrow(/--secret-ref must be name=value/)
+    expect(() => parseSecretRefs(['A=S1', 'a=S2'])).toThrow(/--secret-ref a given twice \(also as A\)/)
+  })
+  it('keeps an empty secret name — that is the removal spelling', () => {
+    expect(parseSecretRefs(['x-api-key='])).toEqual({ 'x-api-key': '' })
+  })
+})
+
 describe('fmtUtc', () => {
   // A cron pinned to UTC does not keep a fixed local time: a localised column would read correctly
   // today and be an hour wrong after a DST change, for a schedule nobody touched.
@@ -125,6 +136,19 @@ describe('jobShowLines', () => {
     const out = jobShowLines(JOB).join('\n')
     expect(out).toContain('x-api-key')
     expect(out).toMatch(/names only — values are encrypted at rest and never returned/)
+  })
+  // The secret NAME is readable and is what an operator needs when a rotation or a missing secret is
+  // the question, so a secret-backed header is shown with it — and not also as a bare literal name.
+  it('shows a secret-backed header with the secret it reads, apart from the literal ones', () => {
+    const lines = jobShowLines({ ...JOB, request: { method: 'POST', headerNames: ['x-tenant', 'X-Api-Key'], secretRefs: { 'x-api-key': 'STRIPE_KEY' } } })
+    expect(lines).toContain('  headers      x-tenant  (names only — values are encrypted at rest and never returned)')
+    expect(lines).toContain('               x-api-key ← secret STRIPE_KEY  (resolved at send time)')
+    expect(lines.join('\n')).not.toContain('X-Api-Key')
+  })
+  it('puts a ref on the headers row when there are no literal headers', () => {
+    const lines = jobShowLines({ ...JOB, request: { method: 'GET', headerNames: ['x-api-key'], secretRefs: { 'x-api-key': 'K' } } })
+    expect(lines).toContain('  headers      x-api-key ← secret K  (resolved at send time)')
+    expect(lines.join('\n')).not.toContain('names only')
   })
   it('says "(none)" rather than printing an empty header column', () => {
     expect(jobShowLines({ ...JOB, request: { method: 'GET', headerNames: [] } }).join('\n')).toContain('headers      (none)')
@@ -212,6 +236,45 @@ describe('buildRequest', () => {
   it('refuses a body on an explicit GET instead of sending one nothing will read', () => {
     expect(() => buildRequest({ body: '{}', method: 'GET' })).toThrow(/POST only/)
   })
+  it('sends --secret-ref as secretRefs, and omits the key when there are none', () => {
+    expect(buildRequest({ secretRef: ['x-api-key=STRIPE_KEY'], header: ['x-tenant=t'] }))
+      .toEqual({ method: 'GET', headers: { 'x-tenant': 't' }, secretRefs: { 'x-api-key': 'STRIPE_KEY' } })
+    expect(buildRequest({ header: ['a=1'] })).not.toHaveProperty('secretRefs')
+  })
+  // The platform 400s this; failing here names the two flags instead.
+  it('refuses a header given as both a literal and a secret ref, case-insensitively', () => {
+    expect(() => buildRequest({ header: ['X-Api-Key=v'], secretRef: ['x-api-key=K'] })).toThrow(/both --header and --secret-ref/)
+    expect(() => parseRequestFlags({ header: ['X-Api-Key=v'], secretRef: ['x-api-key=K'] })).toThrow(/both --header and --secret-ref/)
+  })
+  it('refuses a removal on create — a new job has no ref to remove', () => {
+    expect(() => buildRequest({ secretRef: ['x-api-key='] })).toThrow(/a new job has none/)
+  })
+})
+
+describe('buildRequest on an edit (secret refs carried forward)', () => {
+  const current: CronJob['request'] = {
+    method: 'POST', headerNames: ['x-tenant', 'x-api-key', 'x-sig'], secretRefs: { 'x-api-key': 'STRIPE_KEY', 'x-sig': 'SIG' },
+  }
+  // Refs are readable, so an edit that re-shapes the request for another reason keeps them.
+  it('carries the existing refs into the replaced request', () => {
+    expect(buildRequest({ method: 'POST', body: '{}' }, current)?.secretRefs).toEqual({ 'x-api-key': 'STRIPE_KEY', 'x-sig': 'SIG' })
+  })
+  it('lets --secret-ref re-point a ref, and --header replace one with a literal (case-insensitively)', () => {
+    const r = buildRequest({ secretRef: ['X-Api-Key=STRIPE_KEY_V2'], header: ['X-SIG=literal'] }, current)!
+    expect(r.secretRefs).toEqual({ 'X-Api-Key': 'STRIPE_KEY_V2' })
+    expect(r.headers).toEqual({ 'X-SIG': 'literal' })
+  })
+  it('removes a ref with --secret-ref <header>=', () => {
+    expect(buildRequest({ secretRef: ['x-sig='] }, current)?.secretRefs).toEqual({ 'x-api-key': 'STRIPE_KEY' })
+    expect(buildRequest({ secretRef: ['x-api-key=', 'x-sig='] }, current)).not.toHaveProperty('secretRefs')
+  })
+  // A typo'd removal would otherwise "succeed" while the ref it meant stays live.
+  it('refuses to remove a ref the job does not have, naming the ones it does', () => {
+    expect(() => buildRequest({ secretRef: ['x-apikey='] }, current)).toThrow(/has none on x-apikey \(it has: x-api-key, x-sig\)/)
+  })
+  it('treats a row with no secretRefs (written before refs existed) as having none', () => {
+    expect(buildRequest({ header: ['a=1'] }, { method: 'GET', headerNames: ['a'] })).toEqual({ method: 'GET', headers: { a: '1' } })
+  })
 })
 
 describe('cronEditWarnings', () => {
@@ -253,6 +316,15 @@ describe('cronEditWarnings', () => {
   it('says nothing when the edit re-supplies everything it could lose (headers case-insensitively)', () => {
     expect(cronEditWarnings({ method: 'GET', headerNames: ['X-Api-Key'] }, { method: 'GET', headers: { 'x-api-key': 'k' } })).toEqual([])
     expect(cronEditWarnings({ method: 'POST', headerNames: [] }, { method: 'POST', body: '{"a":1}' })).toEqual([])
+  })
+
+  // Refs are carried forward by buildRequest, so they are not "dropped" — only literals are.
+  it('does not warn about secret-backed headers, only literal ones', () => {
+    const current: CronJob['request'] = { method: 'GET', headerNames: ['x-tenant', 'x-api-key'], secretRefs: { 'x-api-key': 'K' } }
+    const w = cronEditWarnings(current, buildRequest({ header: ['x-other=1'] }, current)!)
+    expect(w).toHaveLength(1)
+    expect(w[0]).toContain('x-tenant')
+    expect(w[0]).not.toContain('x-api-key')
   })
 
   // A GET job has no body to lose, so becoming a POST is a change but not a loss.
@@ -352,6 +424,23 @@ describe('cron edit (If-Match)', () => {
     const patch = calls.find((c) => c.method === 'PATCH')!
     expect(patch.headers).toEqual({ 'If-Match': '4' })
     expect(patch.body).toEqual({ expression: '*/5 * * * *' })
+  })
+
+  it('PATCHes a ref-only edit with the refs it carried forward', async () => {
+    const job: CronJob = { ...JOB, request: { method: 'GET', headerNames: ['x-api-key'], secretRefs: { 'x-api-key': 'K' } } }
+    const { ctx, calls } = stub((c) => (c.method === 'PATCH' ? { status: 200, body: { job: { ...job, revision: 5 } } } : { status: 200, body: { jobs: [job] } }))
+    const log = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    try {
+      await cronEdit('nightly', { secretRef: ['x-sig=SIG'] }, ctx)
+    } finally {
+      log.mockRestore()
+    }
+    expect(calls.find((c) => c.method === 'PATCH')!.body).toEqual({ request: { method: 'GET', secretRefs: { 'x-api-key': 'K', 'x-sig': 'SIG' } } })
+  })
+  it('refuses contradictory ref flags before reading the job', async () => {
+    const { ctx, calls } = stub(() => listResponse)
+    await expect(cronEdit('nightly', { header: ['k=v'], secretRef: ['K=S'] }, ctx)).rejects.toThrow(/both --header and --secret-ref/)
+    expect(calls).toHaveLength(0)
   })
 
   // Re-reading and retrying is precisely how the other editor's change disappears.

@@ -215,11 +215,17 @@ sec.command('tree').description('Show secrets as project → branch → service 
 // Every expression is evaluated in UTC and every time printed is UTC: a cron pinned to UTC does not
 // keep a fixed local time, so a localised column would quietly lie across a DST boundary.
 const cron = program.command('cron').description('Schedule HTTP calls on a branch — a compute service of the project, or an external URL. Expressions and every printed time are UTC')
-// The repeatable --header collector, declared once: commander needs the same reducer on create and
-// edit, and two copies is how they drift apart.
+// The repeatable --header / --secret-ref collectors, declared once: commander needs the same
+// reducers on create and edit, and two copies is how they drift apart. `--secret-ref h=` (empty
+// secret) is the removal, not a `--no-secret-ref`: commander reads a `--no-` twin as a boolean
+// negation of the whole option, so it could not carry the header name.
 const headerOption = (c: Command): Command => c.option(
   '--header <name=value>',
-  'request header, repeatable (split on the first = so a value may contain one). Values are encrypted at rest and are NEVER returned by a read — `cron show` lists header names only',
+  'non-secret request header, repeatable (split on the first = so a value may contain one). Values are encrypted at rest and are NEVER returned by a read — `cron show` lists header names only. For a credential use --secret-ref',
+  (v: string, prev: string[]) => [...prev, v], [] as string[],
+).option(
+  '--secret-ref <name=SECRET>',
+  'request header whose value is the project secret SECRET (set with `insta secrets set`), repeatable. The way to pass a credential: resolved at send time on every attempt, so rotating the secret takes effect on the next run with no edit to the job. User-set secrets only — platform-minted credentials (DATABASE_URL, …) do not resolve',
   (v: string, prev: string[]) => [...prev, v], [] as string[],
 )
 cron.command('list').description('List the branch\'s cron jobs: state, expression, next UTC run and target')
@@ -235,11 +241,11 @@ headerOption(cron.command('create <name> <expression>'))
   .option('--timeout <ms>', 'request timeout, 1000..300000 ms; excludes cold start (the wake is timed separately)')
   .option('--branch <branch>', 'branch (default: current)').option('--json')
   .action(guard((name, expression, o) => cronCmd.cronCreate(name, expression, o)))
-cron.command('show <name>').description('Show one cron job: schedule, next UTC run, target, request (header NAMES only — values are write-only), retry policy and the revision an edit is conditioned on')
+cron.command('show <name>').description('Show one cron job: schedule, next UTC run, target, request (header NAMES only — literal values are write-only; a secret-backed header shows the secret it reads), retry policy and the revision an edit is conditioned on')
   .option('--branch <branch>', 'branch (default: current)').option('--json')
   .action(guard((name, o) => cronCmd.cronShow(name, o)))
 headerOption(cron.command('edit <name>'))
-  .description('Change a cron job. The request is REPLACED, not merged (header values cannot be read back, so anything --header does not re-supply is dropped — the command names what it drops). Conditioned on the revision just read: a concurrent edit fails rather than clobbering')
+  .description('Change a cron job. The request is REPLACED, not merged: literal header values cannot be read back, so any --header not re-supplied is dropped (the command names what it drops); secret refs ARE carried forward unless --header/--secret-ref names that header again — `--secret-ref <name>=` removes one. Conditioned on the revision just read: a concurrent edit fails rather than clobbering')
   .option('--expression <expr>', 'new 5-field cron expression (UTC; quote it)')
   .option('--name <new-name>', 'rename the job')
   .option('--url <url>', 'external target: an absolute http(s) URL')
