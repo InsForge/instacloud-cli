@@ -129,7 +129,12 @@ export function parseHeader(raw: string, flag = '--header'): [string, string] {
  * passed is the failure that shows up later as a 401 nobody can explain.
  */
 export function parseHeaders(list: readonly string[], flag = '--header'): Record<string, string> {
-  const out: Record<string, string> = {}
+  // `__proto__` is syntactically a valid HTTP header name. A `{}` literal is not a safe map for
+  // it: `out['__proto__'] = value` hits Object.prototype's __proto__ SETTER instead of creating
+  // an own property, so a string value is silently swallowed — the header would vanish with no
+  // error. A null-prototype object has no such setter, so the assignment below behaves like an
+  // ordinary map entry for every syntactically valid name, `__proto__` included.
+  const out: Record<string, string> = Object.create(null)
   for (const raw of list) {
     const [name, value] = parseHeader(raw, flag)
     // Header names are case-insensitive on the wire, so a case-varied repeat is the same repeat.
@@ -335,7 +340,11 @@ export function buildRequest(o: RequestOpts, current?: CronJob['request']): Cron
   if (!flags) return undefined
   const { method, headers, refFlags } = flags
   const had = current ? refsOf(current) : {}
-  const refs: Record<string, string> = {}
+  // Same reasoning as parseHeaders: `had` may carry a stored `__proto__` ref (it came off the
+  // wire through JSON.parse, which — unlike a `{}` literal assignment — gives it a real own
+  // property), and a `{}` accumulator here would silently drop it while carrying every other ref
+  // forward, breaking the one guarantee this function exists to keep.
+  const refs: Record<string, string> = Object.create(null)
   for (const [h, s] of Object.entries(had)) {
     if (findHeader(headers ?? {}, h) === undefined && findHeader(refFlags, h) === undefined) refs[h] = s
   }

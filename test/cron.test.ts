@@ -83,6 +83,16 @@ describe('parseHeader / parseHeaders', () => {
     expect(() => parseHeaders(['a=1', 'a=2'])).toThrow(/given twice/)
     expect(() => parseHeaders(['X-Key=1', 'x-key=2'])).toThrow(/given twice/)
   })
+  // __proto__ is syntactically a valid HTTP header name. A `{}`-literal accumulator would hit
+  // Object.prototype's __proto__ SETTER on assignment instead of creating an own property, so a
+  // string value is silently swallowed — no error, no header. Object.create(null) has no such
+  // setter, so it survives like any other name.
+  it('does not silently swallow a header literally named __proto__', () => {
+    const out = parseHeaders(['__proto__=malicious'])
+    expect(Object.prototype.hasOwnProperty.call(out, '__proto__')).toBe(true)
+    expect(out['__proto__']).toBe('malicious')
+    expect(Object.getPrototypeOf(out)).toBe(null)
+  })
 })
 
 describe('parseSecretRefs', () => {
@@ -277,6 +287,18 @@ describe('buildRequest on an edit (secret refs carried forward)', () => {
   })
   it('treats a row with no secretRefs (written before refs existed) as having none', () => {
     expect(buildRequest({ header: ['a=1'] }, { method: 'GET', headerNames: ['a'] })).toEqual({ method: 'GET', headers: { a: '1' } })
+  })
+  // `secretRefs` comes off the wire through JSON.parse, which — unlike a `{}`-literal
+  // assignment — gives `__proto__` a real own property. A `{}` accumulator in buildRequest would
+  // still lose it on ANY edit (even one that never mentions that header), silently breaking the
+  // one guarantee this function exists to keep.
+  it('carries forward an existing ref literally named __proto__', () => {
+    const withProtoRef = JSON.parse(
+      '{"method":"POST","headerNames":["__proto__"],"secretRefs":{"__proto__":"SECRET"}}',
+    ) as CronJob['request']
+    const r = buildRequest({ method: 'POST', body: '{}' }, withProtoRef)!
+    expect(Object.prototype.hasOwnProperty.call(r.secretRefs, '__proto__')).toBe(true)
+    expect(r.secretRefs?.['__proto__']).toBe('SECRET')
   })
 })
 
