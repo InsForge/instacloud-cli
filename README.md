@@ -225,7 +225,7 @@ build never reaches a production installer.
 | `insta redis` · `mysql` · `mongodb` | `query` · `status` · `limits` · `volume` · `always-on` · `logs` · `metrics` |
 | `insta storage` | `list` · `get` · `delete` · `set-access` |
 | `insta build [dir]` · `deploy [dir]` | Verify a source dir would build; deploy a source directory (built remotely) or `--image <url>`. `insta build logs <id>` reads source-build output: `--source archive` (default) uses the deploy operation ID, `--source github` uses a GitHub build ID; `--follow` watches output, `--json` returns one snapshot |
-| `insta cron` | Branch-scoped HTTP schedules: `list` · `create` · `show` · `edit` · `pause` · `resume` · `delete` · `run` · `runs` · `preview`. Expressions are UTC and so is every time printed; `run` is one EXTRA execution and does not consume the next scheduled tick; header values are write-only, so `show` lists header names only |
+| `insta cron` | Branch-scoped HTTP schedules: `list` · `create` · `show` · `edit` · `pause` · `resume` · `delete` · `run` · `runs` · `preview`. Expressions are UTC and so is every time printed; `run` is one EXTRA execution and does not consume the next scheduled tick; literal header values are write-only, so `show` lists their names only — a header backed by `--secret-ref` is resolved from a project secret at send time and `show` names that secret too |
 | `insta run <cmd>` | Run a command with the branch bundle injected, nothing written to disk |
 | `insta template` | `list` · `info` · `deploy` |
 | `insta billing` | Current cycle overview; `subscribe <tier>` · `portal` · `usage` |

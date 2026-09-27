@@ -11,7 +11,9 @@
 //      so a localised column would read correctly today and lie twice a year, in both directions.
 //   3. Header VALUES are write-only — the request config is encrypted at rest and no read decrypts
 //      it. `show` can therefore list header NAMES and nothing else, and `edit` REPLACES the request
-//      rather than merging into one it cannot read (see cronEditWarnings).
+//      rather than merging into one it cannot read (see cronEditWarnings). The one readable part is
+//      `secretRefs` (header → project secret NAME, resolved at send time), which `edit` carries
+//      forward because it can (see buildRequest).
 import { randomUUID } from 'node:crypto'
 import { ApiClient, ApiError, requireProject } from '../api.js'
 import { die, handleApproval, info, printJson, refuse } from '../util.js'
@@ -33,7 +35,9 @@ export type CronJob = {
   revision: number
   next_run_at: string | null
   target: CronTarget
-  request: { method: 'GET' | 'POST'; headerNames: string[] }
+  // headerNames is EVERY header, literal and secret-backed. secretRefs is absent on rows written
+  // before refs existed — read it through refsOf, never directly.
+  request: { method: 'GET' | 'POST'; headerNames: string[]; secretRefs?: Record<string, string> }
   request_timeout_ms: number
   retry_policy: {
     platformMaxRetries?: number
@@ -111,11 +115,11 @@ export function parseRunLimit(raw: string): number {
  * contains one (`authorization=Bearer a=b`, any base64 padding), so splitting on every `=` would
  * quietly truncate exactly the credentials this flag exists to carry.
  */
-export function parseHeader(raw: string): [string, string] {
+export function parseHeader(raw: string, flag = '--header'): [string, string] {
   const at = raw.indexOf('=')
-  if (at < 1) throw new Error(`--header must be name=value, got: ${raw}`)
+  if (at < 1) throw new Error(`${flag} must be name=value, got: ${raw}`)
   const name = raw.slice(0, at).trim()
-  if (!name) throw new Error(`--header must be name=value, got: ${raw}`)
+  if (!name) throw new Error(`${flag} must be name=value, got: ${raw}`)
   return [name, raw.slice(at + 1)]
 }
 
@@ -124,16 +128,50 @@ export function parseHeader(raw: string): [string, string] {
  * request carries one value per header, and silently dropping one of two credentials an agent
  * passed is the failure that shows up later as a 401 nobody can explain.
  */
-export function parseHeaders(list: readonly string[]): Record<string, string> {
-  const out: Record<string, string> = {}
+export function parseHeaders(list: readonly string[], flag = '--header'): Record<string, string> {
+  // `__proto__` is syntactically a valid HTTP header name. A `{}` literal is not a safe map for
+  // it: `out['__proto__'] = value` hits Object.prototype's __proto__ SETTER instead of creating
+  // an own property, so a string value is silently swallowed — the header would vanish with no
+  // error. A null-prototype object has no such setter, so the assignment below behaves like an
+  // ordinary map entry for every syntactically valid name, `__proto__` included.
+  const out: Record<string, string> = Object.create(null)
   for (const raw of list) {
-    const [name, value] = parseHeader(raw)
+    const [name, value] = parseHeader(raw, flag)
     // Header names are case-insensitive on the wire, so a case-varied repeat is the same repeat.
-    const clash = Object.keys(out).find((k) => k.toLowerCase() === name.toLowerCase())
-    if (clash !== undefined) throw new Error(`--header ${name} given twice (also as ${clash}) — a header carries one value`)
+    const clash = findHeader(out, name)
+    if (clash !== undefined) throw new Error(`${flag} ${name} given twice (also as ${clash}) — a header carries one value`)
     out[name] = value
   }
   return out
+}
+
+/** The key of `rec` naming header `name`, case-insensitively (header names are, on the wire). */
+function findHeader(rec: Record<string, unknown>, name: string): string | undefined {
+  return Object.keys(rec).find((k) => k.toLowerCase() === name.toLowerCase())
+}
+
+/**
+ * Collect repeated `--secret-ref header=SECRET_NAME`. Same grammar as `--header`, and an EMPTY secret
+ * name means "remove this header's ref" on an edit — a secret cannot be named "", so the spelling is
+ * unambiguous, and it keeps removal on the flag that sets refs rather than adding a second one.
+ */
+export function parseSecretRefs(list: readonly string[]): Record<string, string> {
+  const out = parseHeaders(list, '--secret-ref')
+  for (const k of Object.keys(out)) {
+    const raw = out[k]!
+    const trimmed = raw.trim()
+    // Only a LITERALLY empty value means "remove" — that's what makes the spelling unambiguous.
+    // A value that is merely whitespace is a fat-fingered secret name, not that same intent, and
+    // trimming it to '' would silently take the removal branch instead of naming the typo.
+    if (raw !== '' && trimmed === '') throw new Error(`--secret-ref ${k}=${raw} names a blank secret — a secret name cannot be blank (use --secret-ref ${k}= with nothing after '=' to remove the ref)`)
+    out[k] = trimmed
+  }
+  return out
+}
+
+/** A job's refs, `{}` for a row written before refs existed. */
+export function refsOf(r: CronJob['request']): Record<string, string> {
+  return r.secretRefs ?? {}
 }
 
 /** Resolve a cron job by the name the CLI addresses it with (mirrors resolveServiceId). */
@@ -187,11 +225,18 @@ export function jobShowLines(j: CronJob, serviceName?: string): string[] {
     `  target       ${targetLine(j.target, serviceName)}`,
     `  request      ${j.request.method}  timeout ${j.request_timeout_ms}ms`,
   ]
-  // Names, never values: the request config is encrypted at rest and no read decrypts it. Saying so
-  // beats an empty "value" column that reads as "this header is set to nothing".
-  lines.push(j.request.headerNames.length
-    ? `  headers      ${j.request.headerNames.join(', ')}  (names only — values are encrypted at rest and never returned)`
-    : '  headers      (none)')
+  // Literal headers: names, never values — the request config is encrypted at rest and no read
+  // decrypts it. Saying so beats an empty "value" column that reads as "this header is set to
+  // nothing". Secret-backed headers get a row each, because the secret NAME is readable and is the
+  // thing an operator needs when a rotation or a missing secret is the question.
+  const refs = Object.entries(refsOf(j.request))
+  const literal = j.request.headerNames.filter((n) => findHeader(refsOf(j.request), n) === undefined)
+  const rows = [
+    ...(literal.length ? [`${literal.join(', ')}  (names only — values are encrypted at rest and never returned)`] : []),
+    ...refs.map(([h, s]) => `${h} ← secret ${s}  (resolved at send time)`),
+  ]
+  if (!rows.length) lines.push('  headers      (none)')
+  rows.forEach((r, i) => lines.push(`  ${i ? '           ' : 'headers    '}  ${r}`))
   lines.push(`  retry        ${retryLine(j.retry_policy)}`)
   lines.push(`  revision     ${j.revision}  (the If-Match an edit is conditioned on)`)
   lines.push(`  created      ${fmtUtc(j.created_at)}   updated ${fmtUtc(j.updated_at)}`)
@@ -250,7 +295,7 @@ export function conflictLines(name: string, revision: number, what: string): str
 }
 
 export type TargetOpts = { url?: string; service?: string; path?: string }
-export type RequestOpts = { method?: string; body?: string; header?: string[]; timeout?: string }
+export type RequestOpts = { method?: string; body?: string; header?: string[]; secretRef?: string[]; timeout?: string }
 export type CreateOpts = TargetOpts & RequestOpts & { branch?: string; json?: boolean }
 // `create` takes the name and the expression positionally; an edit has to name them as flags, and
 // `--name` is the rename (the positional argument is still the job being edited).
@@ -259,7 +304,7 @@ export type CommonOpts = { branch?: string; json?: boolean }
 
 /** True when any flag that shapes the stored request was given. */
 export function namesRequest(o: RequestOpts): boolean {
-  return o.method !== undefined || o.body !== undefined || (o.header?.length ?? 0) > 0
+  return o.method !== undefined || o.body !== undefined || (o.header?.length ?? 0) > 0 || (o.secretRef?.length ?? 0) > 0
 }
 
 /** True when any flag that names a target was given. */
@@ -280,8 +325,49 @@ export function assertTargetFlags(o: TargetOpts, partial = false): void {
   if (o.path !== undefined && !o.path.startsWith('/')) throw new Error(`--path must start with /, got: ${o.path}`)
 }
 
-/** The stored request, from the flags alone. `undefined` when no flag shaped one. */
-export function buildRequest(o: RequestOpts): { method: CronMethod; headers?: Record<string, string>; body?: string } | undefined {
+export type CronRequest = { method: CronMethod; headers?: Record<string, string>; body?: string; secretRefs?: Record<string, string> }
+
+/**
+ * The stored request. `undefined` when no flag shaped one.
+ *
+ * `current` is the request of the job being edited (omit it on create). Its secret refs are carried
+ * forward — unlike literal values they are readable, so dropping them would be a choice rather than
+ * a limitation — except for a header the flags re-supply, via `--secret-ref` (a new secret) or
+ * `--header` (a literal replacing the ref). `--secret-ref h=` removes one.
+ */
+export function buildRequest(o: RequestOpts, current?: CronJob['request']): CronRequest | undefined {
+  const flags = parseRequestFlags(o)
+  if (!flags) return undefined
+  const { method, headers, refFlags } = flags
+  const had = current ? refsOf(current) : {}
+  // Same reasoning as parseHeaders: `had` may carry a stored `__proto__` ref (it came off the
+  // wire through JSON.parse, which — unlike a `{}` literal assignment — gives it a real own
+  // property), and a `{}` accumulator here would silently drop it while carrying every other ref
+  // forward, breaking the one guarantee this function exists to keep.
+  const refs: Record<string, string> = Object.create(null)
+  for (const [h, s] of Object.entries(had)) {
+    if (findHeader(headers ?? {}, h) === undefined && findHeader(refFlags, h) === undefined) refs[h] = s
+  }
+  for (const [h, s] of Object.entries(refFlags)) {
+    if (s) { refs[h] = s; continue }
+    // A removal that removes nothing is a typo'd header name, and the ref it meant is still live.
+    if (!current) throw new Error(`--secret-ref ${h}= removes a secret ref, and a new job has none — name the secret: --secret-ref ${h}=SECRET_NAME`)
+    if (findHeader(had, h) === undefined) {
+      const names = Object.keys(had)
+      throw new Error(`--secret-ref ${h}= removes a secret ref, and the job has none on ${h}${names.length ? ` (it has: ${names.join(', ')})` : ''}`)
+    }
+  }
+  return {
+    method,
+    ...(headers ? { headers } : {}),
+    ...(o.body !== undefined ? { body: o.body } : {}),
+    ...(Object.keys(refs).length ? { secretRefs: refs } : {}),
+  }
+}
+
+/** The request flags parsed and checked against each other — no job needed, so an edit runs this
+ *  before any network access. `undefined` when no flag shaped a request. */
+export function parseRequestFlags(o: RequestOpts): { method: CronMethod; headers?: Record<string, string>; refFlags: Record<string, string> } | undefined {
   if (!namesRequest(o)) return undefined
   const method = o.method ? parseMethod(o.method) : o.body !== undefined ? 'POST' : 'GET'
   // A body on a GET is a typo with a plausible-looking outcome: the platform would send it and most
@@ -289,28 +375,32 @@ export function buildRequest(o: RequestOpts): { method: CronMethod; headers?: Re
   // POST; `--body` with an explicit `--method GET` is a contradiction and says so.
   if (o.body !== undefined && method !== 'POST') throw new Error('--body is sent on POST only — drop --method GET, or drop --body')
   const headers = o.header?.length ? parseHeaders(o.header) : undefined
-  return { method, ...(headers ? { headers } : {}), ...(o.body !== undefined ? { body: o.body } : {}) }
+  const refFlags = o.secretRef?.length ? parseSecretRefs(o.secretRef) : {}
+  // The platform refuses a header in both maps; saying so here names the flags that did it.
+  for (const h of Object.keys(refFlags)) {
+    const both = findHeader(headers ?? {}, h)
+    if (both !== undefined) throw new Error(`${h} is given as both --header and --secret-ref — a header is a literal value or a secret, not both`)
+  }
+  return { method, ...(headers ? { headers } : {}), refFlags }
 }
 
 /**
  * What an edit that reshapes the request is about to LOSE.
  *
  * The API replaces `request` wholesale — it cannot merge, because a deep merge cannot express
- * "remove this header", and the CLI could not merge either even if the API did: header values are
- * write-only, so the values currently stored are unreadable here. Anything the new flags do not
- * re-supply is therefore gone, and the one thing this command must not do is drop a credential
- * without saying which one.
+ * "remove this header", and the CLI could not merge either even if the API did: literal header
+ * values are write-only, so the values currently stored are unreadable here. Anything the new flags
+ * do not re-supply is therefore gone, and the one thing this command must not do is drop a
+ * credential without saying which one. Secret refs are readable and buildRequest carries them into
+ * `next`, so only a ref the flags removed or replaced leaves — on purpose, and not warned about.
  */
-export function cronEditWarnings(
-  current: CronJob['request'],
-  next: { method: CronMethod; headers?: Record<string, string>; body?: string },
-): string[] {
+export function cronEditWarnings(current: CronJob['request'], next: CronRequest): string[] {
   const out: string[] = []
 
-  const kept = new Set(Object.keys(next.headers ?? {}).map((h) => h.toLowerCase()))
-  const dropped = current.headerNames.filter((n) => !kept.has(n.toLowerCase()))
+  const kept = new Set([...Object.keys(next.headers ?? {}), ...Object.keys(next.secretRefs ?? {})].map((h) => h.toLowerCase()))
+  const dropped = current.headerNames.filter((n) => !kept.has(n.toLowerCase()) && findHeader(refsOf(current), n) === undefined)
   if (dropped.length) {
-    out.push(`warning: the stored request is replaced, not merged (header values are write-only and cannot be read back) — these headers are dropped: ${dropped.join(', ')}`)
+    out.push(`warning: the stored request is replaced, not merged (literal header values are write-only and cannot be read back) — these headers are dropped: ${dropped.join(', ')}`)
   }
 
   // The METHOD is part of the request being replaced, and changing it is the quietest way to break
@@ -466,13 +556,16 @@ export async function cronShow(name: string, opts: CommonOpts = {}, injected?: R
 
 export async function cronEdit(name: string, opts: EditOpts = {}, injected?: Resolved): Promise<void> {
   assertTargetFlags(opts, true)
-  const request = buildRequest(opts)
+  // Contradictory flags fail before any network access; only whether a `--secret-ref h=` removal
+  // names a ref the job has waits for the job (buildRequest, below).
+  parseRequestFlags(opts)
   const timeout = opts.timeout === undefined ? undefined : parseTimeout(opts.timeout)
-  if (!namesTarget(opts) && !request && timeout === undefined && opts.expression === undefined && opts.name === undefined) {
-    throw new Error('nothing to change — pass --expression, --url/--service/--path, --method/--header/--body, --timeout or --name')
+  if (!namesTarget(opts) && !namesRequest(opts) && timeout === undefined && opts.expression === undefined && opts.name === undefined) {
+    throw new Error('nothing to change — pass --expression, --url/--service/--path, --method/--header/--secret-ref/--body, --timeout or --name')
   }
   const c = await context(opts, injected)
   const job = await findJob(c, name)
+  const request = buildRequest(opts, job.request)
   const target = namesTarget(opts)
     // An edit that moves a service target keeps the path it had unless --path says otherwise.
     ? await targetOf(c, opts, job.target.kind === 'service' ? job.target.path : '/')
