@@ -1,11 +1,16 @@
 import { ApiClient, requireProject } from '../api.js'
-import { info, printJson } from '../util.js'
+import { die, info, printJson } from '../util.js'
 
 export async function events(opts: { branch?: string; limit?: string; json?: boolean }): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()
   const qs: string[] = []
-  if (opts.branch) qs.push(`branch=${encodeURIComponent(opts.branch)}`)
+  if (opts.branch) {
+    const { branches } = await api.request('GET', `/projects/${p.projectId}/branches`)
+    const b = branches.find((x: any) => x.name === opts.branch || x.id === opts.branch)
+    if (!b) die(`branch not found: ${opts.branch}`)
+    qs.push(`branch=${encodeURIComponent(b.id)}`)
+  }
   if (opts.limit) qs.push(`limit=${opts.limit}`)
   const { events } = await api.request('GET', `/projects/${p.projectId}/events${qs.length ? `?${qs.join('&')}` : ''}`)
   if (opts.json) return printJson(events)
