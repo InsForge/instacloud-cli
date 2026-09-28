@@ -115,6 +115,15 @@ export async function projectLink(id: string, opts: { json?: boolean } = {}): Pr
   await installSkills({ cwd: process.cwd(), print: skillsPrint(opts.json) })
 }
 
+export async function projectRename(name: string, opts: { project?: string; json?: boolean }): Promise<void> {
+  const api = await ApiClient.load()
+  const projectId = opts.project ?? (await requireProject()).projectId
+  const res = await api.rawRequest('PATCH', `/projects/${projectId}`, { name })
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body)
+  info(`renamed project ${projectId} to ${res.body.project?.name ?? name}`)
+}
+
 export async function projectDelete(opts: { project?: string; json?: boolean }): Promise<void> {
   const api = await ApiClient.load()
   const projectId = opts.project ?? (await requireProject()).projectId

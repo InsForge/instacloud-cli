@@ -131,6 +131,7 @@ const pj = program.command('project').description('Manage projects')
 pj.command('create [name]').option('--org <id>', 'org to create under (default: personal)').option('--json').action(guard((name, o) => project.projectCreate(name, o)))
 pj.command('list').option('--org <id>').option('--json').action(guard((o) => project.projectList(o)))
 pj.command('link <id>').description('Link a project to this directory').option('--json').action(guard((id, o) => project.projectLink(id, o)))
+pj.command('rename <name>').description('Rename a project (display name only)').option('--project <id>').option('--json').action(guard((name, o) => project.projectRename(name, o)))
 pj.command('delete').option('--project <id>').option('--json').action(guard((o) => project.projectDelete(o)))
 
 // ---- branch ----

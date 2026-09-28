@@ -215,7 +215,7 @@ build never reaches a production installer.
 | `insta login` · `logout` · `status` | Browser sign-in (default), `--email` + password, or `--oauth github\|google`; `status` shows the environment, login and linked project/branch |
 | `insta org` | `list` · `create` (one free org per user) |
 | `insta tokens` | API tokens for CI and agents: `list` · `create <name>` · `revoke <id>`. A new token binds to the current org by default (`--org <id>`, `--project <id>`, or an explicit `--account` for everything the account can do); `--read-only` (GET only); `--expires 30d\|90d\|1y\|never` (default 90d). The plaintext is printed once |
-| `insta project` | `create` · `list` · `link` · `delete` |
+| `insta project` | `create` · `list` · `link` · `rename` · `delete` |
 | `insta branch` | `create` · `list` · `switch` · `delete` · `merge` |
 | `insta service` (`services`, `svc`) | `add` · `list` · `remove` · `rename` |
 | `insta secrets` | Write `.env`, plus `list` · `set` · `unset` · `bind` · `unbind` · `bindings` · `sources` · `tree` |
