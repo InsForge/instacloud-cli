@@ -20,8 +20,13 @@ test('agent events --branch sends the branch id the API requires, given a name',
   const request = stub()
   await events({ branch: 'main', json: true })
   expect(request).toHaveBeenLastCalledWith('GET', '/projects/p/events?branch=11111111-1111-4111-8111-111111111111')
-  await events({ branch: '11111111-1111-4111-8111-111111111111'.toUpperCase(), json: true })
-  expect(request).toHaveBeenLastCalledWith('GET', '/projects/p/events?branch=11111111-1111-4111-8111-111111111111')
+})
+
+test('agent events --branch passes an id through, so a deleted branch keeps its history', async () => {
+  const request = stub()
+  await events({ branch: '22222222-2222-4222-8222-222222222222', json: true })
+  expect(request).toHaveBeenCalledTimes(1)
+  expect(request).toHaveBeenLastCalledWith('GET', '/projects/p/events?branch=22222222-2222-4222-8222-222222222222')
 })
 
 test('agent events --branch refuses an unknown branch instead of forwarding it', async () => {

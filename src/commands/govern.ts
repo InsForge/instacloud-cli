@@ -1,15 +1,22 @@
 import { ApiClient, requireProject } from '../api.js'
 import { die, info, printJson } from '../util.js'
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 export async function events(opts: { branch?: string; limit?: string; json?: boolean }): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()
   const qs: string[] = []
   if (opts.branch) {
-    const { branches } = await api.request('GET', `/projects/${p.projectId}/branches`)
-    const b = branches.find((x: any) => x.name === opts.branch || x.id === opts.branch!.toLowerCase())
-    if (!b) die(`branch not found: ${opts.branch}`)
-    qs.push(`branch=${encodeURIComponent(b.id)}`)
+    let id = opts.branch
+    // An id passes through unlooked-up: a deleted branch keeps its events but leaves the branch list.
+    if (!UUID.test(id)) {
+      const { branches } = await api.request('GET', `/projects/${p.projectId}/branches`)
+      const b = branches.find((x: any) => x.name === id)
+      if (!b) die(`branch not found: ${id}`)
+      id = b.id
+    }
+    qs.push(`branch=${encodeURIComponent(id)}`)
   }
   if (opts.limit) qs.push(`limit=${opts.limit}`)
   const { events } = await api.request('GET', `/projects/${p.projectId}/events${qs.length ? `?${qs.join('&')}` : ''}`)
