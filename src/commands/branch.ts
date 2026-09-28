@@ -1,14 +1,16 @@
 import { ApiClient, requireProject } from '../api.js'
 import { isHomeLinkTarget, writeProject } from '../config.js'
-import { info, die, printJson, handleApproval, renderNextActions } from '../util.js'
+import { info, die, printJson, handleApproval, renderNextActions, type NextAction } from '../util.js'
 
 export async function branchCreate(name: string, opts: { from?: string; json?: boolean }): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()
   const out = await api.request('POST', `/projects/${p.projectId}/branches`, { name, from: opts.from ?? p.branch })
   if (opts.json) return printJson(out)
-  info(`created branch ${out.branch.name} (${out.branch.id})`)
-  renderNextActions(out.nextActions)
+  info(`created branch ${out.branch.name} (${out.branch.id}) [${out.branch.status}]`)
+  const creating = out.branch.status === 'creating'
+  if (creating) info('  still provisioning — deploy once `insta branch list` shows it active (a deploy before then answers 404); if it shows error, re-run this command')
+  renderNextActions(creating ? out.nextActions?.filter((a: NextAction) => a.op !== 'deploy') : out.nextActions)
 }
 
 export async function branchList(opts: { json?: boolean }): Promise<void> {
