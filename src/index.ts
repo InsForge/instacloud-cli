@@ -147,7 +147,7 @@ const svc = program.command('service').aliases(['services', 'svc']).description(
 // [type] [name] are optional so the command can answer "what can I add?" — a terminal is walked
 // through the dashboard's Add Service kinds, anything else gets that list back as an error
 // (resolve-service.ts). Picking Docker Image also fills in --image/--port from the answers.
-svc.command('add [type] [name]').description('Provision a service on demand (assigns a default domain for postgres/compute); with no type/name, a terminal picks from the service kinds')
+svc.command('add [type] [name]').description('Provision a service on demand (compute gets a default URL, except a worker on --port 0); with no type/name, a terminal picks from the service kinds')
   .option('--branch <branch>', 'target branch (default: current)')
   .option('--region <region>', 'region for postgres/compute/managed databases, e.g. us-east (see `insta config regions`)')
   .option('--public', 'storage only: serve the bucket with anonymous public-read (default private)')
