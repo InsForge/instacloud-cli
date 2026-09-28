@@ -205,10 +205,12 @@ function rootIgnore(absDir: string): { ig: Ignore; files: IgnoreFile[]; flavour:
   return { ig: compileIgnore(files, 'git'), files, flavour: 'git' }
 }
 
+// .dockerignore only: the docker and flyctl lanes never read .gitignore, and `insta build` cannot know the lane.
 export function contextEntries(absDir: string, cap = Infinity): Found[] {
   const entries: Found[] = []
-  const { ig, files, flavour } = rootIgnore(absDir)
-  walk(absDir, '', entries, [], ig, files, flavour, cap)
+  const file = join(absDir, '.dockerignore')
+  const files = existsSync(file) ? [{ base: '', text: readFileSync(file, 'utf8') }] : []
+  walk(absDir, '', entries, [], compileIgnore(files, 'docker'), files, 'docker', cap)
   return entries
 }
 

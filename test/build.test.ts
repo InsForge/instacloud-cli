@@ -71,6 +71,16 @@ describe('contextStats', () => {
     expect(ctx.totalBytes).toBeLessThan(1_000)
   })
 
+  it('ignores .gitignore: the docker and flyctl lanes ship what only .gitignore excludes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'insta-ctx-'))
+    writeFileSync(join(dir, '.gitignore'), 'node_modules\n')
+    mkdirSync(join(dir, 'node_modules'))
+    writeFileSync(join(dir, 'node_modules', 'big.js'), 'x'.repeat(10_000))
+    const ctx = contextStats(dir)
+    expect(ctx.nodeModulesBytes).toBe(10_000)
+    expect(contextCheck(ctx).status).toBe('fail')
+  })
+
   it('flags truncation when the walk cap is hit instead of silently undercounting', () => {
     const dir = mkdtempSync(join(tmpdir(), 'insta-ctx-'))
     mkdirSync(join(dir, 'sub'))
