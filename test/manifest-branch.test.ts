@@ -4,7 +4,7 @@ import { branchResources } from '../src/commands/manifest.js'
 describe('branchResources', () => {
   const rows = [
     { kind: 'insta-db', name: 'db', branchId: null, status: 'active' },
-    { kind: 's3', name: 'files', branchId: null, status: 'active' },
+    { kind: 's3', name: 'db', branchId: null, status: 'active' },
     { kind: 'insta-db', name: 'db', branchId: 'b-main', status: 'active' },
     { kind: 'insta-db', name: 'db', branchId: 'b-dev', status: 'active' },
   ]

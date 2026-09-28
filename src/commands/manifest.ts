@@ -42,8 +42,7 @@ export function resourceLine(r: ManifestResource): string {
   return `    - ${resourceLabel(r)}  ${where}${pg}  [${r.status}]`
 }
 
-// A root row (branchId null) belongs to the default branch unless that branch has its own row for
-// the same service: an origin postgres writes both, one instance.
+// An origin postgres writes a root row and a default-branch row for one instance.
 export function branchResources(resources: ManifestResource[], b: { id: string; is_default?: boolean }): ManifestResource[] {
   const own = resources.filter((r) => r.branchId === b.id)
   if (!b.is_default) return own
