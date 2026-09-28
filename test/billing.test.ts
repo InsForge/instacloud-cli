@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { billingLines } from '../src/commands/billing.js'
+import { billingLines, redeemLines, redeemErrorMessage } from '../src/commands/billing.js'
 
 const base = {
   window: { from: 1_686_787_200, to: 1_689_379_200 }, // 2023-06-15 → 2023-07-15 (UTC)
@@ -112,5 +112,47 @@ describe('billingLines', () => {
     const out = billingLines({ ...base, byDimension: [], byProject: [] }).join('\n')
     expect(out).not.toContain('by dimension:')
     expect(out).not.toContain('by project:')
+  })
+})
+
+describe('redeemLines', () => {
+  // The spec names exactly these three facts, in this order — amount, expiry, then WHO (by
+  // name, not uuid: a member of several orgs cannot tell which one just got the money otherwise).
+  it('renders amount, expiry and org name', () => {
+    const out = redeemLines({ amountMicros: 12_500_000, creditsExpireAt: '2026-12-31T00:00:00.000Z', orgId: 'org_1', orgName: 'Acme Inc' }).join('\n')
+    expect(out).toContain('credited:        $12.50')
+    expect(out).toContain('expires:         2026-12-31')
+    expect(out).toContain('org:             Acme Inc')
+  })
+
+  it('a code with no expiry reads "never", not null or blank', () => {
+    const out = redeemLines({ amountMicros: 1_000_000, creditsExpireAt: null, orgId: 'org_1', orgName: 'Acme Inc' }).join('\n')
+    expect(out).toContain('expires:         never')
+  })
+})
+
+describe('redeemErrorMessage', () => {
+  // Four literals, four DIFFERENT next actions — collapsing them into one message would hide
+  // that only `not_found` is worth retyping, and only `revoked` has someone to go back to.
+  it.each([
+    ['not_found', 'typos'],
+    ['expired', 'new one'],
+    ['already_redeemed', 'different org'],
+    ['revoked', 'contact whoever sent it'],
+  ])('%s names its own next action', (reason, expected) => {
+    expect(redeemErrorMessage(reason, 'fallback')).toContain(expected)
+  })
+
+  // already_redeemed by a DIFFERENT org is what this path means; the SAME org retrying the same
+  // code gets its original receipt back with a 200 and never reaches this message at all.
+  it('already_redeemed names a different org, not the caller\'s own', () => {
+    expect(redeemErrorMessage('already_redeemed', 'fallback')).toContain('a different org')
+  })
+
+  // A platform ahead of this CLI could send a fifth reason some day; relay it rather than assert
+  // something false about which of the four known cases this is.
+  it('an unrecognized reason falls back instead of guessing', () => {
+    expect(redeemErrorMessage('something_new', 'fallback message')).toBe('fallback message')
+    expect(redeemErrorMessage(undefined, 'fallback message')).toBe('fallback message')
   })
 })

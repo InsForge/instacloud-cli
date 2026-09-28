@@ -133,7 +133,7 @@ describe('group shapes', () => {
   it('agent, config and billing carry the moved verbs', () => {
     expect(commandNames(run(['agent', '--help']).stdout)).toEqual(['setup', 'manifest', 'policy', 'approvals', 'observe', 'events'])
     expect(commandNames(run(['config', '--help']).stdout)).toEqual(['install-mcp', 'regions', 'autoupdate'])
-    expect(commandNames(run(['billing', '--help']).stdout)).toEqual(['subscribe', 'portal', 'usage'])
+    expect(commandNames(run(['billing', '--help']).stdout)).toEqual(['subscribe', 'redeem', 'portal', 'usage'])
   }, 30_000)
   // Rule 4's documented exception (SKILL.md "Command architecture", design §8): the managed-db
   // `query` service is REQUIRED and LEADS, because a trailing optional service cannot be told
