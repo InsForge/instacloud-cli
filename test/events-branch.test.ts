@@ -20,6 +20,8 @@ test('agent events --branch sends the branch id the API requires, given a name',
   const request = stub()
   await events({ branch: 'main', json: true })
   expect(request).toHaveBeenLastCalledWith('GET', '/projects/p/events?branch=11111111-1111-4111-8111-111111111111')
+  await events({ branch: '11111111-1111-4111-8111-111111111111'.toUpperCase(), json: true })
+  expect(request).toHaveBeenLastCalledWith('GET', '/projects/p/events?branch=11111111-1111-4111-8111-111111111111')
 })
 
 test('agent events --branch refuses an unknown branch instead of forwarding it', async () => {
