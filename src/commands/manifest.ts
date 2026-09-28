@@ -42,6 +42,14 @@ export function resourceLine(r: ManifestResource): string {
   return `    - ${resourceLabel(r)}  ${where}${pg}  [${r.status}]`
 }
 
+// A root row (branchId null) belongs to the default branch unless that branch has its own row for
+// the same service: an origin postgres writes both, one instance.
+export function branchResources(resources: ManifestResource[], b: { id: string; is_default?: boolean }): ManifestResource[] {
+  const own = resources.filter((r) => r.branchId === b.id)
+  if (!b.is_default) return own
+  return resources.filter((r) => r.branchId === b.id || (r.branchId === null && !own.some((o) => o.kind === r.kind && o.name === r.name)))
+}
+
 // Agent-legible view of each environment's databases / storage / compute.
 export async function manifest(opts: { json?: boolean }): Promise<void> {
   const api = await ApiClient.load()
@@ -51,7 +59,6 @@ export async function manifest(opts: { json?: boolean }): Promise<void> {
   info(`project ${detail.project.name} (${detail.project.id}) [${detail.project.status}]`)
   for (const b of detail.branches) {
     info(`  branch ${b.name}${b.is_default ? ' *' : ''} [${b.status}]`)
-    const rs = detail.resources.filter((r: any) => r.branchId === b.id || (b.is_default && r.branchId === null))
-    for (const r of rs) info(resourceLine(r))
+    for (const r of branchResources(detail.resources, b)) info(resourceLine(r))
   }
 }
