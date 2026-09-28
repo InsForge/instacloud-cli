@@ -137,16 +137,21 @@ describe('redeemErrorMessage', () => {
   it.each([
     ['not_found', 'typos'],
     ['expired', 'new one'],
-    ['already_redeemed', 'different org'],
+    ['already_redeemed', 'already been redeemed'],
     ['revoked', 'contact whoever sent it'],
   ])('%s names its own next action', (reason, expected) => {
     expect(redeemErrorMessage(reason, 'fallback')).toContain(expected)
   })
 
-  // already_redeemed by a DIFFERENT org is what this path means; the SAME org retrying the same
-  // code gets its original receipt back with a 200 and never reaches this message at all.
-  it('already_redeemed names a different org, not the caller\'s own', () => {
-    expect(redeemErrorMessage('already_redeemed', 'fallback')).toContain('a different org')
+  // This test used to pin the opposite, and pinning it is what would have kept the wrong sentence
+  // green. The caller's OWN org can land on already_redeemed: two same-org requests in flight at
+  // once both miss the replay read, one wins the claim and the other is refused. Attributing the
+  // redemption to someone else would then be false about money the caller already holds, and the
+  // realistic follow-on is asking staff for a replacement code for credits they already have.
+  it('already_redeemed makes no claim about who redeemed it', () => {
+    const m = redeemErrorMessage('already_redeemed', 'fallback')
+    expect(m).not.toContain('different org')
+    expect(m).toContain('insta billing')
   })
 
   // A platform ahead of this CLI could send a fifth reason some day; relay it rather than assert

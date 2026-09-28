@@ -117,12 +117,19 @@ export type RedeemResult = { amountMicros: number; creditsExpireAt: string | nul
 // The platform's contract (RedeemError#reason in billing/service.ts) — four literals, never
 // collapsed into one message, because the right next action differs per reason: `not_found` is
 // the only one worth retyping; `expired`/`revoked` both mean waiting never helps, but only
-// `revoked` has someone to go back to; `already_redeemed` means a DIFFERENT org got there first
-// (the SAME org retrying gets its receipt back with a 200, never this path).
+// `revoked` has someone to go back to.
+//
+// `already_redeemed` deliberately does NOT say WHO redeemed it, because this CLI cannot know.
+// A sequential retry replays the receipt and never reaches here — but two requests from the same
+// org in flight at once both miss the replay read (it sees committed rows only), one wins the
+// claim and the other lands exactly here. That is the case a client resending a request it never
+// saw an answer to is IN. Telling that person "a different org took it" would be false about
+// their own money: the grant is on their wallet. So the message points them at their balance
+// instead of at a conclusion this side cannot support.
 const REDEEM_ERROR_MESSAGE: Record<string, string> = {
   not_found: 'that code was not recognized — check it for typos and try again',
   expired: 'that code has expired — ask whoever sent it for a new one',
-  already_redeemed: 'that code was already redeemed by a different org',
+  already_redeemed: 'that code has already been redeemed — if it was your org, the credits are already there (check `insta billing`)',
   revoked: 'that code was revoked — contact whoever sent it to you',
 }
 
