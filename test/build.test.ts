@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
@@ -8,6 +8,7 @@ import {
   type BuildCheck, type ContextStats,
 } from '../src/commands/build.js'
 import type { BuildRunner } from '../src/flyctl-build.js'
+import { contextEntries } from '../src/pack.js'
 
 const check = (over: Partial<BuildCheck>): BuildCheck =>
   ({ id: 'x', severity: 'info', status: 'pass', title: 't', ...over })
@@ -54,26 +55,49 @@ describe('contextStats', () => {
     mkdirSync(join(dir, 'node_modules'), { recursive: true })
     writeFileSync(join(dir, 'node_modules', 'big.js'), 'x'.repeat(10_000))
     const ctx = contextStats(dir)
-    expect(ctx.hasNodeModules).toBe(true)
-    expect(ctx.nodeModulesIgnored).toBe(true)
+    expect(ctx.nodeModulesBytes).toBe(0)
     expect(ctx.totalBytes).toBeLessThan(10_000) // the ignored tree does not count
+  })
+
+  it('honours every .dockerignore rule the deploy packer does, not only node_modules', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'insta-ctx-'))
+    writeFileSync(join(dir, '.dockerignore'), '.venv\n*.bin\n')
+    writeFileSync(join(dir, 'app.py'), 'x'.repeat(100))
+    writeFileSync(join(dir, 'model.bin'), 'x'.repeat(10_000))
+    mkdirSync(join(dir, '.venv', 'lib'), { recursive: true })
+    for (let i = 0; i < 10; i++) writeFileSync(join(dir, '.venv', 'lib', `m${i}.py`), 'x'.repeat(10_000))
+    const ctx = contextStats(dir, 5)
+    expect(ctx.truncated).toBe(false) // a pruned .venv does not use up the walk cap
+    expect(ctx.totalBytes).toBeLessThan(1_000)
+  })
+
+  it('ignores .gitignore: the docker and flyctl lanes ship what only .gitignore excludes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'insta-ctx-'))
+    writeFileSync(join(dir, '.gitignore'), 'node_modules\n')
+    mkdirSync(join(dir, 'node_modules'))
+    writeFileSync(join(dir, 'node_modules', 'big.js'), 'x'.repeat(10_000))
+    const ctx = contextStats(dir)
+    expect(ctx.nodeModulesBytes).toBe(10_000)
+    expect(contextCheck(ctx).status).toBe('fail')
   })
 
   it('flags truncation when the walk cap is hit instead of silently undercounting', () => {
     const dir = mkdtempSync(join(tmpdir(), 'insta-ctx-'))
-    for (const n of ['a', 'b', 'c', 'd']) writeFileSync(join(dir, `${n}.txt`), 'x')
+    mkdirSync(join(dir, 'sub'))
+    for (const n of ['a', 'b', 'c', 'd']) writeFileSync(join(dir, 'sub', `${n}.txt`), 'x')
     expect(contextStats(dir, 2).truncated).toBe(true)
-    expect(contextStats(dir).truncated).toBe(false)
+    expect(contextEntries(dir, 3)).toHaveLength(3) // the walk itself stops at the cap
+    expect(contextStats(dir, 5).truncated).toBe(false) // exactly `cap` entries is complete
   })
 })
 
 describe('contextCheck', () => {
-  const base: ContextStats = { totalBytes: 1024, nodeModulesBytes: 0, hasNodeModules: false, nodeModulesIgnored: false, truncated: false }
+  const base: ContextStats = { totalBytes: 1024, nodeModulesBytes: 0, truncated: false, hasDockerignore: false }
   it('passes a small clean context', () => {
     expect(contextCheck(base).status).toBe('pass')
   })
   it('fails when node_modules would ship', () => {
-    const c = contextCheck({ ...base, hasNodeModules: true, nodeModulesBytes: 5_000_000 })
+    const c = contextCheck({ ...base, nodeModulesBytes: 5_000_000 })
     expect(c.status).toBe('fail')
     expect(c.detail).toContain('node_modules')
   })
@@ -81,6 +105,10 @@ describe('contextCheck', () => {
     const c = contextCheck({ ...base, totalBytes: 200 * 1024 * 1024 })
     expect(c.status).toBe('fail')
     expect(c.detail).toContain('slow')
+  })
+  it('does not tell someone who already has a .dockerignore to add one', () => {
+    const c = contextCheck({ ...base, totalBytes: 200 * 1024 * 1024, hasDockerignore: true })
+    expect(c.nextAction).toMatch(/^extend your \.dockerignore/)
   })
   it('fails conservatively when the scan was truncated (size is a floor, not a fact)', () => {
     const c = contextCheck({ ...base, truncated: true })
@@ -107,6 +135,21 @@ describe('jsonReport', () => {
     const runner: BuildRunner = async () => { throw new Error('nixpacks must not be invoked when unavailable') }
     const r = await buildReport(dir, {}, { runner, nixpacksAvailable: false })
     expect(JSON.parse(JSON.stringify(jsonReport(r, false))).verdict).toBe('failed')
+  })
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('reports an unreadable directory as a failed context check instead of throwing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'insta-build-'))
+    writeFileSync(join(dir, 'Dockerfile'), 'FROM node:20\nCMD ["node"]\n')
+    mkdirSync(join(dir, 'data'))
+    chmodSync(join(dir, 'data'), 0o000)
+    try {
+      const r = await buildReport(dir, {}, { runner: nixpacksFake(PLAN), nixpacksAvailable: false })
+      const c = r.checks.find((x) => x.id === 'context')
+      expect(c?.status).toBe('fail')
+      expect(c?.detail).toContain('EACCES')
+    } finally {
+      chmodSync(join(dir, 'data'), 0o755)
+    }
   })
 })
 

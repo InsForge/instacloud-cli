@@ -3,9 +3,10 @@
 // Entirely local and offline: no login, no project link, nothing pushed or deployed. Phase 1 is
 // static-only — no Docker daemon involved.
 import { resolve, join } from 'node:path'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { info, printJson, die } from '../util.js'
 import { dockerfileExposedPort } from './deploy.js'
+import { contextEntries } from '../pack.js'
 import { nixpacksPlan, nixpacksGeneratedDockerfile, nixpacksAvailable, quietRunner, type NixpacksPlan } from '../nixpacks.js'
 import type { BuildRunner } from '../flyctl-build.js'
 
@@ -71,50 +72,23 @@ export function envKeysFromDotEnvExample(content: string): string[] {
 const CONTEXT_WARN_BYTES = 100 * 1024 * 1024
 const WALK_CAP = 50_000 // entries; hitting it marks the stats truncated (size becomes a floor)
 
-export type ContextStats = { totalBytes: number; nodeModulesBytes: number; hasNodeModules: boolean; nodeModulesIgnored: boolean; truncated: boolean }
+export type ContextStats = { totalBytes: number; nodeModulesBytes: number; truncated: boolean; hasDockerignore: boolean }
 
-// Sizes what would actually ship: a dockerignored node_modules is skipped, not counted. (Only the
-// node_modules pattern is honored — full .dockerignore glob semantics aren't reimplemented here.)
 export function contextStats(dir: string, cap = WALK_CAP): ContextStats {
-  const ignoreFile = join(dir, '.dockerignore')
-  const ignoreLines = existsSync(ignoreFile)
-    ? readFileSync(ignoreFile, 'utf8').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'))
-    : []
-  const nodeModulesIgnored = ignoreLines.some((l) => ['node_modules', 'node_modules/', '/node_modules', '**/node_modules'].includes(l))
+  const entries = contextEntries(dir, cap + 1)
   let totalBytes = 0
   let nodeModulesBytes = 0
-  let hasNodeModules = false
-  let truncated = false
-  let seen = 0
-  const walk = (d: string, inNodeModules: boolean) => {
-    let entries: string[]
-    try { entries = readdirSync(d) } catch { return }
-    for (const name of entries) {
-      if (seen++ >= cap) { truncated = true; return }
-      if (name === '.git') continue
-      const p = join(d, name)
-      let st
-      try { st = statSync(p) } catch { continue }
-      if (name === 'node_modules' && st.isDirectory()) {
-        hasNodeModules = true
-        if (nodeModulesIgnored) continue // excluded from the context — don't count it
-      }
-      const isNm = inNodeModules || name === 'node_modules'
-      if (st.isDirectory()) walk(p, isNm)
-      else {
-        totalBytes += st.size
-        if (isNm) nodeModulesBytes += st.size
-      }
-    }
+  for (const e of entries.slice(0, cap)) {
+    totalBytes += e.size
+    if (e.path.split('/').includes('node_modules')) nodeModulesBytes += e.size
   }
-  walk(dir, false)
-  return { totalBytes, nodeModulesBytes, hasNodeModules, nodeModulesIgnored, truncated }
+  return { totalBytes, nodeModulesBytes, truncated: entries.length > cap, hasDockerignore: existsSync(join(dir, '.dockerignore')) }
 }
 
 const mb = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)} MB`
 
 export function contextCheck(ctx: ContextStats): BuildCheck {
-  const shipsNodeModules = ctx.hasNodeModules && !ctx.nodeModulesIgnored
+  const shipsNodeModules = ctx.nodeModulesBytes > 0
   const tooBig = ctx.totalBytes > CONTEXT_WARN_BYTES
   const size = `${mb(ctx.totalBytes)}${ctx.truncated ? '+' : ''}`
   const detail = shipsNodeModules
@@ -129,7 +103,7 @@ export function contextCheck(ctx: ContextStats): BuildCheck {
     status: bad ? 'fail' : 'pass',
     title: 'build context',
     detail,
-    ...(bad ? { nextAction: 'add a .dockerignore (node_modules, build artifacts, secrets)' } : {}),
+    ...(bad ? { nextAction: `${ctx.hasDockerignore ? 'extend your' : 'add a'} .dockerignore (node_modules, build artifacts, secrets)` } : {}),
   }
 }
 
@@ -231,7 +205,11 @@ export async function buildReport(
     ...(port !== undefined ? {} : { nextAction: 'pass --port <n> (or add EXPOSE <n> to the Dockerfile) — a port mismatch is the #1 deploy mistake' }),
   })
 
-  checks.push(contextCheck(contextStats(dir)))
+  try {
+    checks.push(contextCheck(contextStats(dir)))
+  } catch (err) {
+    checks.push({ id: 'context', severity: 'warning', status: 'fail', title: 'build context', detail: (err as Error).message, nextAction: 'make it readable, or exclude it in .dockerignore — deploy cannot pack it either' })
+  }
 
   return {
     dir,

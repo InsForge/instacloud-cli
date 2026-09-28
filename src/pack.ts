@@ -113,6 +113,7 @@ function walk(
   ig: Ignore,
   files: IgnoreFile[],
   flavour: Flavour,
+  cap = Infinity,
 ): void {
   const dirAbs = join(root, rel === '' ? '.' : rel.split('/').join(sep))
   const names = readdirSync(dirAbs).sort()
@@ -124,6 +125,7 @@ function walk(
   }
 
   for (const name of names) {
+    if (out.length >= cap) return
     if (ALWAYS_SKIP.has(name)) continue
     const relPath = rel === '' ? name : `${rel}/${name}`
     const keep = rel === '' && KEPT_AT_ROOT.has(name)
@@ -138,7 +140,7 @@ function walk(
       if (ig.excludes(relPath, true) && ig.canPrune(relPath)) continue
       // Emitted whenever we descend, so a re-included child has its parent.
       out.push({ path: `${relPath}/`, mode: 0o755, size: 0, dir: true })
-      walk(root, relPath, out, links, ig, files, flavour)
+      walk(root, relPath, out, links, ig, files, flavour, cap)
     } else if (st.isFile()) {
       if (!keep && ig.excludes(relPath, false)) continue
       out.push({ path: relPath, mode: fileMode(st.mode), size: st.size, dir: false, ino: st.ino, dev: st.dev })
@@ -201,6 +203,15 @@ function rootIgnore(absDir: string): { ig: Ignore; files: IgnoreFile[]; flavour:
   }
   const files = existsSync(join(absDir, '.gitignore')) ? [{ base: '', text: read('.gitignore') }] : []
   return { ig: compileIgnore(files, 'git'), files, flavour: 'git' }
+}
+
+// .dockerignore only: the docker and flyctl lanes never read .gitignore, and `insta build` cannot know the lane.
+export function contextEntries(absDir: string, cap = Infinity): Found[] {
+  const entries: Found[] = []
+  const file = join(absDir, '.dockerignore')
+  const files = existsSync(file) ? [{ base: '', text: readFileSync(file, 'utf8') }] : []
+  walk(absDir, '', entries, [], compileIgnore(files, 'docker'), files, 'docker', cap)
+  return entries
 }
 
 const mib = (n: number): string => `${(n / (1024 * 1024)).toFixed(1)} MiB`
