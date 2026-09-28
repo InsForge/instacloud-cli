@@ -8,7 +8,7 @@ export async function branchCreate(name: string, opts: { from?: string; json?: b
   const out = await api.request('POST', `/projects/${p.projectId}/branches`, { name, from: opts.from ?? p.branch })
   if (opts.json) return printJson(out)
   info(`created branch ${out.branch.name} (${out.branch.id}) [${out.branch.status}]`)
-  if (out.branch.status === 'creating') info('  still provisioning — deploy once `insta branch list` shows it active; a deploy before then answers 404')
+  if (out.branch.status === 'creating') info('  still provisioning — deploy once `insta branch list` shows it active (a deploy before then answers 404); if it shows error, re-run this command')
   renderNextActions(out.nextActions)
 }
 
