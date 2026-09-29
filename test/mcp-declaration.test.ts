@@ -137,6 +137,11 @@ describe('checkDeclaration', () => {
     expect(checkDeclaration(['cron create'], '## MCP ##\n\nno MCP tool: credential minting\n').ok).toBe(true)
   })
 
+  // The closing run needs a space before it. "## MCP###" is a heading titled "MCP###".
+  it('refuses closing hashes with no space before them, which change the title', () => {
+    expect(checkDeclaration(['cron create'], '## MCP###\n\nno MCP tool: credential minting\n').ok).toBe(false)
+  })
+
   // Four spaces is an indented code block, not a fence: it opens nothing, so the heading is real.
   it('does not let a four-space-indented run of backticks swallow the section', () => {
     expect(checkDeclaration(['cron create'], '    ```\n## MCP\n\nno MCP tool: credential minting\n').ok).toBe(true)

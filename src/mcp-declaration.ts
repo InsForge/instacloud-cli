@@ -45,10 +45,11 @@ const stripInvisible = (body: string): string =>
 // Exactly two hashes. A deeper heading is a subsection of something else, and accepting it would
 // let a "### MCP" under "## Notes" stand in for the declaration.
 //
-// The space after them is CommonMark's and it is load-bearing: "##MCP" is a paragraph that renders
-// as the literal text, so a body carrying only that shows a reader no section at all. The trailing
-// run of hashes is the optional closing sequence, which renders as the same heading.
-const HEADING = /^##[ \t]+MCP[ \t]*(?:#+[ \t]*)?$/m
+// The spaces are CommonMark's and they are load-bearing. "##MCP" is a paragraph that renders as the
+// literal text, so a body carrying only that shows a reader no section at all. The trailing run of
+// hashes is the optional closing sequence and it needs a space before it: "## MCP###" is a heading
+// titled "MCP###", which is not this section however much it looks like it.
+const HEADING = /^##[ \t]+MCP(?:[ \t]+#+)?[ \t]*$/m
 
 // Any heading ends the section, not only a "##" one.
 const ENDS_SECTION = /^#{1,6}(?:[ \t]|$)/
