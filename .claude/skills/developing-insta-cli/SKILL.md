@@ -68,7 +68,7 @@ pins the visible top level; changing it is a design decision, not a code change.
    no arming flag, so neither side waits for the other. Between July and September eight CLI
    capabilities took 14 to 41 days to reach MCP, and every one of them was a new leaf: `service
    rename`, `regions`, always-on, limits, volume, `postgres stats`, managed-database query, and the
-   bought-domain commands. No new user-visible command without a matching MCP tool or a stated
+   bought-domain commands. No new leaf command without a matching MCP tool or a stated
    reason.
 
 Where things go: settings (limits/volume/always-on/scale) live under the service type;
