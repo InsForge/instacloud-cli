@@ -459,7 +459,7 @@ pg.command('volume [service]').description("Show or grow a postgres service's pr
   .option('--size <gi>', 'new size in whole Gi, e.g. 10 (must be ≥ the current size)')
   .option('--json').option('--branch <branch>', 'branch (default: current)')
   .action(guard((service, o) => pgCmd.dbVolume(service, o)))
-pg.command('always-on <mode> [service]').description('Set a postgres service always-on (mode: on|off). on = instance stays warm, no cold starts; off = default scale-to-zero (idle instance suspends; first connection cold-starts). insta-db-backed services only')
+pg.command('always-on [mode] [service]').description('Show or set a postgres service always-on (mode: on|off; no mode = print the current setting). on = instance stays warm, no cold starts; off = default scale-to-zero (idle instance suspends; first connection cold-starts). insta-db-backed services only')
   .option('--json').option('--branch <branch>', 'branch (default: current)')
   .action(guard((mode, service, o) => pgCmd.dbAlwaysOn(mode, service, o)))
 addObservability(pg, 'db', 'postgres')
