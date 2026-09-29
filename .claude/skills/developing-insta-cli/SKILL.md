@@ -39,8 +39,9 @@ npx tsx src/index.ts --help   # run the CLI from source
 
 ## Command architecture (read before adding or moving a command)
 
-The tree in `src/index.ts` follows five rules (design: superproject
-`docs/superpowers/specs/2026-09-17-cli-command-reorg-design.md`). `test/help-surface.test.ts`
+The tree in `src/index.ts` follows the first five rules below (design: superproject
+`docs/superpowers/specs/2026-09-17-cli-command-reorg-design.md`). Rule 6 is not about the tree's
+shape but about what a new command owes MCP. `test/help-surface.test.ts`
 pins the visible top level; changing it is a design decision, not a code change.
 
 1. **Level 1 is a resource (noun, singular).** The only verbs at level 1 are `login`, `logout`,
