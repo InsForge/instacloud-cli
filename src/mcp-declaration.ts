@@ -32,23 +32,34 @@ export function checkDeclaration(added: string[], body: string | null | undefine
 // A heading inside a comment or a code fence is not a section. A pull request template carrying a
 // commented-out example would otherwise declare on every author's behalf.
 //
-// The closing fence follows CommonMark: same character, no shorter than the opening run, nothing
-// after it but whitespace. A line reading ```not a closing fence does not close anything, and
-// treating it as a close would expose the headings below it while a reader still sees code.
+// Fences follow CommonMark: indented at most three spaces, and closed by the same character, no
+// shorter than the opening run, with nothing after it but whitespace. A line reading ```not a
+// closing fence closes nothing, and treating it as a close would expose the headings below it
+// while a reader still sees code. Four spaces is an indented code block rather than a fence, so a
+// run of backticks that deep opens nothing and the heading under it is a heading.
 const stripInvisible = (body: string): string =>
   body
     .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
-    .replace(/^[ \t]*((`|~)\2{2,})[\s\S]*?(?:^[ \t]*\1\2*[ \t]*$|$(?![\s\S]))/gm, '')
+    .replace(/^ {0,3}((`|~)\2{2,})[\s\S]*?(?:^ {0,3}\1\2*[ \t]*$|$(?![\s\S]))/gm, '')
 
 // Exactly two hashes. A deeper heading is a subsection of something else, and accepting it would
 // let a "### MCP" under "## Notes" stand in for the declaration.
+//
+// The space after them is CommonMark's and it is load-bearing: "##MCP" is a paragraph that renders
+// as the literal text, so a body carrying only that shows a reader no section at all. The trailing
+// run of hashes is the optional closing sequence, which renders as the same heading.
+const HEADING = /^##[ \t]+MCP[ \t]*(?:#+[ \t]*)?$/m
+
+// Any heading ends the section, not only a "##" one.
+const ENDS_SECTION = /^#{1,6}(?:[ \t]|$)/
+
 function declarationLine(raw: string): string | null {
   const body = stripInvisible(raw)
-  const m = /^##[ \t]*MCP[ \t]*$/m.exec(body)
+  const m = HEADING.exec(body)
   if (!m) return null
   for (const raw of body.slice(m.index + m[0].length).split('\n')) {
     const line = raw.trim()
-    if (line.startsWith('##')) return ''
+    if (ENDS_SECTION.test(line)) return ''
     if (line) return line
   }
   return ''

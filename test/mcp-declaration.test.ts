@@ -127,6 +127,31 @@ describe('checkDeclaration', () => {
     expect(checkDeclaration(['cron create'], info).ok, 'info string').toBe(true)
   })
 
+  // The space after the hashes is CommonMark's and it is load-bearing: "##MCP" renders as the
+  // literal text, so a body carrying only that shows a reader no section while the gate saw one.
+  it('refuses a heading with no space after the hashes, which renders as text', () => {
+    expect(checkDeclaration(['cron create'], '##MCP\n\nno MCP tool: credential minting\n').ok).toBe(false)
+  })
+
+  it('accepts the optional closing run of hashes, which renders as the same heading', () => {
+    expect(checkDeclaration(['cron create'], '## MCP ##\n\nno MCP tool: credential minting\n').ok).toBe(true)
+  })
+
+  // Four spaces is an indented code block, not a fence: it opens nothing, so the heading is real.
+  it('does not let a four-space-indented run of backticks swallow the section', () => {
+    expect(checkDeclaration(['cron create'], '    ```\n## MCP\n\nno MCP tool: credential minting\n').ok).toBe(true)
+  })
+
+  it('still strips a fence indented up to three spaces', () => {
+    const b = '   ```\n## MCP\nnot this one\n   ```\n'
+    expect(checkDeclaration(['cron create'], b).ok).toBe(false)
+  })
+
+  it('ends the section at a heading of any depth', () => {
+    const b = '## MCP\n\n# Notes\n\nno MCP tool: credential minting\n'
+    expect(checkDeclaration(['cron create'], b).ok).toBe(false)
+  })
+
   it('refuses an empty MCP section and says which it was', () => {
     const v = checkDeclaration(['cron create'], '## MCP\n\n## Verify\n\nnpm test\n')
     expect(v.ok).toBe(false)
