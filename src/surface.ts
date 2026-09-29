@@ -15,3 +15,26 @@ export function leafPaths(root: Command): string[] {
 }
 
 export const renderSurface = (leaves: string[]): string => JSON.stringify({ leaves }, null, 2) + '\n'
+
+// Throws rather than returning a default: a snapshot this function cannot read is a broken gate,
+// and a broken gate that reports no drift is worse than one that fails.
+export function parseSurface(raw: string, where: string): string[] {
+  let value: unknown
+  try { value = JSON.parse(raw) } catch (e) { throw new Error(`${where} is not JSON: ${(e as Error).message}`) }
+  const leaves = (value as { leaves?: unknown })?.leaves
+  if (!Array.isArray(leaves) || leaves.some((l) => typeof l !== 'string')) {
+    throw new Error(`${where} has no "leaves" array of strings`)
+  }
+  return leaves as string[]
+}
+
+/** Reads the base's snapshot. `null` means the path is absent there, which is not an error. */
+export type BaseReader = { present: () => boolean; read: () => string }
+
+// Only an absent path is treated as "nothing was added". A bad ref, an unreadable blob or a
+// malformed snapshot all reach the caller, because each of them would otherwise pass the gate.
+export function addedLeaves(base: BaseReader, current: string[]): string[] {
+  if (!base.present()) return []
+  const before = new Set(parseSurface(base.read(), 'the base surface.json'))
+  return current.filter((l) => !before.has(l)).sort()
+}

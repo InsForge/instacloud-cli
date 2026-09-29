@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { checkDeclaration } from '../src/mcp-declaration.js'
-import { leafPaths } from '../src/surface.js'
+import { addedLeaves, leafPaths } from '../src/surface.js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
@@ -60,6 +60,63 @@ describe('checkDeclaration', () => {
   it('names every added leaf, so the author does not have to diff by hand', () => {
     const v = checkDeclaration(['cron create', 'cron list'], '')
     if (!v.ok) expect(v.message).toContain('cron create, cron list')
+  })
+
+  // An unanchored search matches its own negation, which is the worst kind of false pass.
+  it('refuses a form that appears inside a sentence denying it', () => {
+    for (const line of [
+      'This is not no MCP tool: needs this machine',
+      'Related issue InsForge/instacloud-mcp#123, but no matching tool exists',
+      'We considered no MCP tool: credential minting and rejected it',
+    ]) {
+      expect(checkDeclaration(['cron create'], body(line)).ok, line).toBe(false)
+    }
+  })
+
+  it('refuses a heading that is not exactly two hashes', () => {
+    expect(checkDeclaration(['cron create'], '### MCP\n\nno MCP tool: credential minting\n').ok).toBe(false)
+    expect(checkDeclaration(['cron create'], '#### MCP\n\nno MCP tool: credential minting\n').ok).toBe(false)
+  })
+
+  it('reads only the first non-empty line, so prose cannot hide a declaration below it', () => {
+    expect(checkDeclaration(['cron create'], body('We are still deciding.\n\nno MCP tool: credential minting')).ok).toBe(false)
+  })
+
+  it('allows the linked form to say what the tool is', () => {
+    expect(checkDeclaration(['cron create'], body('InsForge/instacloud-mcp#123 adds insta_create_cron_job')).ok).toBe(true)
+  })
+
+  it('refuses an empty MCP section and says which it was', () => {
+    const v = checkDeclaration(['cron create'], '## MCP\n\n## Verify\n\nnpm test\n')
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.message).toContain('is empty')
+  })
+})
+
+describe('addedLeaves', () => {
+  const base = (leaves: string[]) => ({ present: () => true, read: () => JSON.stringify({ leaves }) })
+
+  it('reports what the current surface has and the base did not', () => {
+    expect(addedLeaves(base(['a b']), ['a b', 'c d'])).toEqual(['c d'])
+  })
+
+  it('reports nothing when the base has no snapshot, which is the commit introducing it', () => {
+    expect(addedLeaves({ present: () => false, read: () => { throw new Error('unreachable') } }, ['a b'])).toEqual([])
+  })
+
+  it('ignores a leaf the pull request removed', () => {
+    expect(addedLeaves(base(['a b', 'c d']), ['a b'])).toEqual([])
+  })
+
+  // Each of these used to return null and pass the gate.
+  it('throws rather than passing when the base snapshot cannot be read', () => {
+    expect(() => addedLeaves({ present: () => true, read: () => { throw new Error('bad object') } }, ['a b'])).toThrow(/bad object/)
+  })
+
+  it('throws rather than passing when the base snapshot is malformed', () => {
+    expect(() => addedLeaves({ present: () => true, read: () => '{ not json' }, ['a b'])).toThrow(/not JSON/)
+    expect(() => addedLeaves({ present: () => true, read: () => '{"leaves":"a b"}' }, ['a b'])).toThrow(/leaves.*array/)
+    expect(() => addedLeaves({ present: () => true, read: () => '{}' }, ['a b'])).toThrow(/leaves.*array/)
   })
 })
 

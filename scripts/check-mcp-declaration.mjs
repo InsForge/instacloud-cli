@@ -10,19 +10,17 @@ import { readFileSync } from 'node:fs'
 const base = process.env.BASE_REF
 if (!base) { console.error('BASE_REF is required'); process.exit(1) }
 
-const leavesAt = (ref) => {
-  try {
-    return new Set(JSON.parse(execFileSync('git', ['show', `${ref}:surface.json`], { encoding: 'utf8' })).leaves)
-  } catch {
-    // No surface.json on the base is the commit that introduces it. Nothing is "added" against a
-    // base that never had a surface, and treating it as 147 additions would fail that pull request.
-    return null
-  }
-}
+const ref = `origin/${base}`
+const git = (...args) => execFileSync('git', args, { encoding: 'utf8' })
 
-const before = leavesAt(`origin/${base}`)
-const after = new Set(JSON.parse(readFileSync('surface.json', 'utf8')).leaves)
-const added = before === null ? [] : [...after].filter((l) => !before.has(l)).sort()
+// ls-tree separates the two cases git show conflates: empty output means the path is absent on a
+// reachable ref, while a bad ref throws. Only the first is "this commit introduces the snapshot",
+// and every other failure has to reach the top, because a swallowed one passes the gate.
+const present = () => git('ls-tree', ref, '--', 'surface.json').trim().length > 0
+
+const { addedLeaves, parseSurface } = await import('../src/surface.ts')
+const current = parseSurface(readFileSync('surface.json', 'utf8'), 'surface.json')
+const added = addedLeaves({ present, read: () => git('show', `${ref}:surface.json`) }, current)
 
 const { checkDeclaration } = await import('../src/mcp-declaration.ts')
 const verdict = checkDeclaration(added, process.env.PR_BODY)
