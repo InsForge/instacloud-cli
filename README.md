@@ -78,7 +78,7 @@ secrets to `./.env` (the postgres connection string is read with `insta postgres
 builds the directory remotely and ships it to the branch's compute
 service, with no local Docker. Whether it needs a `Dockerfile` depends on where the
 service runs: on insta-compute it is optional, and a directory without one is built
-by nixpacks on the build gateway; on Fly-backed services one is still required.
+by nixpacks on the build gateway; on legacy-plane services one is still required.
 
 ## Authentication
 
