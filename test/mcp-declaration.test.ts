@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it } from 'vitest'
 import { checkDeclaration } from '../src/mcp-declaration.js'
-import { addedLeaves, leafPaths } from '../src/surface.js'
-import { readFileSync } from 'node:fs'
+import { addedLeaves, gitBaseReader, leafPaths, renderSurface } from '../src/surface.js'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const body = (section: string) => `## What\n\nAdds a thing.\n\n## MCP\n\n${section}\n\n## Verify\n\nnpm test\n`
@@ -103,6 +106,27 @@ describe('checkDeclaration', () => {
     expect(checkDeclaration(['cron create'], b).ok).toBe(true)
   })
 
+  // A closing fence takes the same character, no shorter, and nothing after it but whitespace.
+  // Treating "```not a closing fence" as a close would expose headings a reader still sees as code.
+  it('does not let a line with text after the backticks close a fence', () => {
+    const b = '```\n## MCP\nx\n```not a closing fence\n\n## MCP\n\nInsForge/instacloud-mcp#123\n'
+    expect(checkDeclaration(['cron create'], b).ok).toBe(false)
+  })
+
+  it('does not let a shorter run or a different character close a fence', () => {
+    const shorter = '````\n```\n\n## MCP\n\nInsForge/instacloud-mcp#123\n'
+    const other = '```\nx\n~~~\n\n## MCP\n\nno MCP tool: credential minting\n'
+    expect(checkDeclaration(['cron create'], shorter).ok, 'shorter').toBe(false)
+    expect(checkDeclaration(['cron create'], other).ok, 'other character').toBe(false)
+  })
+
+  it('accepts a longer closing run and an opening info string, as Markdown does', () => {
+    const longer = '```\nx\n`````\n\n## MCP\n\nno MCP tool: credential minting\n'
+    const info = '```js\nconst a = 1\n```\n\n## MCP\n\nno MCP tool: credential minting\n'
+    expect(checkDeclaration(['cron create'], longer).ok, 'longer').toBe(true)
+    expect(checkDeclaration(['cron create'], info).ok, 'info string').toBe(true)
+  })
+
   it('refuses an empty MCP section and says which it was', () => {
     const v = checkDeclaration(['cron create'], '## MCP\n\n## Verify\n\nnpm test\n')
     expect(v.ok).toBe(false)
@@ -134,6 +158,51 @@ describe('addedLeaves', () => {
     expect(() => addedLeaves({ present: () => true, read: () => '{ not json' }, ['a b'])).toThrow(/not JSON/)
     expect(() => addedLeaves({ present: () => true, read: () => '{"leaves":"a b"}' }, ['a b'])).toThrow(/leaves.*array/)
     expect(() => addedLeaves({ present: () => true, read: () => '{}' }, ['a b'])).toThrow(/leaves.*array/)
+  })
+})
+
+// The CI entry reads the base snapshot out of git, and the difference between "absent" and "broken"
+// is the whole gate: a broken read reported as absent is a green check on an undeclared command.
+// These run against a real repository rather than a stub, because that distinction is git's, not ours.
+describe('gitBaseReader', () => {
+  const repos: string[] = []
+  const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8' })
+
+  // A base ref with no remote: update-ref writes refs/remotes/origin/main directly.
+  const repo = (baseSurface: string | null): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'surface-'))
+    repos.push(dir)
+    git(dir, 'init', '-q', '-b', 'main')
+    git(dir, 'config', 'user.email', 't@example.com')
+    git(dir, 'config', 'user.name', 'test')
+    writeFileSync(join(dir, 'README'), 'x\n')
+    if (baseSurface !== null) writeFileSync(join(dir, 'surface.json'), baseSurface)
+    git(dir, 'add', '-A')
+    git(dir, 'commit', '-qm', 'base')
+    git(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+    return dir
+  }
+
+  afterAll(() => { for (const d of repos) rmSync(d, { recursive: true, force: true }) })
+
+  it('reports the leaves a pull request added over the base commit', () => {
+    const dir = repo(renderSurface(['cron list']))
+    expect(addedLeaves(gitBaseReader('origin/main', dir), ['cron create', 'cron list'])).toEqual(['cron create'])
+  })
+
+  it('reports nothing when the base commit has no snapshot yet', () => {
+    const dir = repo(null)
+    expect(addedLeaves(gitBaseReader('origin/main', dir), ['cron create'])).toEqual([])
+  })
+
+  it('throws on a malformed base snapshot rather than reporting nothing', () => {
+    const dir = repo('{ not json\n')
+    expect(() => addedLeaves(gitBaseReader('origin/main', dir), ['cron create'])).toThrow(/not JSON/)
+  })
+
+  it('throws on an unknown ref rather than reporting nothing', () => {
+    const dir = repo(renderSurface(['cron list']))
+    expect(() => addedLeaves(gitBaseReader('origin/nope', dir), ['cron create'])).toThrow()
   })
 })
 

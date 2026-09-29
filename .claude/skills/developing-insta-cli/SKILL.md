@@ -84,9 +84,13 @@ skipped because its argv is split before commander ever sees it — there, pass 
 ## Getting a PR merged (main is protected — this exact flow, no other works)
 
 1. Branch from `origin/main`: `feat/*` or `fix/*`. PRs target `main`. **Squash merge.**
-2. Checks expected green: the `ci` workflow's **two** jobs — `test` (ubuntu-latest) and `test-windows` (windows-latest), each typecheck + vitest — and `cubic` (AI review — it comments; a comment is NOT the required approval). Windows runs the same suite, so a win-only failure is real: the CLI spawns npm/npx `.cmd` shims that POSIX never exercises. Note branch protection currently pins only the 1-approval rule — no status check is GitHub-*required*, so a red job will not block the merge button for you.
+2. Checks expected green: the `ci` workflow's **two** jobs — `test` (ubuntu-latest) and `test-windows` (windows-latest), each typecheck + vitest — the `mcp declaration` workflow (rule 6 above), and `cubic` (AI review — it comments; a comment is NOT the required approval). Windows runs the same suite, so a win-only failure is real: the CLI spawns npm/npx `.cmd` shims that POSIX never exercises. Note branch protection currently pins only the 1-approval rule — no status check is GitHub-*required*, so a red job will not block the merge button for you.
 3. **Branch protection requires 1 approving review, and you cannot approve your own PR.** Team flow: post in the `#insforge-approval-bot` Slack channel asking John-bot to approve, **one PR link per message** — multi-link messages get partially processed. Approval lands as a GitHub review from the maintainer bot within ~2 min.
-4. Arm `gh pr merge --auto --squash` while checks run; if the PR sat long enough to conflict, merge `origin/main` into your branch, resolve, re-push (approval survives unless dismissed).
+4. A red **`mcp declaration`** means this PR adds a leaf command and the body does not say what MCP
+   does about it. The check reads the body, so the fix is to edit the description, not to push: that
+   workflow takes `edited`, which `ci` does not, so it reruns on its own within a minute. The failure
+   text names the leaves it found and the accepted forms.
+5. Arm `gh pr merge --auto --squash` while checks run; if the PR sat long enough to conflict, merge `origin/main` into your branch, resolve, re-push (approval survives unless dismissed).
 
 ## Shipping a release (two halves — the second is manual)
 

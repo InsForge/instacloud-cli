@@ -31,8 +31,14 @@ export function checkDeclaration(added: string[], body: string | null | undefine
 
 // A heading inside a comment or a code fence is not a section. A pull request template carrying a
 // commented-out example would otherwise declare on every author's behalf.
+//
+// The closing fence follows CommonMark: same character, no shorter than the opening run, nothing
+// after it but whitespace. A line reading ```not a closing fence does not close anything, and
+// treating it as a close would expose the headings below it while a reader still sees code.
 const stripInvisible = (body: string): string =>
-  body.replace(/<!--[\s\S]*?(?:-->|$)/g, '').replace(/^[ \t]*(```|~~~)[\s\S]*?(?:^[ \t]*\1|$(?![\s\S]))/gm, '')
+  body
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
+    .replace(/^[ \t]*((`|~)\2{2,})[\s\S]*?(?:^[ \t]*\1\2*[ \t]*$|$(?![\s\S]))/gm, '')
 
 // Exactly two hashes. A deeper heading is a subsection of something else, and accepting it would
 // let a "### MCP" under "## Notes" stand in for the declaration.

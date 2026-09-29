@@ -15,7 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: git fetch --depth=1 origin ${{ github.base_ref }}
+      # Through the environment and quoted, like the checker step: a GitHub context interpolated
+      # straight into a shell line is one odd branch name away from being read as syntax.
+      - run: git fetch --depth=1 origin "$BASE_REF"
+        env:
+          BASE_REF: ${{ github.base_ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
