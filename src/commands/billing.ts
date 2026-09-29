@@ -1,4 +1,4 @@
-import { ApiClient, requireProject } from '../api.js'
+import { ApiClient, ApiError, requireProject } from '../api.js'
 import { die, info, openUrl, printJson } from '../util.js'
 import { cycleLine, dimensionLines } from './metrics.js'
 
@@ -110,6 +110,64 @@ export async function billingUpgrade(tier: string, opts: OrgOpt & { open?: boole
   const { url } = await api.request<{ url: string }>('POST', `/orgs/${orgId}/billing/checkout`, { tier })
   if (opts.json) return printJson({ url })
   presentUrl(url, `Subscribe to ${tier} — complete checkout in your browser:`, opts.open)
+}
+
+export type RedeemResult = { amountMicros: number; creditsExpireAt: string | null; orgId: string; orgName: string }
+
+// The platform's contract (RedeemError#reason in billing/service.ts) — four literals, never
+// collapsed into one message, because the right next action differs per reason: `not_found` is
+// the only one worth retyping; `expired`/`revoked` both mean waiting never helps, but only
+// `revoked` has someone to go back to.
+//
+// `already_redeemed` deliberately does NOT say WHO redeemed it, because this CLI cannot know.
+// A sequential retry replays the receipt and never reaches here — but two requests from the same
+// org in flight at once both miss the replay read (it sees committed rows only), one wins the
+// claim and the other lands exactly here. That is the case a client resending a request it never
+// saw an answer to is IN. Telling that person "a different org took it" would be false about
+// their own money: the grant is on their wallet. So the message points them at their balance
+// instead of at a conclusion this side cannot support.
+const REDEEM_ERROR_MESSAGE: Record<string, string> = {
+  not_found: 'that code was not recognized — check it for typos and try again',
+  expired: 'that code has expired — ask whoever sent it for a new one',
+  already_redeemed: 'that code has already been redeemed — if it was your org, the credits are already there (check `insta billing`)',
+  revoked: 'that code was revoked — contact whoever sent it to you',
+}
+
+// Pure — the human line for a redeem failure. `reason` is the platform's literal (RedeemError's
+// four values); anything else (a platform version ahead of this CLI) falls back to relaying it
+// as-is rather than a message that would be wrong about which of the four cases this is.
+export function redeemErrorMessage(reason: string | undefined, fallback: string): string {
+  return (reason && REDEEM_ERROR_MESSAGE[reason]) ?? fallback
+}
+
+// Pure — the three facts the spec names, in the order it names them: what landed, when it stops
+// being spendable, and which org — by NAME — so someone who belongs to several orgs isn't left
+// reading a uuid to find out which one just got the money.
+export function redeemLines(r: RedeemResult): string[] {
+  return [
+    `credited:        $${(r.amountMicros / 1_000_000).toFixed(2)}`,
+    `expires:         ${r.creditsExpireAt ? r.creditsExpireAt.slice(0, 10) : 'never'}`,
+    `org:             ${r.orgName}`,
+  ]
+}
+
+// insta billing redeem <code> — apply a one-time credit code to the org's wallet.
+export async function billingRedeem(code: string, opts: OrgOpt & { json?: boolean }): Promise<void> {
+  const api = await ApiClient.load()
+  const orgId = await resolveOrgId(opts)
+  let res: RedeemResult
+  try {
+    res = await api.request<RedeemResult>('POST', `/orgs/${orgId}/billing/redeem`, { code })
+  } catch (e) {
+    if (!(e instanceof ApiError) || e.status !== 400) throw e
+    // Under --json, stdout stays the one parseable document a script branches on (the platform's
+    // own `error` literal); the human line below is the diagnostic and belongs on stderr.
+    const reason = e.body?.error
+    if (opts.json) printJson({ error: reason ?? e.message })
+    die(redeemErrorMessage(reason, e.message))
+  }
+  if (opts.json) return printJson(res)
+  for (const l of redeemLines(res)) info(l)
 }
 
 // insta billing portal — open the Stripe Customer Portal (change plan / card / cancel).

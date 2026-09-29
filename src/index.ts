@@ -36,7 +36,7 @@ import * as template from './commands/template.js'
 import * as govern from './commands/govern.js'
 import * as observe from './commands/observe.js'
 import * as obs from './commands/metrics.js'
-import { billing, billingUpgrade, billingPortal } from './commands/billing.js'
+import { billing, billingUpgrade, billingPortal, billingRedeem } from './commands/billing.js'
 import * as domainCmd from './commands/domain.js'
 import * as selfUpdate from './commands/upgrade.js'
 import * as feedbackCmd from './commands/feedback.js'
@@ -557,7 +557,7 @@ tpl.command('deploy <code-or-dir-or-url>').description('Deploy a template onto a
   .action(guard((target, o) => template.templateDeploy(target, o)))
 
 // ---- billing ----
-const bill = program.command('billing').description('Billing: current cycle overview (bare), subscribe to a tier, Stripe portal, usage by dimension')
+const bill = program.command('billing').description('Billing: current cycle overview (bare), subscribe to a tier, redeem a credit code, Stripe portal, usage by dimension')
   .option('--org <id>', 'target org (default: linked project\'s org)').option('--json')
   .action(guard((o) => billing(o)))
 // commander 12 defaults allowExcessArguments to true, so a mistyped/retired subcommand (e.g.
@@ -566,6 +566,9 @@ bill.allowExcessArguments(false)
 bill.command('subscribe <tier>').description('Subscribe the org to a paid tier (pro|team) via Stripe Checkout')
   .option('--org <id>').option('--no-open', 'print the URL instead of opening a browser').option('--json')
   .action(guard((tier, o) => billingUpgrade(tier, o)))
+bill.command('redeem <code>').description("Redeem a one-time credit code into the org's wallet")
+  .option('--org <id>').option('--json')
+  .action(guard((code, o) => billingRedeem(code, o)))
 bill.command('portal').description('Open the Stripe Customer Portal (change plan / card / cancel)')
   .option('--org <id>').option('--no-open', 'print the URL instead of opening a browser').option('--json')
   .action(guard((o) => billingPortal(o)))
