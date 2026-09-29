@@ -41,7 +41,7 @@ describe('parseMemoryMb', () => {
 import { parseCpu, fmtMb } from '../src/commands/compute.js'
 import { fetchDbInstance } from '../src/commands/postgres.js'
 import { ApiError } from '../src/api.js'
-import { parseDbCpu, parseDbMemory, fmtMib, alwaysOnArgs, alwaysOnLine, alwaysOnSetLine } from '../src/commands/postgres.js'
+import { parseDbCpu, parseDbMemory, fmtMib, alwaysOnArgs, alwaysOnLine, alwaysOnSetLine, settleScaleToZero } from '../src/commands/postgres.js'
 
 describe('parseCpu (compute --cpu override)', () => {
   it('accepts exactly the provider grid the help text advertises', () => {
@@ -148,10 +148,20 @@ describe('postgres always-on arguments', () => {
 })
 
 describe('postgres always-on set confirmation', () => {
-  it('confirms only when the reported value matches the request, and otherwise points at the read-back', () => {
-    expect(alwaysOnSetLine('db', 'on', false)).toMatch(/always-on ENABLED/)
-    expect(alwaysOnSetLine('db', 'off', true)).toMatch(/always-on disabled/)
-    expect(alwaysOnSetLine('db', 'on', true)).toBe('postgres db: always-on on requested — the database applies it within seconds; confirm with `insta postgres always-on db`')
-    expect(alwaysOnSetLine(undefined, 'off', undefined)).toMatch(/off requested .*`insta postgres always-on`$/)
+  it('confirms only when the reported value matches the request, and otherwise points at the read-back for that branch', () => {
+    expect(alwaysOnSetLine('db', undefined, 'on', false)).toMatch(/always-on ENABLED/)
+    expect(alwaysOnSetLine('db', undefined, 'off', true)).toMatch(/always-on disabled/)
+    expect(alwaysOnSetLine('db', 'feat', 'on', true)).toBe('postgres db: always-on on requested — the database has not applied it yet; confirm with `insta postgres always-on db --branch feat`')
+    expect(alwaysOnSetLine(undefined, undefined, 'off', undefined)).toMatch(/off requested .*`insta postgres always-on`$/)
+  })
+
+  it('re-reads until the database reports the requested value, and gives up on an unreadable instance', async () => {
+    const wait = async () => {}
+    const reads = [{ scaleToZero: true }, { scaleToZero: false, state: 'running' }]
+    expect(await settleScaleToZero({ scaleToZero: true }, false, async () => reads.shift(), wait)).toEqual({ scaleToZero: false, state: 'running' })
+    expect(await settleScaleToZero({ scaleToZero: true }, false, async () => undefined, wait)).toEqual({ scaleToZero: true })
+    let calls = 0
+    expect(await settleScaleToZero({}, false, async () => { calls++; return {} }, wait)).toEqual({})
+    expect(calls).toBe(0)
   })
 })

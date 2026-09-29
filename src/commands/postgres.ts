@@ -41,14 +41,33 @@ export async function dbAlwaysOn(first: string | undefined, second: string | und
   }
   const res = await api.rawRequest('PATCH', `/projects/${p.projectId}/database/settings${suffix}`, { scaleToZero: mode !== 'on' })
   if (handleApproval(res, opts.json)) return
-  if (opts.json) return printJson(res.body)
-  info(alwaysOnSetLine(service, mode, res.body?.scaleToZero))
+  const body = await settleScaleToZero(res.body, mode === 'off', async () => {
+    const read = await fetchDbInstance(api, p.projectId, suffix)
+    return read.kind === 'ok' ? read.body : undefined
+  })
+  if (opts.json) return printJson(body)
+  info(alwaysOnSetLine(service, opts.branch, mode, body?.scaleToZero))
 }
 
-// insta-db applies the change asynchronously and answers with the value from before it, so only a matching value is confirmation.
-export function alwaysOnSetLine(service: string | undefined, mode: 'on' | 'off', scaleToZero: unknown): string {
+// insta-db applies the change asynchronously and answers with the value from before it, so re-read until they agree.
+export async function settleScaleToZero(
+  body: any,
+  want: boolean,
+  read: () => Promise<any>,
+  wait: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<any> {
+  for (let i = 0; i < 15 && typeof body?.scaleToZero === 'boolean' && body.scaleToZero !== want; i++) {
+    await wait(2000)
+    const next = await read()
+    if (next === undefined) break
+    body = next
+  }
+  return body
+}
+
+export function alwaysOnSetLine(service: string | undefined, branch: string | undefined, mode: 'on' | 'off', scaleToZero: unknown): string {
   const group = service ?? 'default'
-  if (scaleToZero !== (mode === 'off')) return `postgres ${group}: always-on ${mode} requested — the database applies it within seconds; confirm with \`insta postgres always-on${service ? ` ${service}` : ''}\``
+  if (scaleToZero !== (mode === 'off')) return `postgres ${group}: always-on ${mode} requested — the database has not applied it yet; confirm with \`insta postgres always-on${service ? ` ${service}` : ''}${branch ? ` --branch ${branch}` : ''}\``
   return `postgres ${group}: always-on ${mode === 'on' ? 'ENABLED — instance stays warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle (default; first connection after idle cold-starts)'}`
 }
 
