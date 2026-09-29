@@ -680,5 +680,10 @@ function addApiUrlEverywhere(cmd: Command): void {
 }
 addApiUrlEverywhere(program)
 
-selfUpdate.maybeUpdate(cliVersion(), process.argv)
-program.parseAsync(computeArgv)
+export { program }
+
+// Both lines, not just the parse: maybeUpdate reaches the network, and a surface dump must not.
+if (!process.env.INSTA_DUMP_SURFACE) {
+  selfUpdate.maybeUpdate(cliVersion(), process.argv)
+  program.parseAsync(computeArgv)
+}

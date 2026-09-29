@@ -18,6 +18,24 @@ jobs:
       - run: npx tsc --noEmit
       - run: npx vitest run
 
+  # Rule 6 in developing-insta-cli/SKILL.md. Fires only when surface.json gained a leaf, so an
+  # ordinary change to src/index.ts does not ask anyone about MCP.
+  mcp-declaration:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git fetch --depth=1 origin ${{ github.base_ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --import tsx scripts/check-mcp-declaration.mjs
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+
   test-windows:
     runs-on: windows-latest
     steps:

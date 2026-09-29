@@ -36,6 +36,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx src/index.ts",
+    "surface": "node --import tsx scripts/dump-surface.mjs",
     "test": "vitest run",
     "compile": "bun build ./src/index.ts --compile --minify --outfile dist/bin/insta",
     "build:binaries": "bash scripts/build-binaries.sh",
