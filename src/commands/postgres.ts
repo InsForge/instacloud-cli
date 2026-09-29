@@ -6,19 +6,40 @@ import { parseVolumeGib, q, resolveSoleService } from './services.js'
 
 type Opts = { branch?: string; json?: boolean }
 
-// Toggle a postgres service between scale-to-zero (the default: instance suspends when idle,
-// cold-starts on the next connection) and always-on (instance stays warm; idle RAM bills at
-// actual usage). Thin wrapper over PATCH /database/settings {scaleToZero} — insta-db-backed
-// postgres only.
-export async function dbAlwaysOn(mode: string, service: string | undefined, opts: Opts): Promise<void> {
-  if (mode !== 'on' && mode !== 'off') throw new Error('mode must be on|off')
+export function alwaysOnArgs(first: string | undefined, second: string | undefined): { mode?: 'on' | 'off'; service?: string } {
+  if (first === 'on' || first === 'off') return { mode: first, service: second }
+  if (second !== undefined) throw new Error('mode must be on|off')
+  return { service: first }
+}
+
+export function alwaysOnLine(group: string, scaleToZero: unknown): string {
+  return `postgres ${group}: always-on ${scaleToZero === false ? 'on — instance stays warm' : scaleToZero === true ? 'off — scales to zero when idle' : 'unknown — the provider did not report it'}`
+}
+
+// Show or set a postgres service's idle mode: scale-to-zero (the default: instance suspends when
+// idle, cold-starts on the next connection) or always-on (instance stays warm; idle RAM bills at
+// actual usage). Reads GET /database/instance, sets PATCH /database/settings {scaleToZero} —
+// insta-db-backed postgres only.
+export async function dbAlwaysOn(first: string | undefined, second: string | undefined, opts: Opts): Promise<void> {
+  const { mode, service } = alwaysOnArgs(first, second)
   const api = await ApiClient.load()
   const p = await requireProject()
   const qs = new URLSearchParams()
   const branch = opts.branch ?? p.branch
   if (branch) qs.set('branch', branch)
   if (service) qs.set('group', service)
-  const res = await api.rawRequest('PATCH', `/projects/${p.projectId}/database/settings${qs.toString() ? `?${qs}` : ''}`, { scaleToZero: mode !== 'on' })
+  const suffix = qs.toString() ? `?${qs}` : ''
+  if (!mode) {
+    const read = await fetchDbInstance(api, p.projectId, suffix)
+    if (read.kind === 'no-instance') {
+      info(`postgres ${service ?? 'default'}: no manageable instance (this service manages its own resources)`)
+      return
+    }
+    if (opts.json) return printJson(read.body)
+    info(alwaysOnLine(service ?? 'default', read.body?.scaleToZero))
+    return
+  }
+  const res = await api.rawRequest('PATCH', `/projects/${p.projectId}/database/settings${suffix}`, { scaleToZero: mode !== 'on' })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const s2z = res.body?.scaleToZero

@@ -41,7 +41,7 @@ describe('parseMemoryMb', () => {
 import { parseCpu, fmtMb } from '../src/commands/compute.js'
 import { fetchDbInstance } from '../src/commands/postgres.js'
 import { ApiError } from '../src/api.js'
-import { parseDbCpu, parseDbMemory, fmtMib } from '../src/commands/postgres.js'
+import { parseDbCpu, parseDbMemory, fmtMib, alwaysOnArgs, alwaysOnLine } from '../src/commands/postgres.js'
 
 describe('parseCpu (compute --cpu override)', () => {
   it('accepts exactly the provider grid the help text advertises', () => {
@@ -129,5 +129,20 @@ describe('parseDbMemory case-exactness', () => {
     for (const raw of ['4gi', '4GI', '8m', '2048mi']) {
       expect(() => parseDbMemory(raw), raw).toThrow(/invalid memory/)
     }
+  })
+})
+
+describe('postgres always-on arguments', () => {
+  it('reads when the first argument is not a mode, and sets when it is', () => {
+    expect(alwaysOnArgs(undefined, undefined)).toEqual({ service: undefined })
+    expect(alwaysOnArgs('main-db', undefined)).toEqual({ service: 'main-db' })
+    expect(alwaysOnArgs('on', undefined)).toEqual({ mode: 'on', service: undefined })
+    expect(alwaysOnArgs('off', 'main-db')).toEqual({ mode: 'off', service: 'main-db' })
+    expect(() => alwaysOnArgs('maybe', 'main-db')).toThrow(/mode must be on\|off/)
+  })
+  it('reads scaleToZero false as on and true as off, and says so when it is missing', () => {
+    expect(alwaysOnLine('main-db', false)).toBe('postgres main-db: always-on on — instance stays warm')
+    expect(alwaysOnLine('main-db', true)).toBe('postgres main-db: always-on off — scales to zero when idle')
+    expect(alwaysOnLine('main-db', undefined)).toMatch(/unknown/)
   })
 })
