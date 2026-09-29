@@ -157,8 +157,9 @@ describe('postgres always-on set confirmation', () => {
 
   it('re-reads until the database reports the requested value, and gives up on an unreadable instance', async () => {
     const wait = async () => {}
-    const reads = [{ scaleToZero: true }, { scaleToZero: false, state: 'running' }]
+    const reads = [{ scaleToZero: true }, { scaleToZero: false, state: 'running' }, { scaleToZero: true }]
     expect(await settleScaleToZero({ scaleToZero: true }, false, async () => reads.shift(), wait)).toEqual({ scaleToZero: false, state: 'running' })
+    expect(reads).toHaveLength(1)
     expect(await settleScaleToZero({ scaleToZero: true }, false, async () => undefined, wait)).toEqual({ scaleToZero: true })
     let calls = 0
     expect(await settleScaleToZero({}, false, async () => { calls++; return {} }, wait)).toEqual({})

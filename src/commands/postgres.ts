@@ -42,8 +42,9 @@ export async function dbAlwaysOn(first: string | undefined, second: string | und
   const res = await api.rawRequest('PATCH', `/projects/${p.projectId}/database/settings${suffix}`, { scaleToZero: mode !== 'on' })
   if (handleApproval(res, opts.json)) return
   const body = await settleScaleToZero(res.body, mode === 'off', async () => {
-    const read = await fetchDbInstance(api, p.projectId, suffix)
-    return read.kind === 'ok' ? read.body : undefined
+    try {
+      return (await api.rawRequest('GET', `/projects/${p.projectId}/database/instance${suffix}`, undefined, { signal: AbortSignal.timeout(5000) })).body
+    } catch { return undefined }
   })
   if (opts.json) return printJson(body)
   info(alwaysOnSetLine(service, opts.branch, mode, body?.scaleToZero))
