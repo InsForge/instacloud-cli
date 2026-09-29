@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process'
 import { constants as osConstants } from 'node:os'
 import { ApiClient, ApiError, requireProject } from '../api.js'
-import { info, printJson, handleApproval, relayExitCode } from '../util.js'
+import * as clack from '@clack/prompts'
+import { info, printJson, handleApproval, refuse, relayExitCode } from '../util.js'
 import { parseVolumeGib, q, resolveSoleService } from './services.js'
 
 type Opts = { branch?: string; json?: boolean }
@@ -371,4 +372,202 @@ export async function dbConnect(service: string | undefined, opts: Opts): Promis
   // stderr: stdout belongs to psql (the `insta run` rule).
   process.stderr.write(`psql → postgres/${r.serviceName}${branch ? ` (branch ${branch})` : ''} — a suspended instance wakes on connect, so the first prompt can take a few seconds\n`)
   relayExitCode(await connectWithPsql(r.url))
+}
+
+// ---- network access: the public endpoint and the private network lane (instacloud#189) ----
+//
+// A postgres database is born PUBLIC (reachable on the internet endpoint, DATABASE_URL). Private
+// access adds a second connection string, DATABASE_PRIVATE_URL, which only resolves inside
+// InstaCloud compute (insta-compute); DATABASE_URL is never rewritten. Closing public access is
+// the opt-out, allowed only while private access is on, and it breaks every client outside the
+// compute plane (laptops, CI, external services). Wording rule: the closed database is "not
+// reachable from the internet" — never "isolated": any workload on the compute plane can still
+// reach the private endpoint and authenticates with the password.
+
+export type AccessImpact = {
+  warnings?: string[]
+  services?: Array<{ name?: string; provider?: string; envName?: string; sourceName?: string; reason?: string }>
+}
+
+type AccessOpts = Opts & { yes?: boolean }
+
+export type AccessDeps = {
+  /** Ask the human to confirm; false = declined. Only called on a real terminal. */
+  confirm?: (question: string) => Promise<boolean>
+  /** Whether a human is there to answer (stdin and stdout are terminals). */
+  tty?: boolean
+}
+
+async function confirmOnTerminal(question: string): Promise<boolean> {
+  const answer = await clack.confirm({ message: question, initialValue: false })
+  if (clack.isCancel(answer)) return false
+  return answer === true
+}
+
+const onOff = (v: unknown): string => (v === true ? 'on' : v === false ? 'off' : 'unknown')
+
+// The access block of a database/instance read. Pure, exported for tests. privateConnString in the
+// instance view carries NO password (the full URL is DATABASE_PRIVATE_URL in the credentials), so
+// printing it is safe.
+export function dbAccessLines(group: string, body: any): string[] {
+  const pub = body?.publicAccess
+  const lines = [
+    `postgres ${group}: public access ${onOff(pub)}${pub === false ? ' — not reachable from the internet; only the private network lane connects' : pub === true ? ' — reachable on the public endpoint (DATABASE_URL)' : ' — the provider did not report it'}`,
+    `postgres ${group}: private access ${onOff(body?.privateAccess)}${body?.privateAccess === true ? ' — DATABASE_PRIVATE_URL is in the service credentials (resolves only inside InstaCloud compute)' : ''}`,
+  ]
+  if (typeof body?.privateConnString === 'string' && body.privateConnString) lines.push(`  private: ${body.privateConnString}`)
+  if (body?.privateLane?.enabled === false) lines.push('  the private network lane is not yet available on this deployment — private access cannot be turned on, nor public access closed')
+  return lines
+}
+
+// Human lines for what closing public access will break. The platform's warnings already name each
+// affected compute (and always end with the external-clients one), so the services array is left
+// to --json rather than repeated.
+export function impactLines(impact: AccessImpact | undefined): string[] {
+  const warnings = (impact?.warnings ?? []).filter((w) => typeof w === 'string' && w)
+  if (!warnings.length) return []
+  return ['closing public access will break:', ...warnings.map((w) => `  ! ${w}`)]
+}
+
+// Map an access-change refusal to a CLI-shaped message. Pure, exported for tests. The platform's
+// 400 texts name REST routes; the CLI names its own command instead, keeping the reason.
+export function accessErrorMessage(e: ApiError, ctx: { service: string; branch?: string; what: string }): string {
+  const code = e.body?.code
+  const b = ctx.branch ? ` --branch ${ctx.branch}` : ''
+  if (code === 'private_lane_disabled') {
+    return `private network access for postgres is not yet available on this deployment — postgres ${ctx.service} stays reachable on its public endpoint (DATABASE_URL)`
+  }
+  if (code === 'private_lane_unavailable_in_region') {
+    return `the region of postgres ${ctx.service} has no private network lane yet — private access was turned back off and nothing was minted; DATABASE_URL is unchanged`
+  }
+  if (e.status === 400 && /private network access first/i.test(e.message)) {
+    return `turn on private access first: \`insta postgres private-access on ${ctx.service}${b}\` — closing public access without it would leave the database with no way to connect`
+  }
+  if (e.status === 400 && /re-open public access first/i.test(e.message)) {
+    return `re-open public access first: \`insta postgres public-access on ${ctx.service}${b}\` — turning private access off while public access is closed would leave the database with no way to connect`
+  }
+  return `${ctx.what} failed (${e.status}): ${e.message}`
+}
+
+async function resolvePostgres(api: ApiClient, projectId: string, branch: string | undefined, service: string | undefined) {
+  const { services } = await api.request('GET', `/projects/${projectId}/services${q(branch)}`)
+  return resolveSoleService(services as Array<{ id: string; type: string; name: string }>, 'postgres', service)
+}
+
+function settingsSuffix(branch: string | undefined, group: string): string {
+  const qs = new URLSearchParams()
+  if (branch) qs.set('branch', branch)
+  qs.set('group', group)
+  return `?${qs}`
+}
+
+// `insta postgres public-access [on|off] [service]` — show, open, or close the public endpoint.
+// Reads GET /database/instance; writes PUT /services/:id/access {public} (gated: service.setAccess).
+// Closing previews GET /services/:id/access/impact?public=false first and asks before acting; a
+// non-interactive caller (agent, CI, --json) must pass --yes, having read the preview it printed.
+export async function dbPublicAccess(first: string | undefined, second: string | undefined, opts: AccessOpts, deps: AccessDeps = {}): Promise<void> {
+  const { mode, service } = alwaysOnArgs(first, second)
+  const api = await ApiClient.load()
+  const p = await requireProject()
+  const branch = opts.branch ?? p.branch
+  const svc = await resolvePostgres(api, p.projectId, branch, service)
+  if (!mode) return showAccess(api, p.projectId, branch, svc.name, opts)
+
+  const what = mode === 'off' ? 'closing public access' : 'opening public access'
+  const ctx = { service: svc.name, branch: opts.branch, what }
+  if (mode === 'off') {
+    let impact: AccessImpact
+    try {
+      impact = await api.request('GET', `/projects/${p.projectId}/services/${svc.id}/access/impact?public=false`)
+    } catch (e) {
+      if (e instanceof ApiError) throw new Error(`previewing the impact failed (${e.status}): ${e.message}`)
+      throw e
+    }
+    const lines = impactLines(impact)
+    const tty = deps.tty ?? (!!process.stdin.isTTY && !!process.stdout.isTTY)
+    if (!opts.yes) {
+      if (opts.json || !tty) {
+        refuse([
+          ...lines,
+          `postgres ${svc.name}: closing public access makes the database not reachable from the internet — re-run with --yes to confirm`,
+        ])
+      }
+      for (const l of lines) info(l)
+      const ok = await (deps.confirm ?? confirmOnTerminal)(`Close public access to postgres ${svc.name}?`)
+      if (!ok) {
+        info(`postgres ${svc.name}: public access unchanged`)
+        return
+      }
+    } else if (!opts.json) {
+      for (const l of lines) info(l)
+    }
+  }
+
+  let res
+  try {
+    res = await api.rawRequest('PUT', `/projects/${p.projectId}/services/${svc.id}/access`, { public: mode === 'on' })
+  } catch (e) {
+    if (e instanceof ApiError) throw new Error(accessErrorMessage(e, ctx))
+    throw e
+  }
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body)
+  for (const l of publicAccessSetLines(svc.name, mode, res.body)) info(l)
+}
+
+export function publicAccessSetLines(group: string, mode: 'on' | 'off', body: any): string[] {
+  const notice = typeof body?.notice === 'string' && body.notice ? body.notice : undefined
+  const head = mode === 'off'
+    ? `postgres ${group}: public access CLOSED — not reachable from the internet; external clients, CI and local development can no longer connect. Compute services on InstaCloud connect through DATABASE_PRIVATE_URL`
+    : `postgres ${group}: public access open — reachable on the public endpoint (DATABASE_URL)${notice ? '' : ' (it already was; nothing changed)'}`
+  return notice ? [head, `  ${notice}`] : [head]
+}
+
+// `insta postgres private-access [on|off] [service]` — show or toggle the private network lane.
+// Writes PATCH /database/settings {privateAccess} (gated: service.setAccess). On mints
+// DATABASE_PRIVATE_URL beside DATABASE_URL (unchanged); off retracts it (refused while public
+// access is closed). No confirmation: neither direction takes a working connection away without
+// the platform refusing or warning (off answers `warnings` naming computes still bound to it).
+export async function dbPrivateAccess(first: string | undefined, second: string | undefined, opts: Opts): Promise<void> {
+  const { mode, service } = alwaysOnArgs(first, second)
+  const api = await ApiClient.load()
+  const p = await requireProject()
+  const branch = opts.branch ?? p.branch
+  const svc = await resolvePostgres(api, p.projectId, branch, service)
+  if (!mode) return showAccess(api, p.projectId, branch, svc.name, opts)
+
+  const ctx = { service: svc.name, branch: opts.branch, what: `turning private access ${mode}` }
+  let res
+  try {
+    res = await api.rawRequest('PATCH', `/projects/${p.projectId}/database/settings${settingsSuffix(branch, svc.name)}`, { privateAccess: mode === 'on' })
+  } catch (e) {
+    if (e instanceof ApiError) throw new Error(accessErrorMessage(e, ctx))
+    throw e
+  }
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body)
+  for (const l of privateAccessSetLines(svc.name, mode, res.body)) info(l)
+}
+
+export function privateAccessSetLines(group: string, mode: 'on' | 'off', body: any): string[] {
+  const lines = mode === 'on'
+    ? [
+      `postgres ${group}: private access ON — DATABASE_PRIVATE_URL minted beside DATABASE_URL (unchanged)`,
+      '  it resolves only inside InstaCloud compute (insta-compute), not from a laptop or CI — keep DATABASE_URL for those',
+      `  switch a compute over: insta secrets bind DATABASE_URL postgres/${group} --source-name DATABASE_PRIVATE_URL --to compute/<name>, then \`insta compute restart <name>\``,
+      '  other workloads on the compute plane can reach the private endpoint too — the password is what authenticates',
+    ]
+    : [`postgres ${group}: private access off — DATABASE_PRIVATE_URL retracted; DATABASE_URL is unchanged`]
+  for (const w of Array.isArray(body?.warnings) ? body.warnings : []) if (typeof w === 'string' && w) lines.push(`  ! ${w}`)
+  return lines
+}
+
+async function showAccess(api: ApiClient, projectId: string, branch: string | undefined, group: string, opts: Opts): Promise<void> {
+  const read = await fetchDbInstance(api, projectId, settingsSuffix(branch, group))
+  if (read.kind === 'no-instance') {
+    info(`postgres ${group}: no manageable instance (network access is not configurable for this service)`)
+    return
+  }
+  if (opts.json) return printJson(read.body)
+  for (const l of dbAccessLines(group, read.body)) info(l)
 }
