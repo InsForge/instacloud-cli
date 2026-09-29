@@ -464,7 +464,7 @@ pg.command('always-on [mode] [service]').description('Show or set a postgres ser
   .action(guard((mode, service, o) => pgCmd.dbAlwaysOn(mode, service, o)))
 addObservability(pg, 'db', 'postgres')
 
-// ---- redis / mysql / mongodb (managed Fly databases) ----
+// ---- redis / mysql / mongodb (managed databases) ----
 for (const type of ['redis', 'mysql', 'mongodb'] as const) {
   const g = program.command(type).description(`Managed ${type} services: query, status, resource ceiling, volume, always-on, logs, metrics`)
   const query = g.command('query <service> [args...]').description(type === 'redis'

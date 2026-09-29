@@ -217,10 +217,10 @@ describe('buildReport', () => {
     expect(df.severity).toBe('warning')
     expect(df.detail).toContain('insta deploy <dir>')
     // The split is now BY TARGET, not by GitHub connection: insta-compute builds this directory
-    // as-is on the gateway, Fly still needs the user's own Dockerfile. Naming only one of the two
-    // is what previously blessed a directory deploy refuses.
+    // as-is on the gateway, the legacy plane still needs the user's own Dockerfile. Naming only
+    // one of the two is what previously blessed a directory deploy refuses.
     expect(df.detail).toContain('insta-compute')
-    expect(df.detail).toContain('Fly')
+    expect(df.detail).toContain('legacy-plane')
     expect(df.nextAction).toContain(join(dir, 'Dockerfile'))
     expect(df.nextAction).toContain('insta-compute')
     // Must NOT tell the user to save the generated Dockerfile: it COPYs .nixpacks/ support files

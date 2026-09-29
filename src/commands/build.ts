@@ -157,11 +157,11 @@ export async function buildReport(
           severity: 'warning',
           status: 'fail',
           title: 'Dockerfile',
-          detail: `${dockerfileDetail} — \`insta deploy <dir>\` builds this on the gateway with nixpacks when the service runs on insta-compute, and needs your own Dockerfile on a Fly-backed one`,
+          detail: `${dockerfileDetail} — \`insta deploy <dir>\` builds this on the gateway with nixpacks when the service runs on insta-compute, and needs your own Dockerfile on a legacy-plane one`,
           // NOT "save the generated Dockerfile here": it is not standalone (it COPYs the
           // .nixpacks/nixpkgs-<hash>.nix support files nixpacks writes beside it, which this
           // directory does not have). The detected commands above are the reusable part.
-          nextAction: `on insta-compute this deploys as-is (nixpacks builds it on the gateway). On a Fly-backed service, write a Dockerfile at ${userDockerfilePath} — the detected install/start commands above are the starting point — or connect the GitHub repo (\`insta compute connect-repo <owner/repo>\`)`,
+          nextAction: `on insta-compute this deploys as-is (nixpacks builds it on the gateway). On a legacy-plane service, write a Dockerfile at ${userDockerfilePath} — the detected install/start commands above are the starting point — or connect the GitHub repo (\`insta compute connect-repo <owner/repo>\`)`,
         }
       : {
           id: 'dockerfile',
@@ -228,7 +228,7 @@ export function renderReport(r: BuildReport, explain: boolean): string[] {
   // The builder line is the first thing read (and the thing an agent scrapes), so it carries the
   // lane caveat too — "builder: nixpacks" on its own reads as a promise that is only true on some
   // targets. It has to say the SAME thing the detail below it says, or a scrape sees both claims.
-  const lane = r.plan.builder === 'nixpacks' ? ' — server-side: insta-compute builds this as-is, a Fly-backed service needs your own Dockerfile' : ''
+  const lane = r.plan.builder === 'nixpacks' ? ' — server-side: insta-compute builds this as-is, a legacy-plane service needs your own Dockerfile' : ''
   lines.push(`  builder: ${r.plan.builder ?? 'none'}${r.plan.providers.length ? ` (providers: ${r.plan.providers.join(', ')})` : ''}${lane}`)
   if (r.plan.installCommand) lines.push(`  install: ${r.plan.installCommand}`)
   if (r.plan.buildCommand) lines.push(`  build:   ${r.plan.buildCommand}`)
