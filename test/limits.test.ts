@@ -41,7 +41,7 @@ describe('parseMemoryMb', () => {
 import { parseCpu, fmtMb } from '../src/commands/compute.js'
 import { fetchDbInstance } from '../src/commands/postgres.js'
 import { ApiError } from '../src/api.js'
-import { parseDbCpu, parseDbMemory, fmtMib, alwaysOnArgs, alwaysOnLine } from '../src/commands/postgres.js'
+import { parseDbCpu, parseDbMemory, fmtMib, alwaysOnArgs, alwaysOnLine, alwaysOnSetLine } from '../src/commands/postgres.js'
 
 describe('parseCpu (compute --cpu override)', () => {
   it('accepts exactly the provider grid the help text advertises', () => {
@@ -144,5 +144,14 @@ describe('postgres always-on arguments', () => {
     expect(alwaysOnLine('main-db', false)).toBe('postgres main-db: always-on on — instance stays warm')
     expect(alwaysOnLine('main-db', true)).toBe('postgres main-db: always-on off — scales to zero when idle')
     expect(alwaysOnLine('main-db', undefined)).toMatch(/unknown/)
+  })
+})
+
+describe('postgres always-on set confirmation', () => {
+  it('confirms only when the reported value matches the request, and otherwise points at the read-back', () => {
+    expect(alwaysOnSetLine('db', 'on', false)).toMatch(/always-on ENABLED/)
+    expect(alwaysOnSetLine('db', 'off', true)).toMatch(/always-on disabled/)
+    expect(alwaysOnSetLine('db', 'on', true)).toBe('postgres db: always-on on requested — the database applies it within seconds; confirm with `insta postgres always-on db`')
+    expect(alwaysOnSetLine(undefined, 'off', undefined)).toMatch(/off requested .*`insta postgres always-on`$/)
   })
 })

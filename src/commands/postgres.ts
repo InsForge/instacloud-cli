@@ -42,8 +42,14 @@ export async function dbAlwaysOn(first: string | undefined, second: string | und
   const res = await api.rawRequest('PATCH', `/projects/${p.projectId}/database/settings${suffix}`, { scaleToZero: mode !== 'on' })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
-  const s2z = res.body?.scaleToZero
-  info(`postgres ${service ?? 'default'}: always-on ${s2z === false ? 'ENABLED — instance stays warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle (default; first connection after idle cold-starts)'}`)
+  info(alwaysOnSetLine(service, mode, res.body?.scaleToZero))
+}
+
+// insta-db applies the change asynchronously and answers with the value from before it, so only a matching value is confirmation.
+export function alwaysOnSetLine(service: string | undefined, mode: 'on' | 'off', scaleToZero: unknown): string {
+  const group = service ?? 'default'
+  if (scaleToZero !== (mode === 'off')) return `postgres ${group}: always-on ${mode} requested — the database applies it within seconds; confirm with \`insta postgres always-on${service ? ` ${service}` : ''}\``
+  return `postgres ${group}: always-on ${mode === 'on' ? 'ENABLED — instance stays warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle (default; first connection after idle cold-starts)'}`
 }
 
 // Validated pass-throughs for the provider's quantity strings. The insta-db resize API takes
