@@ -41,9 +41,35 @@ export async function dbAlwaysOn(first: string | undefined, second: string | und
   }
   const res = await api.rawRequest('PATCH', `/projects/${p.projectId}/database/settings${suffix}`, { scaleToZero: mode !== 'on' })
   if (handleApproval(res, opts.json)) return
-  if (opts.json) return printJson(res.body)
-  const s2z = res.body?.scaleToZero
-  info(`postgres ${service ?? 'default'}: always-on ${s2z === false ? 'ENABLED — instance stays warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle (default; first connection after idle cold-starts)'}`)
+  const body = await settleScaleToZero(res.body, mode === 'off', async () => {
+    try {
+      return (await api.rawRequest('GET', `/projects/${p.projectId}/database/instance${suffix}`, undefined, { signal: AbortSignal.timeout(5000) })).body
+    } catch { return undefined }
+  })
+  if (opts.json) return printJson(body)
+  info(alwaysOnSetLine(service, opts.branch, mode, body?.scaleToZero))
+}
+
+// insta-db applies the change asynchronously and answers with the value from before it, so re-read until they agree.
+export async function settleScaleToZero(
+  body: any,
+  want: boolean,
+  read: () => Promise<any>,
+  wait: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<any> {
+  for (let i = 0; i < 15 && typeof body?.scaleToZero === 'boolean' && body.scaleToZero !== want; i++) {
+    await wait(2000)
+    const next = await read()
+    if (next === undefined) break
+    body = next
+  }
+  return body
+}
+
+export function alwaysOnSetLine(service: string | undefined, branch: string | undefined, mode: 'on' | 'off', scaleToZero: unknown): string {
+  const group = service ?? 'default'
+  if (scaleToZero !== (mode === 'off')) return `postgres ${group}: always-on ${mode} requested — the database has not applied it yet; confirm with \`insta postgres always-on${service ? ` ${service}` : ''}${branch ? ` --branch ${branch}` : ''}\``
+  return `postgres ${group}: always-on ${mode === 'on' ? 'ENABLED — instance stays warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle (default; first connection after idle cold-starts)'}`
 }
 
 // Validated pass-throughs for the provider's quantity strings. The insta-db resize API takes
