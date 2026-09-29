@@ -9,7 +9,9 @@
 // record with a reason attached, which is harder to reopen than an unanswered one. A real "not now"
 // has an issue to point at, which is what the last form is for.
 const FORMS = [
-  { name: 'InsForge/instacloud-mcp#<n>, optionally followed by what it adds', re: /^InsForge\/instacloud-mcp#\d+\b/ },
+  // Anything after the link is for a reader, not for this check: whether that pull request really
+  // adds the tool is a question only a reviewer can answer.
+  { name: 'InsForge/instacloud-mcp#<n> at the start of the line', re: /^InsForge\/instacloud-mcp#\d+\b/ },
   { name: 'no MCP tool: credential minting', re: /^no MCP tool:\s*credential minting$/i },
   { name: 'no MCP tool: needs this machine', re: /^no MCP tool:\s*needs this machine$/i },
   { name: 'no MCP tool: platform denies agents', re: /^no MCP tool:\s*platform denies agents$/i },
@@ -27,9 +29,15 @@ export function checkDeclaration(added: string[], body: string | null | undefine
   return { ok: false, message: failure(added, line) }
 }
 
+// A heading inside a comment or a code fence is not a section. A pull request template carrying a
+// commented-out example would otherwise declare on every author's behalf.
+const stripInvisible = (body: string): string =>
+  body.replace(/<!--[\s\S]*?(?:-->|$)/g, '').replace(/^[ \t]*(```|~~~)[\s\S]*?(?:^[ \t]*\1|$(?![\s\S]))/gm, '')
+
 // Exactly two hashes. A deeper heading is a subsection of something else, and accepting it would
 // let a "### MCP" under "## Notes" stand in for the declaration.
-function declarationLine(body: string): string | null {
+function declarationLine(raw: string): string | null {
+  const body = stripInvisible(raw)
   const m = /^##[ \t]*MCP[ \t]*$/m.exec(body)
   if (!m) return null
   for (const raw of body.slice(m.index + m[0].length).split('\n')) {

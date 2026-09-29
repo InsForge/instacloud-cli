@@ -86,6 +86,23 @@ describe('checkDeclaration', () => {
     expect(checkDeclaration(['cron create'], body('InsForge/instacloud-mcp#123 adds insta_create_cron_job')).ok).toBe(true)
   })
 
+  // A pull request template carrying a commented-out example would otherwise declare for everyone.
+  it('refuses a section that only exists inside an HTML comment', () => {
+    expect(checkDeclaration(['cron create'], '## What\n\nAdds cron.\n\n<!--\n## MCP\n\nno MCP tool: needs this machine\n-->\n').ok).toBe(false)
+  })
+
+  it('refuses a section that only exists inside a code fence', () => {
+    for (const fence of ['```', '~~~']) {
+      const b = `## What\n\nExample:\n\n${fence}\n## MCP\n\nno MCP tool: needs this machine\n${fence}\n`
+      expect(checkDeclaration(['cron create'], b).ok, fence).toBe(false)
+    }
+  })
+
+  it('still reads a real section that sits after a comment or a fence', () => {
+    const b = '<!-- a note -->\n\n```\n## MCP\nnot this one\n```\n\n## MCP\n\nno MCP tool: credential minting\n'
+    expect(checkDeclaration(['cron create'], b).ok).toBe(true)
+  })
+
   it('refuses an empty MCP section and says which it was', () => {
     const v = checkDeclaration(['cron create'], '## MCP\n\n## Verify\n\nnpm test\n')
     expect(v.ok).toBe(false)

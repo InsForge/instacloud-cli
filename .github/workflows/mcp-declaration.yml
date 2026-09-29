@@ -1,0 +1,27 @@
+name: mcp declaration
+
+# Its own workflow, not a job in ci.yml, because of `edited`. This gate tells the author to edit the
+# pull request body, so it has to re-run when they do. Putting `edited` on ci.yml's shared trigger
+# would re-run the whole test suite on every typo fix in a description.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  mcp-declaration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git fetch --depth=1 origin ${{ github.base_ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --import tsx scripts/check-mcp-declaration.mjs
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
