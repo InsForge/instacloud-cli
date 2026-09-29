@@ -39,8 +39,9 @@ npx tsx src/index.ts --help   # run the CLI from source
 
 ## Command architecture (read before adding or moving a command)
 
-The tree in `src/index.ts` follows five rules (design: superproject
-`docs/superpowers/specs/2026-09-17-cli-command-reorg-design.md`). `test/help-surface.test.ts`
+The tree in `src/index.ts` follows the first five rules below (design: superproject
+`docs/superpowers/specs/2026-09-17-cli-command-reorg-design.md`). Rule 6 is not about the tree's
+shape but about what a new command owes MCP. `test/help-surface.test.ts`
 pins the visible top level; changing it is a design decision, not a code change.
 
 1. **Level 1 is a resource (noun, singular).** The only verbs at level 1 are `login`, `logout`,
@@ -61,6 +62,15 @@ pins the visible top level; changing it is a design decision, not a code change.
    A rename changes, in the same change set: `skills/insta/cli-reference.md`, `e2e/`, console copy
    in `frontend/`, MCP copy, and platform error strings that spell the path — and it ships in the
    order the design's §9 gives (docs/copy merge right after the CLI release, never before).
+6. **Rule: a new command says whether an agent can reach it.** A new leaf command ships with the
+   matching MCP tool in `InsForge/instacloud-mcp`, or with a line in the pull request saying why an
+   agent should not have one: credential minting, anything that needs this machine, anything the
+   platform denies agents. The two pull requests are independent — MCP tools are additive and need
+   no arming flag, so neither side waits for the other. Between July and September eight CLI
+   capabilities took 14 to 41 days to reach MCP, and every one of them was a new leaf: `service
+   rename`, `regions`, always-on, limits, volume, `postgres stats`, managed-database query, and the
+   bought-domain commands. No new leaf command without a matching MCP tool or a stated
+   reason.
 
 Where things go: settings (limits/volume/always-on/scale) live under the service type;
 `logs`/`metrics` live under the service type via `addObservability()` in `index.ts`; anything
