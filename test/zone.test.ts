@@ -65,13 +65,30 @@ describe('domain zone list', () => {
   it('prints each zone with its state, and an honest empty line', async () => {
     const { deps: d, calls } = deps({ '/zones': { items: [awaiting, { ...awaiting, domainName: 'live.example', status: 'active', delegated: true }] } })
     await zoneList({}, d)
-    expect(calls[0]).toMatchObject({ method: 'GET', path: '/orgs/org1/zones' })
+    expect(calls[0]).toMatchObject({ method: 'GET', path: '/orgs/org1/zones?limit=100' })
     expect(out()).toContain('byo.example  waiting for nameservers')
     expect(out()).toContain('live.example  delegated (ada.ns.cloudflare.com, bob.ns.cloudflare.com)')
     stdout.length = 0
     const { deps: d2 } = deps({ '/zones': { items: [] } })
     await zoneList({}, d2)
     expect(out()).toContain('no delegated zones')
+  })
+  it('combines pages into the existing JSON response and stops on the terminal cursor', async () => {
+    const second = { ...awaiting, domainName: 'second.example' }
+    const { deps: d, calls } = deps({
+      '&cursor=byo.example': { items: [second], nextCursor: null },
+      '/zones?limit=100': { items: [awaiting], nextCursor: 'byo.example' },
+    })
+    await zoneList({ json: true }, d)
+    expect(JSON.parse(out())).toEqual({ items: [awaiting, second] })
+    expect(calls.map(c => c.path)).toEqual([
+      '/orgs/org1/zones?limit=100', '/orgs/org1/zones?limit=100&cursor=byo.example',
+    ])
+  })
+  it('fails on a repeated cursor instead of looping or reporting a partial list', async () => {
+    const { deps: d } = deps({ '/zones': { items: [awaiting], nextCursor: 'byo.example' } })
+    await expect(zoneList({ json: true }, d)).rejects.toThrow('repeated pagination cursor')
+    expect(out()).toBe('')
   })
 })
 

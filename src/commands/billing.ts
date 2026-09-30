@@ -16,6 +16,7 @@ export async function resolveOrgId(opts: OrgOpt): Promise<string> {
 export type BillingOverview = {
   window: { from: number; to: number }
   tier: string; billingStatus: string; subscriptionStatus: string | null
+  pendingPlanChange?: { fromTier: string; toTier: string; effectiveAt: string; status: 'awaiting_payment' | 'scheduled'; includedUsd: number } | null
   // `creditBalanceUsd` is the wallet, and nothing else. The API also returns a legacy `creditsUsd`
   // that adds the remaining plan allowance to the wallet balance — a single number that means
   // neither thing. It is deliberately NOT read here: included usage and credits feed different
@@ -45,15 +46,27 @@ export function billingLines(s: BillingOverview, org?: string): string[] {
     `forecast:        $${Number(t.forecastUsd).toFixed(4)}  (predicted full cycle)`,
   ]
   if (s.subscriptionStatus) lines.push(`subscription:    ${s.subscriptionStatus}`)
-  if (s.billingStatus === 'suspended') {
-    // Four causes, five messages, and every one is a dead end for the others. Tier first: only a
+  if (s.pendingPlanChange) {
+    const pending = s.pendingPlanChange
+    const boundary = new Date(pending.effectiveAt).toISOString().replace('T', ' ').replace('.000Z', ' UTC')
+    lines.push(pending.status === 'scheduled'
+      ? `next plan:       ${pending.toTier} at ${boundary}`
+      : `plan change:     preparing ${pending.toTier}; requested boundary ${boundary}`)
+    lines.push(`next allowance:  $${Number(pending.includedUsd).toFixed(2)} (available after cutover)`)
+    lines.push('A plan change is pending; contact support for billing changes.')
+  }
+  if (s.tier === 'enterprise') {
+    lines.push('Enterprise billing is managed by staff; payment failure does not change the plan.')
+    if (s.billingStatus === 'suspended') lines.push('Contact support for billing or resource recovery.')
+  } else if (s.billingStatus === 'suspended' && !s.pendingPlanChange) {
+    // Ordinary-plan recovery advice depends on the cause. Tier first: only a
     // free org can spend a prepaid wallet, and waiting for the next cycle genuinely fixes that one.
     // (Tier, not subscriptionStatus, because rows written before non-payment suspended carry
     // `unpaid` beside tier 'free' and survive with no migration.) Then the status splits the paid
     // branch three ways: an invoice to settle, a subscription to replace, or — when it reads
     // healthy — a suspension that outlived its cause, which is what a recovery whose compute failed
     // to restart looks like, and where telling them to pay means re-settling a paid invoice. The
-    // replace case is the one that splits again, because enterprise has no self-serve checkout.
+    // Enterprise and pending changes were handled above: neither offers self-serve checkout.
     //
     // EVERY command here carries the caller's --org. `billing` and the command being suggested
     // resolve the target independently, so a hint that drops the flag acts on a different org than
@@ -67,13 +80,9 @@ export function billingLines(s: BillingOverview, org?: string): string[] {
         : lapsed
           ? `⚠  org suspended — subscription payment did not go through; settle it in \`insta billing portal${flag}\``
           : ended
-            ? s.tier === 'enterprise'
-              // Per-deal, and `billing subscribe` cannot create one: naming a self-serve tier here
-              // would move them off the plan they negotiated.
-              ? '⚠  org suspended — the subscription ended; contact support to restore this plan'
-              // Their OWN tier, not a hardcoded one: suggesting `subscribe pro` to a Team org
-              // resubscribes it onto the wrong plan.
-              : `⚠  org suspended — the subscription ended; resubscribe with \`insta billing subscribe ${s.tier}${flag}\``
+            // Their OWN tier, not a hardcoded one: suggesting `subscribe pro` to a Team org
+            // resubscribes it onto the wrong plan.
+            ? `⚠  org suspended — the subscription ended; resubscribe with \`insta billing subscribe ${s.tier}${flag}\``
             // Deliberately claims nothing about the subscription: `incomplete` reaches here too,
             // and that one is neither current nor failed. All this branch knows is that the
             // suspension has no billing cause it can name.
@@ -170,7 +179,7 @@ export async function billingRedeem(code: string, opts: OrgOpt & { json?: boolea
   for (const l of redeemLines(res)) info(l)
 }
 
-// insta billing portal — open the Stripe Customer Portal (change plan / card / cancel).
+// insta billing portal — manage payment methods. UTC-managed plans cannot change/cancel here.
 export async function billingPortal(opts: OrgOpt & { open?: boolean; json?: boolean }): Promise<void> {
   const api = await ApiClient.load()
   const orgId = await resolveOrgId(opts)
