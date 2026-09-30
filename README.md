@@ -123,6 +123,13 @@ only. Provider-minted service credentials (`DATABASE_URL`, `BUCKET_NAME`,
 `insta secrets bind` rules, and the postgres connection string is read directly with
 `insta postgres url` (or `insta postgres connect` for a psql session).
 
+A postgres database is reachable on its public endpoint (`DATABASE_URL`) by default.
+`insta postgres private-access on` adds `DATABASE_PRIVATE_URL` beside it, which resolves only inside
+InstaCloud compute; bind it into a compute with `insta secrets bind DATABASE_URL postgres/db
+--source-name DATABASE_PRIVATE_URL --to compute/api`. `insta postgres public-access off` then makes the
+database not reachable from the internet: it prints what will break and asks first (`--yes` when
+there is no terminal), and external clients, CI and local development can no longer connect.
+
 Secrets can be scoped per compute service, so several services may each define the same name — and
 a flat bundle cannot carry two values for one name. Such a name is **withheld** from the bundle and
 reported on stderr (which services define it, and how to read one). `insta run` then **refuses to
@@ -221,7 +228,7 @@ build never reaches a production installer.
 | `insta secrets` | Write `.env`, plus `list` · `set` · `unset` · `bind` · `unbind` · `bindings` · `sources` · `tree` |
 | `insta domain` | Bought or bring-your-own: `attach` · `check` · `detach`; buy through InstaCloud: `search` · `buy` · `list` · `status` · `records …` |
 | `insta compute` | `start` · `stop` · `suspend` · `restart` · `status` · `scale` · `limits` · `volume` · `always-on` · `exec` · `ssh` · `repo` · `connect-repo` · `watch-paths` · `disconnect-repo` · `logs` · `metrics` |
-| `insta postgres` | `url` (print the DSN) · `connect` (psql) · `stats` · `limits` · `volume` · `always-on` · `logs` · `metrics` — every verb takes `[service]` |
+| `insta postgres` | `url` (print the DSN) · `connect` (psql) · `stats` · `limits` · `volume` · `always-on` · `private-access` · `public-access` · `logs` · `metrics` — every verb takes `[service]` |
 | `insta redis` · `mysql` · `mongodb` | `query` · `status` · `limits` · `volume` · `always-on` · `logs` · `metrics` |
 | `insta storage` | `list` · `get` · `delete` · `set-access` |
 | `insta build [dir]` · `deploy [dir]` | Verify a source dir would build; deploy a source directory (built remotely) or `--image <url>`. `insta build logs <id>` reads source-build output: `--source archive` (default) uses the deploy operation ID, `--source github` uses a GitHub build ID; `--follow` watches output, `--json` returns one snapshot |

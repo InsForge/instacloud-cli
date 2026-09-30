@@ -103,7 +103,9 @@ describe('group shapes', () => {
       expect(r.stdout, verb).toMatch(new RegExp(`Usage: insta postgres ${verb} \\[options\\] \\[service\\]`))
       expect(r.stdout, verb).not.toContain('--group')
     }
-    expect(run(['postgres', 'always-on', '--help']).stdout).toContain('Usage: insta postgres always-on [options] [mode] [service]')
+    for (const verb of ['always-on', 'private-access', 'public-access']) {
+      expect(run(['postgres', verb, '--help']).stdout, verb).toContain(`Usage: insta postgres ${verb} [options] [mode] [service]`)
+    }
   }, 30_000)
   it('each managed database has the same verbs', () => {
     for (const type of ['redis', 'mysql', 'mongodb']) {

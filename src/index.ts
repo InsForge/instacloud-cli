@@ -441,7 +441,7 @@ compute.command('volume [service]').description("Show, attach, grow, remount, or
 addObservability(compute, 'compute', 'compute')
 
 // ---- postgres ----
-const pg = program.command('postgres').description('Postgres services: connection string, psql, stats, resource ceiling, volume, always-on, logs, metrics')
+const pg = program.command('postgres').description('Postgres services: connection string, psql, stats, resource ceiling, volume, always-on, network access, logs, metrics')
 pg.command('url [service]').description('Print the postgres connection string (DSN) — bare on stdout for piping, e.g. `psql "$(insta postgres url)"` (gated: secrets.read). Provider credentials are not in `insta secrets` — this is the command that yields the DSN')
   .option('--json').option('--branch <branch>', 'branch (default: current)')
   .action(guard((service, o) => pgCmd.dbUrl(service, o)))
@@ -462,6 +462,13 @@ pg.command('volume [service]').description("Show or grow a postgres service's pr
 pg.command('always-on [mode] [service]').description('Show or set a postgres service always-on (mode: on|off; no mode = print the current setting). on = instance stays warm, no cold starts; off = default scale-to-zero (idle instance suspends; first connection cold-starts). insta-db-backed services only')
   .option('--json').option('--branch <branch>', 'branch (default: current)')
   .action(guard((mode, service, o) => pgCmd.dbAlwaysOn(mode, service, o)))
+pg.command('private-access [mode] [service]').description('Show or set private network access (mode: on|off; no mode = print public and private access). on = mint DATABASE_PRIVATE_URL beside DATABASE_URL (unchanged) — it resolves only inside InstaCloud compute, not from a laptop or CI; bind it into a compute with `insta secrets bind … --source-name DATABASE_PRIVATE_URL`. off = retract it (refused while public access is closed). insta-db-backed only (gated: service.setAccess)')
+  .option('--json').option('--branch <branch>', 'branch (default: current)')
+  .action(guard((mode, service, o) => pgCmd.dbPrivateAccess(mode, service, o)))
+pg.command('public-access [mode] [service]').description("Show, close or re-open the public endpoint (mode: on|off; no mode = print public and private access). off = the database is not reachable from the internet: external clients, CI and local development can no longer connect, only InstaCloud compute via DATABASE_PRIVATE_URL. Needs private access on first. Prints what will break and asks first; takes effect within about 30 seconds. insta-db-backed only (gated: service.setAccess)")
+  .option('-y, --yes', 'close without asking (required when there is no terminal, or with --json) — read the printed impact first')
+  .option('--json').option('--branch <branch>', 'branch (default: current)')
+  .action(guard((mode, service, o) => pgCmd.dbPublicAccess(mode, service, o)))
 addObservability(pg, 'db', 'postgres')
 
 // ---- redis / mysql / mongodb (managed databases) ----
