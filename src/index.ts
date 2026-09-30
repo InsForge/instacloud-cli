@@ -173,10 +173,11 @@ svc.command('rename <type> <name> <new-name>').description('Rename a service and
   .action(guard((type, name, newName, o) => services.servicesRename(type, name, newName, o)))
 
 // ---- secrets (seam) ----
-const sec = program.command('secrets').description('Fetch the credential bundle (secret seam) into .env')
+const sec = program.command('secrets').description('Write a local .env bundle: user secrets plus primary provider credentials; compute credentials require explicit bindings')
   .option('--branch <branch>')
   .option('--service <type/name>', "read one compute service's own slice of the bundle instead of the branch-wide merge, e.g. compute/api")
   .option('-o, --output <file>', 'output file (default .env)').option('--print', 'print instead of writing').option('--json')
+  .addHelpText('after', '\nFetching this bundle does not bind credentials to compute. A service created with `insta service add compute` starts with no provider credential bindings; bind each source it needs, then deploy.\n\nExample: insta secrets bind DATABASE_URL postgres/db --to compute/app')
   .action(guard((o) => secretsCmd.secrets(o)))
 // commander 12 defaults allowExcessArguments to true, so a mistyped/retired subcommand (e.g.
 // `secrets lst`) would otherwise run this group's own action instead of failing.
@@ -189,11 +190,12 @@ sec.command('unset <name>').description('Remove a user secret')
   .option('--branch <branch>', 'scope to one branch')
   .option('--service <type/name>', "remove only that service's copy, e.g. compute/api")
   .option('--json').action(guard((n, o) => secretsCmd.secretsUnset(n, o)))
-sec.command('bind <env-name> <source>').description('Bind a service credential into a compute env var')
+sec.command('bind <env-name> <source>').description('Bind one provider credential to a compute service (applied on next deploy or restart)')
   .option('--branch <branch>', 'branch (default: current)')
   .option('--to <compute-service>', 'target compute service, e.g. compute/api')
   .option('--source-name <name>', 'source credential name when the source exposes more than one')
   .option('--json')
+  .addHelpText('after', '\nThe local .env bundle includes primary provider credentials without bindings. Compute services require their own explicit bindings: `insta service add compute` creates a service with no provider credential bindings inherited from other services.\n\nExample: insta secrets bind DATABASE_URL postgres/db --to compute/app')
   .action(guard((n, source, o) => secretsCmd.secretsBind(n, source, o)))
 sec.command('unbind <env-name>').description('Remove a service credential binding from a compute env var')
   .option('--branch <branch>', 'branch (default: current)')
@@ -442,7 +444,7 @@ addObservability(compute, 'compute', 'compute')
 
 // ---- postgres ----
 const pg = program.command('postgres').description('Postgres services: connection string, psql, stats, resource ceiling, volume, always-on, network access, logs, metrics')
-pg.command('url [service]').description('Print the postgres connection string (DSN) — bare on stdout for piping, e.g. `psql "$(insta postgres url)"` (gated: secrets.read). Provider credentials are not in `insta secrets` — this is the command that yields the DSN')
+pg.command('url [service]').description('Print the postgres connection string (DSN) — bare on stdout for piping, e.g. `psql "$(insta postgres url)"` (gated: secrets.read). `insta secrets` includes the primary postgres service\'s DATABASE_URL; use this command to select a specific postgres service')
   .option('--json').option('--branch <branch>', 'branch (default: current)')
   .action(guard((service, o) => pgCmd.dbUrl(service, o)))
 pg.command('connect [service]').description("Open an interactive psql session on the postgres service (needs psql on PATH; gated: secrets.read). A suspended instance wakes on connect — the first prompt can take a few seconds. Exits with psql's own exit code")

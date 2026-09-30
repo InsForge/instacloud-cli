@@ -74,7 +74,8 @@ insta deploy .
 
 `project create` makes an empty project and links the current directory. Services are
 opt-in, so you add only what you need. `secrets` writes the current branch's user-defined
-secrets to `./.env` (the postgres connection string is read with `insta postgres url`). `deploy .`
+secrets plus the primary provider credentials of each service type to `./.env`. A service created with
+`insta service add compute` starts with no provider credential bindings; bind the sources it needs before deploying. `deploy .`
 builds the directory remotely and ships it to the branch's compute
 service, with no local Docker. Whether it needs a `Dockerfile` depends on where the
 service runs: on insta-compute it is optional, and a directory without one is built
@@ -116,12 +117,14 @@ the two branches diverge independently. A project is capped at 10 branches.
 
 ### Credentials come from the secret seam, not a file you maintain
 
-`insta secrets` fetches the current branch's **user-defined** secrets and writes `./.env`.
-`insta run <cmd>` does the same without touching disk, injecting them into the child process
-only. Provider-minted service credentials (`DATABASE_URL`, `BUCKET_NAME`,
-`AWS_ACCESS_KEY_ID`, …) are not in that bundle — they reach compute through explicit
-`insta secrets bind` rules, and the postgres connection string is read directly with
-`insta postgres url` (or `insta postgres connect` for a psql session).
+`insta secrets` writes the current branch's **user-defined secrets plus primary provider
+credentials** to `./.env`: one credential set per service type, from that type's primary service.
+`insta run <cmd>` injects the same bundle into a local child process without touching disk.
+Fetching this bundle does not bind credentials to compute. A compute service receives provider
+credentials only through explicit `insta secrets bind` rules; `insta service add compute` creates
+a service with no provider credential bindings inherited from other services. Bind each source it
+needs, then deploy or restart to apply the bindings. For a specific postgres service's connection string, use
+`insta postgres url <name>` (or `insta postgres connect <name>` for a psql session).
 
 A postgres database is reachable on its public endpoint (`DATABASE_URL`) by default.
 `insta postgres private-access on` adds `DATABASE_PRIVATE_URL` beside it, which resolves only inside

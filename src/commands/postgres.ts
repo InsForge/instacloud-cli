@@ -277,14 +277,6 @@ export async function dbVolume(service: string | undefined, opts: Opts & { size?
 
 export type DbUrlResolution = { serviceName: string; url: string }
 
-// Resolve the postgres service (sole, or the named one) and its connection string. Two reads: the
-// branch's services list names the service; GET /services/:id/credentials (gated secrets.read)
-// carries the value. Provider-minted credentials are canonical within their source service
-// (DATABASE_URL) and deliberately absent from the general `insta secrets` bundle, so this is the
-// read that yields the DSN. The credentials call carries no branch param — the service id is
-// already branch-scoped by the list. Returns null when the read parked on an approval
-// (handleApproval already spoke). Takes the client as an argument so tests drive it with a stub,
-// per this repo's pure-seam convention.
 export async function resolveDbUrl(
   api: {
     request: (m: string, p: string) => Promise<any>
