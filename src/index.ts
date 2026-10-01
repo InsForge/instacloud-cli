@@ -112,6 +112,20 @@ envCmd.command('use <name>').description(`Switch environment (${ENV_NAMES.join('
 const orgCmd = program.command('org').description('Manage organizations')
 orgCmd.command('list').option('--json').action(guard((o) => org.orgList(o)))
 orgCmd.command('create <name>').option('--json').action(guard((name, o) => org.orgCreate(name, o)))
+const orgMember = orgCmd.command('member').description('Manage org members (invite, list, remove, change role)')
+const orgFlag = ['--org <id>', "org to act on (default: a scoped login's org, else the linked project's org, else your only org)"] as const
+orgMember.command('list').description('List members of the org').option(...orgFlag).option('--json').action(guard((o) => org.memberList(o)))
+orgMember.command('invite <email>').description('Invite someone by email; they accept from the emailed link (admin+)')
+  .option('--role <role>', 'admin | member', 'member').option(...orgFlag).option('--json')
+  .action(guard((email, o) => org.memberInvite(email, o)))
+orgMember.command('remove <user>').description('Remove a member, by user id or email (admin+, or yourself to leave)').option(...orgFlag).option('--json')
+  .action(guard((user, o) => org.memberRemove(user, o)))
+orgMember.command('role <user> <role>').description("Change a member's role: owner | admin | member (admin+; only an owner may set/clear owner)").option(...orgFlag).option('--json')
+  .action(guard((user, role, o) => org.memberRole(user, role, o)))
+const orgInvitation = orgCmd.command('invitation').description('Manage pending org invitations')
+orgInvitation.command('list').description('List pending invitations (admin+)').option(...orgFlag).option('--json').action(guard((o) => org.invitationList(o)))
+orgInvitation.command('revoke <id>').description('Revoke a pending invitation (admin+)').option(...orgFlag).option('--json')
+  .action(guard((id, o) => org.invitationRevoke(id, o)))
 
 // ---- tokens ----
 const tk = program.command('tokens').description('Manage API tokens (account, org or project scoped)')
