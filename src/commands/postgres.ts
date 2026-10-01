@@ -275,8 +275,6 @@ export async function dbVolume(service: string | undefined, opts: Opts & { size?
   info(`postgres ${service ?? 'default'}: volume ${typeof vg === 'number' ? `grown to ${vg}Gi` : `set to ${sizeGib}Gi`}`)
 }
 
-// POST /database/restart (gated: deploy). The platform waits the restart out; `pending` means it
-// outlasted that wait and is still rolling.
 export async function dbRestart(service: string | undefined, opts: Opts): Promise<void> {
   const api = await ApiClient.load()
   const p = await requireProject()
@@ -284,13 +282,7 @@ export async function dbRestart(service: string | undefined, opts: Opts): Promis
   const branch = opts.branch ?? p.branch
   if (branch) qs.set('branch', branch)
   if (service) qs.set('group', service)
-  let res
-  try {
-    res = await api.rawRequest('POST', `/projects/${p.projectId}/database/restart${qs.toString() ? `?${qs}` : ''}`)
-  } catch (e) {
-    if (e instanceof ApiError) throw new Error(`restart failed (${e.status}): ${e.message}`)
-    throw e
-  }
+  const res = await api.rawRequest('POST', `/projects/${p.projectId}/database/restart${qs.toString() ? `?${qs}` : ''}`)
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   info(restartLine(service ?? 'default', res.body))
