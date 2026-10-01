@@ -306,7 +306,7 @@ export async function claimGrant(email: string, client: string, post: ClaimPoste
 }
 
 // Start a loopback server, open the browser at the platform bridge, and await the token.
-function browserOauth(apiUrl: string, provider: string): Promise<string> {
+export function browserOauth(apiUrl: string, provider: string, open: (url: string) => boolean = openUrl): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const state = randomBytes(16).toString('hex')
     let timer: NodeJS.Timeout
@@ -317,7 +317,7 @@ function browserOauth(apiUrl: string, provider: string): Promise<string> {
       const err = url.searchParams.get('error')
       const ok = !!token && !err && url.searchParams.get('state') === state
       res.writeHead(ok ? 200 : 400, { 'content-type': 'text/html' })
-      res.end(`<!doctype html><meta charset=utf-8><body style="font-family:system-ui;text-align:center;margin-top:4rem"><h2>InstaCloud</h2><p>${ok ? '✓ Login complete — you can close this tab.' : '✗ Login failed' + (err ? ` (${err})` : '')}</p></body>`)
+      res.end(`<!doctype html><meta charset=utf-8><body style="font-family:system-ui;text-align:center;margin-top:4rem"><h2>InstaCloud</h2><p>${ok ? '✓ Login complete — you can close this tab.' : '✗ Login failed' + (err ? ` (${err.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')})` : '')}</p></body>`)
       clearTimeout(timer)
       server.close()
       if (err) return reject(new Error(`oauth failed: ${err}`))
@@ -336,7 +336,7 @@ function browserOauth(apiUrl: string, provider: string): Promise<string> {
       // event, so openUrl's return value cannot see it (e.g. powershell.exe blocked by AppLocker
       // on hardened fleets) — and the silent variant of that failure looks exactly like a hang.
       info(`if nothing opens, use this URL:\n  ${authorizeUrl}`)
-      openUrl(authorizeUrl)
+      open(authorizeUrl)
       info('waiting for you to finish in the browser… (times out in 2m; ctrl-c to abort)')
       timer = setTimeout(() => { server.close(); reject(new Error('timed out waiting for browser login (2m)')) }, 120_000)
     })
