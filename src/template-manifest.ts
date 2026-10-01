@@ -29,7 +29,10 @@ export type ManifestService = {
   port?: number
   healthcheck?: string
   volume?: boolean // needs a /data disk; the platform owns the size
+  volumeGib?: number // registry-only field, kept for normalization
   alwaysOn?: boolean // idle mode; undeclared = the platform default (always-on for compute)
+  command?: string // entrypoint command override (runtime field)
+  mountPath?: string // absolute path for volume mount (runtime field)
   env?: ManifestEnv
 }
 
@@ -183,6 +186,14 @@ export function validateManifest(m: TemplateManifest): string[] {
     }
     if (authored.spec !== undefined) {
       problems.push(`${where}: compute size is the platform's to choose — remove spec`)
+    }
+    // Validate runtime fields: command and mountPath
+    if (svc.command !== undefined && (typeof svc.command !== 'string' || !svc.command.trim())) {
+      problems.push(`${where}.command must be a non-empty string`)
+    }
+    if (svc.mountPath !== undefined) {
+      if (svc.volume !== true) problems.push(`${where}.mountPath requires volume: true`)
+      else if (typeof svc.mountPath !== 'string' || !svc.mountPath.startsWith('/')) problems.push(`${where}.mountPath must be an absolute path`)
     }
     const env = svc.env ?? {}
     for (const group of ['fixed', 'generated', 'required', 'optional'] as const) {

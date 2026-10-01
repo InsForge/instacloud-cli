@@ -314,6 +314,15 @@ describe('validateManifest', () => {
     expect(validateManifest(worker({ healthcheck: '/' })).join('\n')).toMatch(/a worker has no HTTP endpoint/)
     expect(validateManifest(worker({ alwaysOn: false })).join('\n')).toMatch(/a worker cannot scale to zero/)
   })
+
+  it('accepts command and mountPath, and refuses the shapes the platform refuses', () => {
+    const web = (extra: Record<string, unknown>) =>
+      ({ code: 'x', version: '1', services: { app: { type: 'web', image: 'a:1', healthcheck: '/', ...extra } } }) as unknown as TemplateManifest
+    expect(validateManifest(web({ command: 'run', volume: true, mountPath: '/app/storage' }))).toEqual([])
+    expect(validateManifest(web({ command: ' ' })).join('\n')).toMatch(/services\.app\.command must be a non-empty string/)
+    expect(validateManifest(web({ mountPath: '/a' })).join('\n')).toMatch(/services\.app\.mountPath requires volume: true/)
+    expect(validateManifest(web({ volume: true, mountPath: 'a' })).join('\n')).toMatch(/services\.app\.mountPath must be an absolute path/)
+  })
 })
 
 describe('parseManifestYaml', () => {
