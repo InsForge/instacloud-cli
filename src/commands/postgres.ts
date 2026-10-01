@@ -275,6 +275,25 @@ export async function dbVolume(service: string | undefined, opts: Opts & { size?
   info(`postgres ${service ?? 'default'}: volume ${typeof vg === 'number' ? `grown to ${vg}Gi` : `set to ${sizeGib}Gi`}`)
 }
 
+export async function dbRestart(service: string | undefined, opts: Opts): Promise<void> {
+  const api = await ApiClient.load()
+  const p = await requireProject()
+  const qs = new URLSearchParams()
+  const branch = opts.branch ?? p.branch
+  if (branch) qs.set('branch', branch)
+  if (service) qs.set('group', service)
+  const res = await api.rawRequest('POST', `/projects/${p.projectId}/database/restart${qs.toString() ? `?${qs}` : ''}`)
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body)
+  info(restartLine(service ?? 'default', res.body))
+}
+
+export function restartLine(group: string, body: any): string {
+  if (body?.pending) return `postgres ${group}: restart accepted and still in progress — settings apply once it is back up`
+  if (body?.state === 'suspended') return `postgres ${group}: suspended, not restarted — pending settings apply when the next connection starts it`
+  return `postgres ${group}: restarted — ALTER SYSTEM settings that need a restart are now in effect`
+}
+
 export type DbUrlResolution = { serviceName: string; url: string }
 
 export async function resolveDbUrl(

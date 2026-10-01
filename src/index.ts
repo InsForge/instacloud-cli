@@ -444,7 +444,7 @@ compute.command('volume [service]').description("Show, attach, grow, remount, or
 addObservability(compute, 'compute', 'compute')
 
 // ---- postgres ----
-const pg = program.command('postgres').description('Postgres services: connection string, psql, stats, resource ceiling, volume, always-on, network access, logs, metrics')
+const pg = program.command('postgres').description('Postgres services: connection string, psql, stats, resource ceiling, restart, volume, always-on, network access, logs, metrics')
 pg.command('url [service]').description('Print the postgres connection string (DSN) — bare on stdout for piping, e.g. `psql "$(insta postgres url)"` (gated: secrets.read). `insta secrets` includes the primary postgres service\'s DATABASE_URL; use this command to select a specific postgres service')
   .option('--json').option('--branch <branch>', 'branch (default: current)')
   .action(guard((service, o) => pgCmd.dbUrl(service, o)))
@@ -458,6 +458,9 @@ pg.command('limits [service]').description("Show or set a postgres service's res
   .option('--cpu <n>', 'vCPU ceiling, e.g. 2 or 2500m').option('--memory <size>', 'memory ceiling, e.g. 4Gi')
   .option('--json').option('--branch <branch>', 'branch (default: current)')
   .action(guard((service, o) => pgCmd.dbLimits(service, o)))
+pg.command('restart [service]').description("Restart the postgres server so settings written with ALTER SYSTEM that need a restart (wal_level, max_wal_senders, max_replication_slots, …) take effect. Connections drop while it restarts; waits for it to finish. A suspended instance stays suspended and picks the settings up on its next connection. insta-db-backed only (gated: deploy)")
+  .option('--json').option('--branch <branch>', 'branch (default: current)')
+  .action(guard((service, o) => pgCmd.dbRestart(service, o)))
 pg.command('volume [service]').description("Show or grow a postgres service's provisioned volume (block disk; insta-db-backed only). No --size: print size and the plan cap (any plan). --size grows it (paid plans; grow-only — a provisioned disk cannot shrink). Billing is actual data stored — the size is a cap, not a price")
   .option('--size <gi>', 'new size in whole Gi, e.g. 10 (must be ≥ the current size)')
   .option('--json').option('--branch <branch>', 'branch (default: current)')
