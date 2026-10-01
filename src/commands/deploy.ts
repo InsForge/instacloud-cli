@@ -167,12 +167,9 @@ export async function deploy(dir: string | undefined, opts: DeployOpts): Promise
   const branch = opts.branch ?? p.branch
   const log = note(opts)
 
-  // Junk fails here, before a directory is packed and uploaded for a body the platform would only
-  // refuse: the same parser every other --port in this CLI runs. `Number()` alone sent NaN as
-  // `null` and let 0 or 70000 travel to the server.
   let port: number | undefined
   try {
-    port = opts.port === undefined ? undefined : parsePort(opts.port)
+    port = opts.port === undefined ? undefined : parsePort(opts.port, { allowZero: true })
   } catch (e) {
     die(`--${(e as Error).message}`)
   }

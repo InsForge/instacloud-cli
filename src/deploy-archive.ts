@@ -163,7 +163,7 @@ export async function deployArchive(
       if (state === 'live') {
         const image = res.body?.imageRef
         const url = res.body?.url
-        if (typeof image !== 'string' || !image || typeof url !== 'string' || !url) {
+        if (typeof image !== 'string' || !image || typeof url !== 'string' || (!url && opts.port !== '0')) {
           throw new Error('the deploy finished but the platform returned no image or URL for it — check `insta status`')
         }
         const optionalString = (field: string, v: unknown): string | undefined => {

@@ -97,7 +97,7 @@ export async function resolveServiceArgs(
   if (type && !SERVICE_TYPES.includes(type as ServiceType)) return { type, name: name ?? '' }
   if (!deps.tty) throw new Error(missingArgsMessage(type))
   // A bad --port is a typo in the command, not an answer: fail before asking anything.
-  if (given.port !== undefined) parsePort(given.port)
+  if (given.port !== undefined) parsePort(given.port, { allowZero: !type || type === 'compute' })
   const kind = type
     ? SERVICE_KINDS.find((k) => k.type === type && !k.needsImage)
     : await deps.selectKind(SERVICE_KINDS)
@@ -158,12 +158,12 @@ export async function promptServiceName(kind: ServiceKind, suggested: string): P
 
 export async function promptPort(fallback: string): Promise<string> {
   const answer = await clack.text({
-    message: 'Port the image listens on:',
+    message: 'Port the image listens on (0 for a worker):',
     initialValue: fallback,
     // The rule the command enforces, so the prompt and a --port can never disagree.
     validate: (v) => {
       try {
-        parsePort(v.trim())
+        parsePort(v.trim(), { allowZero: true })
         return undefined
       } catch (e) {
         return (e as Error).message

@@ -56,6 +56,7 @@ describe('sourceBody', () => {
   })
   it('--port overrides the detected port through the shared parser', () => {
     expect(sourceBody(app, cand(), { port: '8080' }).port).toBe(8080)
+    expect(() => sourceBody(app, cand(), { port: '0' })).toThrow(/between 1 and 65535/)
     expect(() => sourceBody(app, cand(), { port: '0x1f90' })).toThrow(/port must be/)
   })
 })

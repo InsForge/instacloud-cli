@@ -120,8 +120,19 @@ describe('deployArchive — the gated call and the poll after it', () => {
     expect(process.exitCode).toBe(2)
   })
 
-  // Port, websocket and replaceSource ride along because this call IS the deploy: there is no
-  // /deploy after it.
+  it('accepts an empty worker URL but rejects it for a TCP deploy', async () => {
+    for (const port of ['0', '8080']) {
+      const { api: a, calls } = api([
+        { status: 202, body: { operationId: 'op_1' } },
+        { status: 200, body: { ...live, url: '' } },
+      ])
+      const result = deployArchive(a, 'p1', ref, 'main', { port }, Date.now, noWait)
+      if (port === '0') await expect(result).resolves.toMatchObject({ url: '', image: live.imageRef })
+      else await expect(result).rejects.toThrow(/no image or URL/)
+      expect(calls[0]!.body.port).toBe(Number(port))
+    }
+  })
+
   it('carries every deploy option in the one gated body', async () => {
     const { api: a, calls } = api([
       { status: 202, body: { status: 'accepted', operationId: 'op_1', state: 'queued' } },

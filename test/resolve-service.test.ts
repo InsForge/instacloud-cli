@@ -88,6 +88,14 @@ test('Docker Image: --image and --port already given are not asked for', async (
   expect(r).toEqual({ type: 'compute', name: 'nginx', image: 'nginx:1.27', port: '3000' })
 })
 
+test('Docker Image accepts a supplied worker port without prompting for it', async () => {
+  const r = await resolveServiceArgs(undefined, undefined, deps({
+    selectKind: async () => kind('image'),
+    askName: async () => 'worker',
+  }), { image: 'ghcr.io/acme/worker', port: '0' })
+  expect(r).toEqual({ type: 'compute', name: 'worker', image: 'ghcr.io/acme/worker', port: '0' })
+})
+
 test('a bare compute type means Empty Service, never the image flow', async () => {
   const r = await resolveServiceArgs('compute', undefined, deps({ askName: async (_k, s) => s }))
   expect(r).toEqual({ type: 'compute', name: 'compute' })
@@ -150,9 +158,9 @@ test('an --image that normalizes to nothing is rejected, not silently dropped', 
 // A bad --port is a typo in the command; answering three questions first would be wasted work.
 test('an invalid --port fails before any prompt', async () => {
   await expect(resolveServiceArgs(undefined, undefined, deps(), { port: '70000' }))
-    .rejects.toThrow(/between 1 and 65535/)
+    .rejects.toThrow(/between 0 and 65535/)
   await expect(resolveServiceArgs(undefined, undefined, deps(), { port: 'abc' }))
-    .rejects.toThrow(/between 1 and 65535/)
+    .rejects.toThrow(/between 0 and 65535/)
 })
 
 // --json promises parseable stdout; a prompt would corrupt it and hang an agent that owns a TTY.
