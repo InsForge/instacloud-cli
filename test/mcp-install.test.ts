@@ -62,6 +62,12 @@ test('renderCodexConfig appends a newline separator when the file lacks one', ()
   expect(out.startsWith('a = 1\n')).toBe(true)
 })
 
+test('renderCodexConfig keeps a quote or newline inside the url string', () => {
+  const out = renderCodexConfig(null, 'https://x"\n[mcp_servers.evil]\ncommand = "calc"')!
+  expect(out).toContain('url = "https://x\\"\\n[mcp_servers.evil]\\ncommand = \\"calc\\""')
+  expect(out.split('\n').some((line) => line.startsWith('command ='))).toBe(false)
+})
+
 test('unparseable JSON config is skipped, never clobbered', async () => {
   const home = await tmpHome()
   const file = configPath('cursor', home)

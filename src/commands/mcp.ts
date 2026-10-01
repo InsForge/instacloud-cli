@@ -51,13 +51,23 @@ export function renderJsonConfig(slug: McpAgent, existing: string | null, url: s
   return JSON.stringify(root, null, 2) + '\n'
 }
 
+// A TOML basic string. Quotes, backslashes, and line breaks stay inside the value.
+export function tomlBasicString(value: string): string {
+  const escaped = value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+  return `"${escaped}"`
+}
+
 // Codex config is TOML. Appending a complete `[mcp_servers.<name>]` table is always valid at
 // EOF, so we avoid a TOML parser: string-detect for idempotency, append for install.
 export function renderCodexConfig(existing: string | null, url: string, name: string = MCP_SERVER_NAME): string | null {
   const base = existing ?? ''
   if (base.includes(`[mcp_servers.${name}]`)) return null // already configured
   const sep = base.length && !base.endsWith('\n') ? '\n' : ''
-  return `${base}${sep}\n[mcp_servers.${name}]\nurl = "${url}"\n`
+  return `${base}${sep}\n[mcp_servers.${name}]\nurl = ${tomlBasicString(url)}\n`
 }
 
 // Install for one agent. Returns 'installed' | 'already' | 'skipped' (unparseable config).
