@@ -5,8 +5,9 @@
 // diagnostic value of error text.
 
 const PATTERNS: Array<[RegExp, string]> = [
-  // URL-embedded credentials: scheme://user:pass@host (DATABASE_URLs pasted into error output)
-  [/(\w+:\/\/)[^\s/@:]+:[^\s/@]+@/g, '$1[REDACTED]@'],
+  // URL-embedded credentials: scheme://user:pass@host (DATABASE_URLs pasted into error output).
+  // Pasted passwords are often not percent-encoded, so the password half may contain `/`.
+  [/(\w+:\/\/)[^\s/@:]+:[^\s@]+@/g, '$1[REDACTED]@'],
   // JWTs
   [/eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{5,}/g, '[REDACTED_JWT]'],
   // Bearer tokens

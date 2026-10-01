@@ -32,7 +32,7 @@ const DETECTORS: Detector[] = [
   { name: 'google_api_key', rx: /\bAIza[0-9A-Za-z_-]{35}\b/gd, group: false },
   { name: 'private_key_block', rx: /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/gd, group: false },
   { name: 'jwt', rx: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/gd, group: false },
-  { name: 'db_conn_string', rx: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^:\s/@]+:[^@\s/]+@[^\s'"]+/gd, group: false },
+  { name: 'db_conn_string', rx: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^:\s/@]+:[^@\s]+@[^\s'"]+/gd, group: false },
   { name: 'bearer_token', rx: /\bbearer\s+([A-Za-z0-9._-]{20,})/gid, group: true },
   { name: 'generic_secret_assignment', rx: /\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key)\b\s*[:=]\s*['"]?([^\s'"]{8,})/gid, group: true },
 ]
