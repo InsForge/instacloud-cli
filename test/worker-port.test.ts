@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
+import { cliVersion } from '../src/version.js'
 
 const entry = fileURLToPath(new URL('../src/index.ts', import.meta.url))
 const loader = new URL('../node_modules/tsx/dist/loader.mjs', import.meta.url).href
@@ -14,6 +15,9 @@ it.each([0, 8080])('preserves port %i through service creation, image deploy and
   const scratch = mkdtempSync(join(tmpdir(), 'insta-worker-port-'))
   const source = join(scratch, 'source')
   mkdirSync(source)
+  const updateCache = join(scratch, 'update-check.json')
+  // A fresh cache prevents a detached update check from retaining the Windows fixture directory.
+  writeFileSync(updateCache, JSON.stringify({ checkedAt: Date.now(), latest: cliVersion() }))
   writeFileSync(join(source, 'Dockerfile'), 'FROM scratch\nEXPOSE 3000\n')
   const posts: Array<{ path: string; body: any }> = []
   const server = createServer((req, res) => {
@@ -41,7 +45,7 @@ it.each([0, 8080])('preserves port %i through service creation, image deploy and
   const env: NodeJS.ProcessEnv = {
     ...process.env, HOME: scratch, USERPROFILE: scratch,
     INSTA_API_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
-    INSTA_PROJECT_ID: 'p1', INSTA_BRANCH: 'main', INSTA_NO_AUTOUPDATE: '1', INSTA_NO_TELEMETRY: '1',
+    INSTA_PROJECT_ID: 'p1', INSTA_BRANCH: 'main', INSTA_UPDATE_CACHE: updateCache, INSTA_NO_AUTOUPDATE: '1', INSTA_NO_TELEMETRY: '1',
   }
   for (const key of ['CODEX_THREAD_ID', 'CODEX_CI', 'CLAUDECODE', 'CURSOR_AGENT', 'INSTA_ENV']) delete env[key]
   async function run(args: string[]) {
