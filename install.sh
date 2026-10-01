@@ -221,7 +221,7 @@ if [ -n "$ENV_NAME" ]; then
 fi
 
 # ---- agent setup (--agents) ----
-if [ "$AGENTS" = "1" ]; then
+if [ "$AGENTS" = "1" ]; then (
   echo
   # `insta agent setup` (`setup agent` on older CLIs) prints its own "setting up coding-agent skills …" line + clean summary.
   # CLI >= 0.0.38: bare `agent setup` (`setup agent` on older CLIs) FORCES prod (switching the machine if needed), so a staging
@@ -239,7 +239,8 @@ if [ "$AGENTS" = "1" ]; then
   # curl|sh path can offer the browser login while unattended runs stay fully non-interactive.
   YFLAG=""
   [ "$YES" = "1" ] && YFLAG="-y"
-  SETUP_ERR="${TMPDIR:-/tmp}/insta-setup-err.$$"
+  SETUP_ERR="$(mktemp)"
+  trap 'rm -f "$SETUP_ERR"' EXIT
   # `setup agent` is the permanent compatibility alias of `insta agent setup` (canonical since the
   # command re-organization). It works on every release, which is exactly what a script fetched from
   # `main` and run against whatever binary is current needs — do not "modernize" this call.
@@ -253,7 +254,7 @@ if [ "$AGENTS" = "1" ]; then
       echo "warn: agent setup failed — run: insta setup agent ${SETUP_ENV_ARGS}"
     fi
   fi
-  rm -f "$SETUP_ERR"
+)
 fi
 
 # ---- PATH: confirm reachable, or tell the user exactly how (incl. THIS shell) ----
