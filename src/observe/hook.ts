@@ -1,6 +1,6 @@
 // PostToolUse hook: reads a tool-use event on stdin (Claude Code / Codex), scans every string
 // surface for credential exposure, and appends findings to ./.insta/audit.jsonl.
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, chmodSync, mkdirSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { scanEvent, type ToolEvent } from './scanner.js'
@@ -22,9 +22,12 @@ export function recordFindings(event: ToolEvent, baseDir: string): number {
     tool: event.tool_name ?? null,
     cwd: event.cwd ?? null,
   }
-  mkdirSync(instaDir, { recursive: true })
+  mkdirSync(instaDir, { recursive: true, mode: 0o700 })
+  try { chmodSync(instaDir, 0o700) } catch { /* Windows ACLs do not store POSIX modes */ }
   const lines = findings.map((f) => JSON.stringify({ ...common, ...f })).join('\n') + '\n'
-  appendFileSync(join(instaDir, 'audit.jsonl'), lines, 'utf8')
+  const auditPath = join(instaDir, 'audit.jsonl')
+  appendFileSync(auditPath, lines, { encoding: 'utf8', mode: 0o600 })
+  try { chmodSync(auditPath, 0o600) } catch { /* same */ }
   return findings.length
 }
 
