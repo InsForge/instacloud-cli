@@ -71,7 +71,10 @@ test('renderCodexConfig keeps a quote or newline inside the url string', () => {
 test('renderCodexConfig keeps a backslash, quote, and newline inside the url string', () => {
   const out = renderCodexConfig(null, 'https://x\\"\r\n[mcp_servers.evil]\ncommand = "calc"')!
   expect(out.endsWith('url = "https://x\\\\\\"\\r\\n[mcp_servers.evil]\\ncommand = \\"calc\\""\n')).toBe(true)
-  expect(out).toMatch(/^url = "[^\r\n]*"$/m)
+  const urlLine = out.split('\n').find((line) => line.startsWith('url = '))!
+  expect(urlLine.includes('\\r\\n')).toBe(true)
+  expect(urlLine.includes('\r')).toBe(false)
+  expect(urlLine.includes('\n')).toBe(false)
   expect(out.split('\n').some((line) => line.startsWith('command ='))).toBe(false)
 })
 
