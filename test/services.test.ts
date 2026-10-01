@@ -147,11 +147,11 @@ describe('servicesAddRequestBody', () => {
     expect(servicesAddRequestBody('postgres', 'db', 'main', { region: 'us-east' })).toMatchObject({ region: 'us-east' })
     expect(servicesAddRequestBody('postgres', 'db', 'main', {})).not.toHaveProperty('region')
   })
-  it('sends alwaysOn in BOTH states when the flag is given, omits it when absent (absent = the platform default, always-on for compute)', () => {
+  it('sends alwaysOn in BOTH states when the flag is given, omits it when absent (absent = the platform default, scale-to-zero for compute)', () => {
     expect(servicesAddRequestBody('compute', 'api', 'main', { alwaysOn: true })).toMatchObject({ alwaysOn: true })
-    // --no-always-on must reach the API as an explicit false: an omitted key is reinterpreted as
-    // the always-on default by the platform (insta-platform #385), so dropping false would create
-    // exactly the always-on, idle-billed service the user opted out of.
+    // --no-always-on must reach the API as an explicit false: an omitted key takes the platform's
+    // configurable birth default (INSTA_COMPUTE_ALWAYS_ON_DEFAULT), so dropping false would hand an
+    // always-on platform exactly the idle-billed service the user opted out of.
     expect(servicesAddRequestBody('compute', 'api', 'main', { alwaysOn: false })).toMatchObject({ alwaysOn: false })
     expect(servicesAddRequestBody('compute', 'api', 'main', {})).not.toHaveProperty('alwaysOn')
   })
