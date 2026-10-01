@@ -231,7 +231,7 @@ build never reaches a production installer.
 | `insta secrets` | Write `.env`, plus `list` · `set` · `unset` · `bind` · `unbind` · `bindings` · `sources` · `tree` |
 | `insta domain` | Bought or bring-your-own: `attach` · `check` · `detach`; buy through InstaCloud: `search` · `buy` · `list` · `status` · `records …` |
 | `insta compute` | `start` · `stop` · `suspend` · `restart` · `status` · `scale` · `limits` · `volume` · `always-on` · `exec` · `ssh` · `repo` · `connect-repo` · `watch-paths` · `disconnect-repo` · `logs` · `metrics` |
-| `insta postgres` | `url` (print the DSN) · `connect` (psql) · `stats` · `limits` · `volume` · `always-on` · `private-access` · `public-access` · `logs` · `metrics` — every verb takes `[service]` |
+| `insta postgres` | `url` (print the DSN) · `connect` (psql) · `stats` · `limits` · `restart` · `volume` · `always-on` · `private-access` · `public-access` · `logs` · `metrics` — every verb takes `[service]` |
 | `insta redis` · `mysql` · `mongodb` | `query` · `status` · `limits` · `volume` · `always-on` · `logs` · `metrics` |
 | `insta storage` | `list` · `get` · `delete` · `set-access` |
 | `insta build [dir]` · `deploy [dir]` | Verify a source dir would build; deploy a source directory (built remotely) or `--image <url>`. `insta build logs <id>` reads source-build output: `--source archive` (default) uses the deploy operation ID, `--source github` uses a GitHub build ID; `--follow` watches output, `--json` returns one snapshot |

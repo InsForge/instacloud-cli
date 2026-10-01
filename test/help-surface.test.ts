@@ -98,7 +98,7 @@ describe('top-level surface', () => {
 
 describe('group shapes', () => {
   it('postgres verbs take a trailing [service] and no --group', () => {
-    for (const verb of ['url', 'connect', 'stats', 'limits', 'volume', 'logs', 'metrics']) {
+    for (const verb of ['url', 'connect', 'stats', 'limits', 'restart', 'volume', 'logs', 'metrics']) {
       const r = run(['postgres', verb, '--help'])
       expect(r.stdout, verb).toMatch(new RegExp(`Usage: insta postgres ${verb} \\[options\\] \\[service\\]`))
       expect(r.stdout, verb).not.toContain('--group')
