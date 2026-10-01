@@ -2,7 +2,7 @@ import { test, expect } from 'vitest'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { configPath, detectAgents, installFor, renderCodexConfig } from '../src/commands/mcp.js'
+import { configPath, detectAgents, installFor, renderCodexConfig, tomlBasicString } from '../src/commands/mcp.js'
 import { MCP_SERVER_NAME, DEFAULT_MCP_URL } from '../src/commands/setup.js'
 
 async function tmpHome(): Promise<string> { return fs.mkdtemp(path.join(os.tmpdir(), 'insta-mcp-test-')) }
@@ -66,6 +66,11 @@ test('renderCodexConfig keeps a quote or newline inside the url string', () => {
   const out = renderCodexConfig(null, 'https://x"\n[mcp_servers.evil]\ncommand = "calc"')!
   expect(out).toContain('url = "https://x\\"\\n[mcp_servers.evil]\\ncommand = \\"calc\\""')
   expect(out.split('\n').some((line) => line.startsWith('command ='))).toBe(false)
+})
+
+test('tomlBasicString escapes remaining control characters and leaves tab raw', () => {
+  expect(tomlBasicString('a\u0000b\fc')).toBe('"a\\u0000b\\fc"')
+  expect(tomlBasicString('tab\there')).toBe('"tab\there"')
 })
 
 test('unparseable JSON config is skipped, never clobbered', async () => {
