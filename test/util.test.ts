@@ -145,6 +145,13 @@ describe('handleApproval', () => {
     expect(stderr.join('')).toBe('')
     expect(process.exitCode).toBeUndefined()
   })
+
+  it('removes terminal controls from every approval field while preserving the JSON envelope', () => {
+    const body = { status: 'approval_required', action: '\u001b[2Kdeploy\r', approvalId: 'a\u009b1\b', url: 'https://console.test/\u001b]52;c;payload\u0007\nreview' }
+    expect(handleApproval({ status: 202, body }, true)).toBe(true)
+    expect(stderr.join('')).toBe('approval required for [2Kdeploy — review it at https://console.test/]52;c;payloadreview or run: insta agent approvals approve a1\n')
+    expect(JSON.parse(stdout.join(''))).toEqual(body)
+  })
 })
 
 describe('nextActionsLines', () => {
@@ -176,5 +183,19 @@ describe('nextActionsLines', () => {
 
     const logsLines = nextActionsLines([{ op: 'logs', reason: 'Check logs.', args: { projectId: 'pr_1' } }])
     expect(logsLines.join('\n')).toContain('insta compute logs')
+  })
+
+  it('uses a placeholder for secret values in next-action commands', () => {
+    const lines = nextActionsLines([{ op: 'secrets.set', reason: 'Set the credential.', args: { name: 'TOKEN', value: 'live-sensitive-value' } }])
+    expect(lines).toEqual(['Next:', '  • Set the credential.  →  insta secrets set TOKEN <value>'])
+  })
+
+  it.each(['service.add', 'deploy', 'secrets.set', 'metrics', 'logs', 'approvals.approve', 'unknown'])('removes controls from %s hints', (op) => {
+    const hostile = 'visible\u001b[2K\r\n\u0007\u007f\u009b31m'
+    const lines = nextActionsLines([{ op, reason: hostile, gated: true, args: { type: hostile, name: hostile, branch: hostile, target: hostile, approvalId: hostile } }])
+    expect(lines).toHaveLength(2)
+    expect(lines[1]).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/)
+    expect(lines[1]).toContain('visible')
+    expect(lines[1]).toContain('[needs approval]')
   })
 })

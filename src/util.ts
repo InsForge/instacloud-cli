@@ -200,6 +200,10 @@ export function info(msg: string): void {
   process.stdout.write(msg + '\n')
 }
 
+export function safeText(text: string): string {
+  return String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+}
+
 // If the platform gated the action (HTTP 202), tell the user how to get it approved. Returns
 // true when an approval is pending (caller should stop). The hint goes to STDERR and the exit
 // code is set to 2: a pending gate is not success (redirected stdout must never swallow it as
@@ -222,7 +226,7 @@ export function handleApproval(res: { status: number; body: any }, json?: boolea
 // OSS runtime sends no url, and the CLI command alone still stands.
 export function approvalHint(body: { action?: string; approvalId?: string; url?: string }): string {
   const review = body.url ? `review it at ${body.url} or ` : ''
-  return `approval required for ${body.action} — ${review}run: insta agent approvals approve ${body.approvalId}`
+  return safeText(`approval required for ${body.action} — ${review}run: insta agent approvals approve ${body.approvalId}`)
 }
 
 export type NextAction = { op: string; reason: string; args?: Record<string, unknown>; gated?: boolean }
@@ -234,7 +238,7 @@ const targetGroup = (a: Record<string, unknown>): string => (a.target === 'db' ?
 const OP_COMMAND: Record<string, (a: Record<string, unknown>) => string> = {
   'service.add': (a) => `insta service add ${a.type ?? '<type>'} ${a.name ?? '<name>'}`,
   deploy: (a) => `insta deploy${a.branch ? ` --branch ${a.branch}` : ''}`,
-  'secrets.set': (a) => `insta secrets set ${a.name ?? '<NAME>'} ${a.value ?? '<value>'}`,
+  'secrets.set': (a) => `insta secrets set ${a.name ?? '<NAME>'} <value>`,
   metrics: (a) => `insta ${targetGroup(a)} metrics`,
   logs: (a) => `insta ${targetGroup(a)} logs`,
   'approvals.approve': (a) => `insta agent approvals approve ${a.approvalId ?? '<id>'}`,
@@ -247,7 +251,7 @@ export function nextActionsLines(actions: NextAction[] | undefined): string[] {
   for (const a of actions) {
     const cmd = OP_COMMAND[a.op]?.(a.args ?? {})
     const gated = a.gated ? '  [needs approval]' : ''
-    lines.push(cmd ? `  • ${a.reason}  →  ${cmd}${gated}` : `  • ${a.reason}${gated}`)
+    lines.push(safeText(cmd ? `  • ${a.reason}  →  ${cmd}${gated}` : `  • ${a.reason}${gated}`))
   }
   return lines
 }

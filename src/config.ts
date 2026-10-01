@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 import { realpathSync } from 'node:fs'
 import { chmod, lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { ensureGitignore } from './gitignore.js'
-import { die, writeFileAtomicSync } from './util.js'
+import { die, safeText, writeFileAtomicSync } from './util.js'
 import { DEFAULT_ENV, ENVS, envForApiUrl, envFromEnvVar, normalizeUrl, type EnvName } from './env.js'
 
 const GLOBAL_DIR = join(homedir(), '.insta')
@@ -295,12 +295,6 @@ async function readLinkPlane(root: string): Promise<{ projectId: string; apiUrl:
   } catch {
     return null
   }
-}
-
-/** Text safe to echo to a terminal: C0 and C1 control characters and DEL removed — ESC and the
- *  single-byte C1 introducers (U+009B CSI among them) alike, so no escape sequence survives. */
-function safeText(text: string): string {
-  return String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
 }
 
 /** A control-plane URL safe to persist and to print: control characters removed, surrounding
