@@ -51,8 +51,6 @@ export function renderJsonConfig(slug: McpAgent, existing: string | null, url: s
   return JSON.stringify(root, null, 2) + '\n'
 }
 
-// A TOML basic string. Tab may stay raw. Every other control character, quote, and
-// backslash is escaped so Codex can still parse the file.
 export function tomlBasicString(value: string): string {
   const escaped = value.replace(/[\u0000-\u0008\u000A-\u001F\u007F\\"]/g, (ch) => {
     switch (ch) {
