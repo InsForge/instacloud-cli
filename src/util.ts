@@ -1,5 +1,6 @@
 // Output + small pure helpers (env serialization is unit-tested).
 import { createInterface } from 'node:readline'
+import { Writable } from 'node:stream'
 import { spawn } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, lstatSync, readlinkSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -265,15 +266,43 @@ export function serializeEnv(bundle: Record<string, string>): string {
   )
 }
 
-// Hidden password prompt (best-effort: mutes echo on a TTY).
-export function promptPassword(label = 'Password: '): Promise<string> {
-  return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout })
-    const stdout = process.stdout as NodeJS.WriteStream & { _writeToOutput?: (s: string) => void }
-    process.stdout.write(label)
-    let captured = ''
-    stdout._writeToOutput = (s: string) => { if (s.includes('\n')) process.stdout.write('\n') }
-    rl.on('line', (line) => { captured = line; rl.close() })
-    rl.on('close', () => resolve(captured))
+export function mutePasswordOutput(real: NodeJS.WritableStream): Writable {
+  return new Writable({
+    write(chunk, _encoding, callback) {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+      const endings = text.replace(/[^\r\n]/g, '')
+      if (endings.length) real.write(endings)
+      callback()
+    },
   })
+}
+
+export function promptPasswordFrom(
+  input: NodeJS.ReadableStream,
+  output: NodeJS.WritableStream,
+  label = 'Password: ',
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let value = ''
+    const rl = createInterface({
+      input,
+      output: mutePasswordOutput(output),
+      // TTY stdin needs raw mode even when stdout is redirected, or the terminal echoes secrets.
+      terminal: Boolean((input as NodeJS.ReadStream).isTTY),
+    })
+    output.write(label)
+    rl.on('SIGINT', () => {
+      reject(new CliCancel())
+      rl.close()
+    })
+    rl.on('line', (line) => {
+      value = line
+      rl.close()
+    })
+    rl.on('close', () => resolve(value))
+  })
+}
+
+export function promptPassword(label = 'Password: '): Promise<string> {
+  return promptPasswordFrom(process.stdin, process.stdout, label)
 }
