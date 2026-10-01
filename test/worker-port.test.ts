@@ -4,12 +4,13 @@ import type { AddressInfo } from 'node:net'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { expect, it } from 'vitest'
 import { cliVersion } from '../src/version.js'
 
 const entry = fileURLToPath(new URL('../src/index.ts', import.meta.url))
-const loader = new URL('../node_modules/tsx/dist/loader.mjs', import.meta.url).href
+const loader = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href
 
 it.each([0, 8080])('preserves port %i through service creation, image deploy and source deploy', async port => {
   const scratch = mkdtempSync(join(tmpdir(), 'insta-worker-port-'))
