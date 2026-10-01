@@ -4,6 +4,8 @@ Thanks for taking the time. Issues and pull requests are both welcome.
 
 ## Dev loop
 
+Development requires Node 20.19+, Node 22.12+, or Node 24+; the published CLI supports Node 18+.
+
 ```bash
 npm install
 npm test                       # vitest; tests use injected fakes, no docker or network

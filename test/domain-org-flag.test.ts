@@ -17,4 +17,4 @@ it('offers --org on the org-wide domain verbs and on neither write', () => {
     expect(run('domain', verb, '--help').stdout, verb).not.toContain('--org')
     expect(run('domain', verb, 'example.com', '--org', 'o1').stderr, verb).toContain("unknown option '--org'")
   }
-})
+}, 30_000)

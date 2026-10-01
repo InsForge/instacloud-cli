@@ -30,7 +30,7 @@ export type ManifestService = {
   healthcheck?: string
   volume?: boolean // needs a /data disk; the platform owns the size
   volumeGib?: number // registry-only field, kept for normalization
-  alwaysOn?: boolean // idle mode; undeclared = the platform default (always-on for compute)
+  alwaysOn?: boolean // idle mode; undeclared = the platform default (scale-to-zero for compute, always-on for a worker)
   command?: string // entrypoint command override (runtime field)
   mountPath?: string // absolute path for volume mount (runtime field)
   env?: ManifestEnv

@@ -2,9 +2,9 @@
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { realpathSync } from 'node:fs'
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { ensureGitignore } from './gitignore.js'
-import { die } from './util.js'
+import { die, writeFileAtomicSync } from './util.js'
 import { DEFAULT_ENV, ENVS, envForApiUrl, envFromEnvVar, normalizeUrl, type EnvName } from './env.js'
 
 const GLOBAL_DIR = join(homedir(), '.insta')
@@ -138,8 +138,9 @@ export async function readPersistedGlobal(): Promise<GlobalConfig> {
 }
 
 export async function writeGlobal(c: GlobalConfig): Promise<void> {
-  await mkdir(GLOBAL_DIR, { recursive: true })
-  await writeFile(GLOBAL_FILE, JSON.stringify(c, null, 2))
+  await mkdir(GLOBAL_DIR, { recursive: true, mode: 0o700 })
+  if (process.platform !== 'win32' && !(await lstat(GLOBAL_DIR)).isSymbolicLink()) await chmod(GLOBAL_DIR, 0o700)
+  writeFileAtomicSync(GLOBAL_FILE, JSON.stringify(c, null, 2))
 }
 
 /** The home directory is never a project root. `~/.insta/` is this CLI's GLOBAL config directory,
