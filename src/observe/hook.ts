@@ -23,11 +23,12 @@ export function recordFindings(event: ToolEvent, baseDir: string): number {
     cwd: event.cwd ?? null,
   }
   mkdirSync(instaDir, { recursive: true, mode: 0o700 })
-  try { chmodSync(instaDir, 0o700) } catch { /* Windows ACLs do not store POSIX modes */ }
+  // Windows ACLs do not store these modes. On POSIX a failure must surface: main() prints it.
+  if (process.platform !== 'win32') chmodSync(instaDir, 0o700)
   const lines = findings.map((f) => JSON.stringify({ ...common, ...f })).join('\n') + '\n'
   const auditPath = join(instaDir, 'audit.jsonl')
   appendFileSync(auditPath, lines, { encoding: 'utf8', mode: 0o600 })
-  try { chmodSync(auditPath, 0o600) } catch { /* same */ }
+  if (process.platform !== 'win32') chmodSync(auditPath, 0o600)
   return findings.length
 }
 
