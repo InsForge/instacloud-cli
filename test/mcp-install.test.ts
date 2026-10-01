@@ -2,7 +2,7 @@ import { test, expect } from 'vitest'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { configPath, detectAgents, installFor, renderCodexConfig } from '../src/commands/mcp.js'
+import { configPath, detectAgents, installFor, renderCodexConfig, tomlBasicString } from '../src/commands/mcp.js'
 import { MCP_SERVER_NAME, DEFAULT_MCP_URL } from '../src/commands/setup.js'
 
 async function tmpHome(): Promise<string> { return fs.mkdtemp(path.join(os.tmpdir(), 'insta-mcp-test-')) }
@@ -60,6 +60,35 @@ test('codex: TOML table appended once, existing content preserved', async () => 
 test('renderCodexConfig appends a newline separator when the file lacks one', () => {
   const out = renderCodexConfig('a = 1', 'https://u')!
   expect(out.startsWith('a = 1\n')).toBe(true)
+})
+
+test('renderCodexConfig keeps a quote or newline inside the url string', () => {
+  const out = renderCodexConfig(null, 'https://x"\n[mcp_servers.evil]\ncommand = "calc"')!
+  expect(out).toContain('url = "https://x\\"\\n[mcp_servers.evil]\\ncommand = \\"calc\\""')
+  expect(out.split('\n').some((line) => line.startsWith('command ='))).toBe(false)
+})
+
+test('renderCodexConfig keeps a backslash, quote, and newline inside the url string', () => {
+  const out = renderCodexConfig(null, 'https://x\\"\r\n[mcp_servers.evil]\ncommand = "calc"')!
+  expect(out.endsWith('url = "https://x\\\\\\"\\r\\n[mcp_servers.evil]\\ncommand = \\"calc\\""\n')).toBe(true)
+})
+
+test('tomlBasicString escapes backslash and quote', () => {
+  expect(tomlBasicString('a\\b"c')).toBe('"a\\\\b\\"c"')
+})
+
+test('tomlBasicString escapes each control character it has a short form for', () => {
+  expect(tomlBasicString('a\bb')).toBe('"a\\bb"')
+  expect(tomlBasicString('a\fb')).toBe('"a\\fb"')
+  expect(tomlBasicString('a\rb')).toBe('"a\\rb"')
+  expect(tomlBasicString('a\nb')).toBe('"a\\nb"')
+})
+
+test('tomlBasicString escapes remaining control characters and leaves tab raw', () => {
+  expect(tomlBasicString('a\u0000b\fc')).toBe('"a\\u0000b\\fc"')
+  expect(tomlBasicString('a\u000Bb')).toBe('"a\\u000bb"')
+  expect(tomlBasicString('a\u007Fb')).toBe('"a\\u007fb"')
+  expect(tomlBasicString('tab\there')).toBe('"tab\there"')
 })
 
 test('unparseable JSON config is skipped, never clobbered', async () => {
