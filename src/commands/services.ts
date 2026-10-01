@@ -55,13 +55,12 @@ export function parseCount(raw: string): number {
   return n
 }
 
-// Parse a TCP port. Junk fails here rather than reaching the API as NaN (the parseCpu lesson).
-// Decimal digits only, as parseVolumeGib: `Number()` alone would quietly read 0x1f90 as 8080 and
-// 1e3 as 1000, and a port written in hex is a typo worth reporting, not one worth honouring.
-export function parsePort(raw: string): number {
+// Keep TCP-only callers strict; port 0 is reserved for explicitly opted-in compute workers.
+export function parsePort(raw: string, opts: { allowZero?: boolean } = {}): number {
+  const min = opts.allowZero ? 0 : 1
   const m = /^\s*(\d+)\s*$/.exec(raw)
   const n = m ? Number(m[1]) : NaN
-  if (!Number.isInteger(n) || n < 1 || n > 65535) throw new Error(`port must be an integer between 1 and 65535, got: ${raw}`)
+  if (!Number.isInteger(n) || n < min || n > 65535) throw new Error(`port must be an integer between ${min} and 65535, got: ${raw}`)
   return n
 }
 
@@ -123,7 +122,7 @@ export type ServicesAddOpts = { branch?: string; public?: boolean; image?: strin
 export function servicesAddRequestBody(type: string, name: string, branch: string | undefined, opts: ServicesAddOpts): Record<string, unknown> {
   return {
     type, name, ...(branch ? { branch } : {}), public: !!opts.public,
-    ...(opts.image ? { image: opts.image } : {}), ...(opts.port ? { port: parsePort(opts.port) } : {}),
+    ...(opts.image ? { image: opts.image } : {}), ...(opts.port !== undefined ? { port: parsePort(opts.port, { allowZero: type === 'compute' }) } : {}),
     ...(opts.region ? { region: opts.region } : {}),
     // Sent whenever the flag was given, false included: compute is born always-on by default,
     // so `--no-always-on` must reach the API as an explicit false. Omitted means the platform default.
@@ -139,9 +138,9 @@ export async function servicesAdd(type: string, name: string, opts: ServicesAddO
   if (opts.public && type !== 'storage') throw new Error('--public is only valid for storage services')
   if (opts.region && type === 'storage') throw new Error('--region is not valid for storage services')
   if (opts.image && type !== 'compute') throw new Error('--image is only valid for compute services')
-  if (opts.port) {
+  if (opts.port !== undefined) {
     if (type !== 'compute') throw new Error('--port is only valid for compute services')
-    parsePort(opts.port) // junk fails here, before any config/network access
+    parsePort(opts.port, { allowZero: true })
   }
   // Presence, not truthiness: `--no-always-on` is an explicit false and is just as compute-only.
   if (opts.alwaysOn !== undefined && type !== 'compute') throw new Error(alwaysOnTypeError(type))

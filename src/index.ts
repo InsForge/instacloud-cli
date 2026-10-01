@@ -153,7 +153,7 @@ svc.command('add [type] [name]').description('Provision a service on demand (com
   .option('--region <region>', 'region for postgres/compute/managed databases, e.g. us-east (see `insta config regions`)')
   .option('--public', 'storage only: serve the bucket with anonymous public-read (default private)')
   .option('--image <url>', 'compute only: run this container image at creation')
-  .option('--port <n>', 'compute only: port the image listens on (default 8080)')
+  .option('--port <n>', 'compute only: port the image listens on (default 8080; 0 for a worker without a routed port)')
   .option('--always-on', 'compute only: create as always-on — never scales to zero (the default for new compute services; all plans; billing is actual usage either way)')
   .option('--no-always-on', 'compute only: create as scale-to-zero — idle machines suspend and wake on the next request')
   .option('--mount-path <path>', 'compute only: container mount path for a new volume (requires --volume; default /data)')
@@ -539,7 +539,7 @@ buildCmd.command('logs <build-id>').description('Read source-build output for a 
 
 // ---- deploy ----
 program.command('deploy [dir]').description('Deploy a source directory (built remotely; on insta-compute a Dockerfile is optional and nixpacks detects the runtime) or a prebuilt --image to a branch compute group')
-  .option('--image <url>', 'prebuilt container image to deploy (instead of a source dir)').option('--branch <b>').option('--group <g>').option('--port <p>')
+  .option('--image <url>', 'prebuilt container image to deploy (instead of a source dir)').option('--branch <b>').option('--group <g>').option('--port <p>', 'port the app listens on (0 for a worker without a routed port)')
   .option('--websocket', 'run a WebSocket app (larger guest + connection-based concurrency)')
   .option('--replace-source', 'the service deploys from a connected GitHub repo: switch it to this image and remove the repo connection (admin); without it such a deploy is refused')
   .option('--json', 'print the deploy result as JSON (build progress goes to stderr)')

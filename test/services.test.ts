@@ -33,6 +33,14 @@ describe('parseCount', () => {
 })
 
 describe('parsePort', () => {
+  it('accepts worker zero only when opted in, retaining TCP ports', () => {
+    for (const [raw, expected] of [['0', 0], [' 00 ', 0], ['1', 1], ['8080', 8080], ['65535', 65535]] as const) {
+      expect(parsePort(raw, { allowZero: true })).toBe(expected)
+    }
+    for (const raw of ['-1', '65536', '0.5', '0x0', '1e3', '', 'abc']) {
+      expect(() => parsePort(raw, { allowZero: true })).toThrow(/between 0 and 65535/)
+    }
+  })
   it('parses ports in range', () => {
     expect(parsePort('8080')).toBe(8080)
     expect(parsePort('1')).toBe(1)
@@ -126,6 +134,9 @@ describe('servicesAddRequestBody', () => {
     expect(b).toMatchObject({ image: 'ghcr.io/acme/api:latest', port: 3000 })
     expect(b.port).toBe(3000) // Number, not the raw string
   })
+  it('preserves port zero in a compute creation body', () => {
+    expect(servicesAddRequestBody('compute', 'worker', 'main', { port: '0' })).toMatchObject({ port: 0 })
+  })
   it('omits branch when undefined', () => {
     expect(servicesAddRequestBody('postgres', 'db', undefined, {})).toEqual({ type: 'postgres', name: 'db', public: false })
   })
@@ -163,6 +174,9 @@ describe('servicesAdd validation (throws before any network/config access)', () 
   })
   it('rejects --port for a non-compute type', async () => {
     await expect(servicesAdd('postgres', 'db', { port: '3000' })).rejects.toThrow(/--port is only valid for compute services/)
+    for (const type of ['postgres', 'redis', 'mysql', 'mongodb']) {
+      await expect(servicesAdd(type, 'db', { port: '0' })).rejects.toThrow(/--port is only valid for compute services/)
+    }
   })
   it('rejects --always-on for a non-compute type, pointing at that type\'s own command', async () => {
     await expect(servicesAdd('postgres', 'db', { alwaysOn: true })).rejects.toThrow(/--always-on \/ --no-always-on is only valid for compute services/)
