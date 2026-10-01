@@ -16,7 +16,7 @@ export async function resolveOrgId(opts: OrgOpt): Promise<string> {
 export type BillingOverview = {
   window: { from: number; to: number }
   tier: string; billingStatus: string; subscriptionStatus: string | null
-  pendingPlanChange?: { fromTier: string; toTier: string; effectiveAt: string; status: 'awaiting_payment' | 'scheduled'; includedUsd: number } | null
+  pendingPlanChange?: { changeKind?: 'upgrade' | 'downgrade'; fromTier: string; toTier: string; effectiveAt: string; status: 'awaiting_payment' | 'scheduled'; includedUsd: number } | null
   // `creditBalanceUsd` is the wallet, and nothing else. The API also returns a legacy `creditsUsd`
   // that adds the remaining plan allowance to the wallet balance — a single number that means
   // neither thing. It is deliberately NOT read here: included usage and credits feed different
@@ -52,8 +52,13 @@ export function billingLines(s: BillingOverview, org?: string): string[] {
     lines.push(pending.status === 'scheduled'
       ? `next plan:       ${pending.toTier} at ${boundary}`
       : `plan change:     preparing ${pending.toTier}; requested boundary ${boundary}`)
-    lines.push(`next allowance:  $${Number(pending.includedUsd).toFixed(2)} (available after cutover)`)
-    lines.push('A plan change is pending; contact support for billing changes.')
+    if (pending.changeKind === 'upgrade') {
+      lines.push(`full-cycle allowance: $${Number(pending.includedUsd).toFixed(2)} (next renewal)`)
+      lines.push('Current cycle: proportional allowance increase; existing usage and renewal date are preserved.')
+    } else lines.push(`next allowance:  $${Number(pending.includedUsd).toFixed(2)} (available after cutover)`)
+    lines.push(pending.changeKind === 'downgrade'
+      ? 'Current paid plan remains active until period end. Withdraw this downgrade in Console Plans before it takes effect.'
+      : 'A plan change is pending; contact support for billing changes.')
   }
   if (s.tier === 'enterprise') {
     lines.push('Enterprise billing is managed by staff; payment failure does not change the plan.')

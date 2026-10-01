@@ -189,3 +189,16 @@ describe('redeemErrorMessage', () => {
     expect(redeemErrorMessage(undefined, 'fallback message')).toBe('fallback message')
   })
 })
+
+
+it('describes proportional in-cycle upgrades without promising a second full allowance', () => {
+  const lines = billingLines({ ...base, pendingPlanChange: { fromTier: 'pro', toTier: 'team', effectiveAt: '2026-09-21T00:00:00Z', status: 'scheduled', includedUsd: 50, changeKind: 'upgrade' } }).join('\n')
+  expect(lines).toContain('proportional allowance increase')
+  expect(lines).toContain('full-cycle allowance: $50.00 (next renewal)')
+  expect(lines).not.toContain('available after cutover')
+})
+it('directs pending downgrade withdrawal to Console Plans', () => {
+  const lines = billingLines({ ...base, pendingPlanChange: { fromTier: 'pro', toTier: 'free', effectiveAt: '2026-10-01T13:14:15Z', status: 'scheduled', includedUsd: 10, changeKind: 'downgrade' } }).join('\n')
+  expect(lines).toContain('2026-10-01 13:14:15 UTC')
+  expect(lines).toContain('Withdraw this downgrade in Console Plans')
+})
