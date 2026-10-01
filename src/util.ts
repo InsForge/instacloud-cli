@@ -267,12 +267,14 @@ export function serializeEnv(bundle: Record<string, string>): string {
 }
 
 // Readline echoes through its own output stream, not process.stdout._writeToOutput.
-// Drop every chunk that is not a line ending so a typed password stays off the screen.
+// Forward only line endings so a typed password stays off the screen, even when one chunk
+// carries both the secret and the newline.
 export function mutePasswordOutput(real: NodeJS.WritableStream): Writable {
   return new Writable({
     write(chunk, _encoding, callback) {
       const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
-      if (/[\r\n]/.test(text)) real.write(text)
+      const endings = text.replace(/[^\r\n]/g, '')
+      if (endings.length) real.write(endings)
       callback()
     },
   })
@@ -280,7 +282,9 @@ export function mutePasswordOutput(real: NodeJS.WritableStream): Writable {
 
 // Hidden password prompt. The label is written to the real stdout; keystrokes go to a mute stream.
 // `close` covers stdin ending without a newline (Ctrl-D, /dev/null, an empty pipe). A real line
-// is stored first, then close resolves once.
+// is stored first, then close resolves once. Terminal mode follows stdin alone: a TTY stdin with
+// redirected stdout still needs raw mode, or the terminal itself echoes the keystrokes. Ctrl-C
+// closes the interface (readline does that when no 'SIGINT' listener is attached).
 export function promptPasswordFrom(
   input: NodeJS.ReadableStream,
   output: NodeJS.WritableStream,
@@ -297,7 +301,7 @@ export function promptPasswordFrom(
     const rl = createInterface({
       input,
       output: mutePasswordOutput(output),
-      terminal: Boolean((input as NodeJS.ReadStream).isTTY && (output as NodeJS.WriteStream).isTTY),
+      terminal: Boolean((input as NodeJS.ReadStream).isTTY),
     })
     output.write(label)
     rl.on('line', (line) => {
