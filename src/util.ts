@@ -1,5 +1,6 @@
 // Output + small pure helpers (env serialization is unit-tested).
 import { createInterface } from 'node:readline'
+import { Writable } from 'node:stream'
 import { spawn } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, lstatSync, readlinkSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -265,15 +266,26 @@ export function serializeEnv(bundle: Record<string, string>): string {
   )
 }
 
-// Hidden password prompt (best-effort: mutes echo on a TTY).
+// Readline echoes through its own output stream, not process.stdout._writeToOutput.
+// Drop every chunk that is not a line ending so a typed password stays off the screen.
+export function mutePasswordOutput(real: NodeJS.WritableStream): Writable {
+  return new Writable({
+    write(chunk, _encoding, callback) {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+      if (/[\r\n]/.test(text)) real.write(text)
+      callback()
+    },
+  })
+}
+
+// Hidden password prompt. The label is written to the real stdout; keystrokes go to a mute stream.
 export function promptPassword(label = 'Password: '): Promise<string> {
   return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout })
-    const stdout = process.stdout as NodeJS.WriteStream & { _writeToOutput?: (s: string) => void }
+    const rl = createInterface({ input: process.stdin, output: mutePasswordOutput(process.stdout), terminal: true })
     process.stdout.write(label)
-    let captured = ''
-    stdout._writeToOutput = (s: string) => { if (s.includes('\n')) process.stdout.write('\n') }
-    rl.on('line', (line) => { captured = line; rl.close() })
-    rl.on('close', () => resolve(captured))
+    rl.once('line', (line) => {
+      rl.close()
+      resolve(line)
+    })
   })
 }
