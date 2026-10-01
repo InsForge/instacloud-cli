@@ -19,12 +19,18 @@ const MEMBERS: MemberRecord[] = [
   { user_id: 'u_dev', role: 'member', email: 'Dev@Example.com' },
 ]
 
-type Script = { orgs?: unknown[]; tokenScope?: TokenScopeInfo }
+type Script = { orgs?: unknown[]; tokenScope?: TokenScopeInfo; gated?: boolean }
+
+const GATED = { status: 'approval_required', approvalId: 'apr_1', action: 'org.invite' }
 
 function fakeApi(script: Script = {}) {
   const calls: Array<{ method: string; path: string; body?: any }> = []
   const api: OrgApi = {
     config: { tokenScope: script.tokenScope },
+    rawRequest: async (method, path, body) => {
+      if (script.gated && method !== 'GET') { calls.push({ method, path, body }); return { status: 202, body: GATED } }
+      return { status: 200, body: await api.request(method, path, body) }
+    },
     request: async (method, path, body) => {
       calls.push({ method, path, body })
       if (method === 'GET' && path === '/orgs') return { orgs: script.orgs ?? [] }
@@ -132,6 +138,31 @@ describe('org member', () => {
     const { api, calls } = fakeApi()
     await expect(memberRole('u_dev', 'developer', { org: ORG_A.id }, { api, linked: unlinked })).rejects.toThrow()
     expect(calls).toEqual([])
+  })
+})
+
+describe('gated writes and bad input', () => {
+  it('an empty <user> stops before matching a member with no email', async () => {
+    const { err } = capture()
+    const { api, calls } = fakeApi()
+    await expect(memberRemove('', { org: ORG_A.id }, { api, linked: unlinked })).rejects.toThrow()
+    expect(calls).toEqual([])
+    expect(err()).toMatch(/<user> is required/)
+  })
+  it('a 202 approval_required is not reported as success', async () => {
+    const { out, err } = capture()
+    const { api } = fakeApi({ gated: true })
+    await memberInvite('new@example.com', { org: ORG_A.id }, { api, linked: unlinked })
+    expect(out()).not.toMatch(/invited/)
+    expect(err()).toMatch(/approval required/)
+    expect(process.exitCode).toBe(2)
+  })
+  it('a gated remove prints the envelope under --json and exits 2', async () => {
+    const { out } = capture()
+    const { api } = fakeApi({ gated: true })
+    await memberRemove('u_dev', { org: ORG_A.id, json: true }, { api, linked: unlinked })
+    expect(JSON.parse(out())).toMatchObject({ status: 'approval_required', approvalId: 'apr_1' })
+    expect(process.exitCode).toBe(2)
   })
 })
 

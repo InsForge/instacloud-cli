@@ -1,6 +1,6 @@
 import { ApiClient, linkedProject } from '../api.js'
 import type { ProjectConfig, TokenScopeInfo } from '../config.js'
-import { die, info, printJson } from '../util.js'
+import { die, handleApproval, info, printJson } from '../util.js'
 
 export async function orgList(opts: { json?: boolean }): Promise<void> {
   const api = await ApiClient.load()
@@ -28,6 +28,7 @@ export type InvitationRecord = { id: string; email: string; role: 'admin' | 'mem
 // The client surface these commands need — ApiClient in prod, a fake in tests.
 export type OrgApi = {
   request: (method: string, path: string, body?: unknown) => Promise<any>
+  rawRequest: (method: string, path: string, body?: unknown) => Promise<{ status: number; body: any }>
   config: { tokenScope?: TokenScopeInfo }
 }
 export type OrgDeps = { api?: OrgApi; linked?: () => Promise<ProjectConfig | null> }
@@ -55,6 +56,13 @@ export async function resolveOrg(api: OrgApi, opts: OrgOpts, linked: () => Promi
   die(`several orgs — pass --org <id>:\n${list}`)
 }
 
+// The writes go through the governance gate like any other mutation: a 202 approval_required means
+// nothing ran yet, so handleApproval prints the approval hint and exits 2 instead of claiming success.
+async function write(api: OrgApi, method: string, path: string, body?: unknown, json?: boolean): Promise<any | null> {
+  const res = await api.rawRequest(method, path, body)
+  return handleApproval(res, json) ? null : res.body
+}
+
 const orgPath = (orgId: string, rest: string): string => `/orgs/${encodeURIComponent(orgId)}/${rest}`
 
 async function listMembers(api: OrgApi, orgId: string): Promise<MemberRecord[]> {
@@ -63,6 +71,7 @@ async function listMembers(api: OrgApi, orgId: string): Promise<MemberRecord[]> 
 
 /** `<user>` is a user id or an email (case-insensitive) — the console shows emails, the API takes ids. */
 async function resolveMember(api: OrgApi, orgId: string, user: string): Promise<MemberRecord> {
+  if (!user.trim()) die('<user> is required: a user id or an email (see: insta org member list)')
   const members = await listMembers(api, orgId)
   const want = user.toLowerCase()
   const m = members.find((x) => x.user_id === user || (x.email ?? '').toLowerCase() === want)
@@ -85,7 +94,8 @@ export async function memberInvite(email: string, opts: OrgOpts & { role?: strin
   if (!(INVITE_ROLES as readonly string[]).includes(role)) die(`--role must be ${INVITE_ROLES.join('|')} (owners are made with: insta org member role <user> owner)`)
   const api = await loadApi(deps)
   const orgId = await resolveOrg(api, opts, deps.linked)
-  const res = (await api.request('POST', orgPath(orgId, 'invitations'), { email, role })) as { id?: string }
+  const res = (await write(api, 'POST', orgPath(orgId, 'invitations'), { email, role }, opts.json)) as { id?: string } | null
+  if (!res) return
   if (opts.json) return printJson({ ...res, orgId, email, role })
   info(`invited ${email} to org ${orgId} as ${role} — they accept from the emailed link`)
 }
@@ -94,7 +104,7 @@ export async function memberRemove(user: string, opts: OrgOpts, deps: OrgDeps = 
   const api = await loadApi(deps)
   const orgId = await resolveOrg(api, opts, deps.linked)
   const m = await resolveMember(api, orgId, user)
-  await api.request('DELETE', orgPath(orgId, `members/${encodeURIComponent(m.user_id)}`))
+  if (!(await write(api, 'DELETE', orgPath(orgId, `members/${encodeURIComponent(m.user_id)}`), undefined, opts.json))) return
   if (opts.json) return printJson({ ok: true, orgId, userId: m.user_id })
   info(`removed ${who(m)} from org ${orgId}`)
 }
@@ -104,7 +114,7 @@ export async function memberRole(user: string, role: string, opts: OrgOpts, deps
   const api = await loadApi(deps)
   const orgId = await resolveOrg(api, opts, deps.linked)
   const m = await resolveMember(api, orgId, user)
-  await api.request('PUT', orgPath(orgId, `members/${encodeURIComponent(m.user_id)}`), { role })
+  if (!(await write(api, 'PUT', orgPath(orgId, `members/${encodeURIComponent(m.user_id)}`), { role }, opts.json))) return
   if (opts.json) return printJson({ ok: true, orgId, userId: m.user_id, role })
   info(`${who(m)} is now ${role} in org ${orgId}`)
 }
@@ -121,7 +131,7 @@ export async function invitationList(opts: OrgOpts, deps: OrgDeps = {}): Promise
 export async function invitationRevoke(id: string, opts: OrgOpts, deps: OrgDeps = {}): Promise<void> {
   const api = await loadApi(deps)
   const orgId = await resolveOrg(api, opts, deps.linked)
-  await api.request('DELETE', orgPath(orgId, `invitations/${encodeURIComponent(id)}`))
+  if (!(await write(api, 'DELETE', orgPath(orgId, `invitations/${encodeURIComponent(id)}`), undefined, opts.json))) return
   if (opts.json) return printJson({ ok: true, orgId, id })
   info(`revoked invitation ${id}`)
 }

@@ -113,7 +113,7 @@ const orgCmd = program.command('org').description('Manage organizations')
 orgCmd.command('list').option('--json').action(guard((o) => org.orgList(o)))
 orgCmd.command('create <name>').option('--json').action(guard((name, o) => org.orgCreate(name, o)))
 const orgMember = orgCmd.command('member').description('Manage org members (invite, list, remove, change role)')
-const orgFlag = ['--org <id>', "org to act on (default: linked project's org, or your only org)"] as const
+const orgFlag = ['--org <id>', "org to act on (default: a scoped login's org, else the linked project's org, else your only org)"] as const
 orgMember.command('list').description('List members of the org').option(...orgFlag).option('--json').action(guard((o) => org.memberList(o)))
 orgMember.command('invite <email>').description('Invite someone by email; they accept from the emailed link (admin+)')
   .option('--role <role>', 'admin | member', 'member').option(...orgFlag).option('--json')
