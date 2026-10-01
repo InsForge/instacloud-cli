@@ -77,6 +77,13 @@ export function parseVolumeGib(raw: string): number {
   return n
 }
 
+// Decimal digits only, as parsePort; which majors exist is the platform's answer (a 400 naming them).
+export function parsePgVersion(raw: string): number {
+  const m = /^\s*(\d+)\s*$/.exec(raw)
+  if (!m) throw new Error(`invalid Postgres major: ${raw} (a whole major version, e.g. 17)`)
+  return Number(m[1])
+}
+
 // Resolve a service id from a `services list` result by (type, name).
 export function resolveServiceId(services: Array<{ id: string; type: string; name: string }>, type: string, name: string): string {
   const svc = services.find((s) => s.type === type && s.name === name)
@@ -108,7 +115,7 @@ function defaultDatabasePort(type: string): number {
 
 // ---- commands ----
 
-export type ServicesAddOpts = { branch?: string; public?: boolean; image?: string; port?: string; region?: string; alwaysOn?: boolean; volume?: string; mountPath?: string; json?: boolean }
+export type ServicesAddOpts = { branch?: string; public?: boolean; image?: string; port?: string; region?: string; alwaysOn?: boolean; volume?: string; mountPath?: string; pgVersion?: string; json?: boolean }
 
 // Map service-add options to the platform POST body. Pure, so it's unit-tested without a network
 // mock (mirrors deployRequestBody in deploy.ts). Validation (which options are valid for which
@@ -123,6 +130,7 @@ export function servicesAddRequestBody(type: string, name: string, branch: strin
     ...(opts.alwaysOn !== undefined ? { alwaysOn: opts.alwaysOn } : {}),
     ...(opts.volume !== undefined ? { volumeGib: parseVolumeGib(opts.volume) } : {}),
     ...(opts.mountPath !== undefined ? { volumeMountPath: opts.mountPath } : {}),
+    ...(opts.pgVersion !== undefined ? { pgVersion: parsePgVersion(opts.pgVersion) } : {}),
   }
 }
 
@@ -141,6 +149,10 @@ export async function servicesAdd(type: string, name: string, opts: ServicesAddO
   if (opts.volume !== undefined) {
     if (type !== 'compute') throw new Error(volumeTypeError(type))
     parseVolumeGib(opts.volume) // junk fails here, before any config/network access
+  }
+  if (opts.pgVersion !== undefined) {
+    if (type !== 'postgres') throw new Error('--pg-version is only valid for postgres services')
+    parsePgVersion(opts.pgVersion)
   }
   const api = await ApiClient.load()
   const p = await requireProject()
