@@ -41,7 +41,7 @@ describe('parseMemoryMb', () => {
 import { parseCpu, fmtMb } from '../src/commands/compute.js'
 import { fetchDbInstance } from '../src/commands/postgres.js'
 import { ApiError } from '../src/api.js'
-import { parseDbCpu, parseDbMemory, fmtMib, alwaysOnArgs, alwaysOnLine, alwaysOnSetLine, settleScaleToZero } from '../src/commands/postgres.js'
+import { parseDbCpu, parseDbMemory, fmtMib, alwaysOnArgs, alwaysOnLine, alwaysOnSetLine, settleScaleToZero, restartLine } from '../src/commands/postgres.js'
 
 describe('parseCpu (compute --cpu override)', () => {
   it('accepts exactly the provider grid the help text advertises', () => {
@@ -164,5 +164,13 @@ describe('postgres always-on set confirmation', () => {
     let calls = 0
     expect(await settleScaleToZero({}, false, async () => { calls++; return {} }, wait)).toEqual({})
     expect(calls).toBe(0)
+  })
+})
+
+describe('postgres restart confirmation', () => {
+  it('says restarted only when the platform finished it', () => {
+    expect(restartLine('db', { state: 'running' })).toBe('postgres db: restarted — ALTER SYSTEM settings that need a restart are now in effect')
+    expect(restartLine('db', { state: 'running', pending: true })).toMatch(/still in progress/)
+    expect(restartLine('db', { state: 'suspended' })).toMatch(/suspended, not restarted/)
   })
 })
