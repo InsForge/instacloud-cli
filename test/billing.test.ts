@@ -79,7 +79,7 @@ describe('billingLines', () => {
 
   it('suspended after a cancellation on enterprise: no self-serve command exists, so it says so', () => {
     const out = billingLines({ ...base, tier: 'enterprise', billingStatus: 'suspended', subscriptionStatus: 'canceled' }).join('\n')
-    expect(out).toContain('contact support')
+    expect(out.toLowerCase()).toContain('contact support')
     expect(out).not.toContain('insta billing subscribe')
   })
 
@@ -112,6 +112,34 @@ describe('billingLines', () => {
     const out = billingLines({ ...base, byDimension: [], byProject: [] }).join('\n')
     expect(out).not.toContain('by dimension:')
     expect(out).not.toContain('by project:')
+  })
+
+  it('shows the scheduled UTC boundary while keeping the current tier and allowance', () => {
+    const out = billingLines({ ...base, pendingPlanChange: { fromTier: 'pro', toTier: 'enterprise',
+      effectiveAt: '2026-09-29T00:00:00Z', status: 'scheduled', includedUsd: 50 } }).join('\n')
+    expect(out).toContain('tier:            pro')
+    expect(out).toContain('included usage:  $25.00')
+    expect(out).toContain('next plan:       enterprise at 2026-09-29 00:00:00 UTC')
+    expect(out).toContain('next allowance:  $50.00 (available after cutover)')
+  })
+
+  it('does not present preparation as scheduled or suggest a blocked checkout', () => {
+    const out = billingLines({ ...base, billingStatus: 'suspended', subscriptionStatus: 'canceled',
+      pendingPlanChange: { fromTier: 'pro', toTier: 'team', effectiveAt: '2026-09-29T00:00:00Z',
+        status: 'awaiting_payment', includedUsd: 50 } }).join('\n')
+    expect(out).toContain('preparing team; requested boundary 2026-09-29 00:00:00 UTC')
+    expect(out).not.toContain('next plan:')
+    expect(out).not.toContain('insta billing subscribe')
+    expect(out).not.toContain('insta billing portal')
+  })
+
+  it.each(['unpaid', 'past_due', 'canceled', 'active'])('keeps Enterprise staff-managed with subscription status %s', subscriptionStatus => {
+    const out = billingLines({ ...base, tier: 'enterprise', billingStatus: 'suspended', subscriptionStatus }).join('\n')
+    expect(out).toContain('Enterprise billing is managed by staff')
+    expect(out).toContain('payment failure does not change the plan')
+    expect(out).not.toContain('insta billing subscribe')
+    expect(out).not.toContain('insta billing portal')
+    expect(out).not.toContain('resubscribe')
   })
 })
 
@@ -160,4 +188,17 @@ describe('redeemErrorMessage', () => {
     expect(redeemErrorMessage('something_new', 'fallback message')).toBe('fallback message')
     expect(redeemErrorMessage(undefined, 'fallback message')).toBe('fallback message')
   })
+})
+
+
+it('describes proportional in-cycle upgrades without promising a second full allowance', () => {
+  const lines = billingLines({ ...base, pendingPlanChange: { fromTier: 'pro', toTier: 'team', effectiveAt: '2026-09-21T00:00:00Z', status: 'scheduled', includedUsd: 50, changeKind: 'upgrade' } }).join('\n')
+  expect(lines).toContain('proportional allowance increase')
+  expect(lines).toContain('full-cycle allowance: $50.00 (next renewal)')
+  expect(lines).not.toContain('available after cutover')
+})
+it('directs pending downgrade withdrawal to Console Plans', () => {
+  const lines = billingLines({ ...base, pendingPlanChange: { fromTier: 'pro', toTier: 'free', effectiveAt: '2026-10-01T13:14:15Z', status: 'scheduled', includedUsd: 10, changeKind: 'downgrade' } }).join('\n')
+  expect(lines).toContain('2026-10-01 13:14:15 UTC')
+  expect(lines).toContain('Withdraw this downgrade in Console Plans')
 })

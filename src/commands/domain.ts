@@ -399,7 +399,19 @@ export async function zoneDelegate(domainName: string, opts: RecordsOpts, deps?:
 
 export async function zoneList(opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
   const { api, orgId } = await orgDeps(opts, deps)
-  const r = await api.request<{ items: OrgZone[] }>('GET', zonePath(orgId))
+  const r: { items: OrgZone[] } = { items: [] }
+  let cursor: string | null | undefined
+  const seen = new Set<string>()
+  do {
+    const path = `${zonePath(orgId)}?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+    const page = await api.request<{ items: OrgZone[]; nextCursor?: string | null }>('GET', path)
+    r.items.push(...page.items)
+    cursor = page.nextCursor
+    if (cursor) {
+      if (seen.has(cursor)) throw new Error('zone listing returned a repeated pagination cursor')
+      seen.add(cursor)
+    }
+  } while (cursor)
   if (opts.json) return printJson(r)
   if (!r.items.length) return info('no delegated zones — start one: insta domain zone delegate <domain>')
   for (const z of r.items) for (const line of zoneLines(z, opts.org)) info(line)

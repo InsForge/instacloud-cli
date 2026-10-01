@@ -582,7 +582,7 @@ bill.command('subscribe <tier>').description('Subscribe the org to a paid tier (
 bill.command('redeem <code>').description("Redeem a one-time credit code into the org's wallet")
   .option('--org <id>').option('--json')
   .action(guard((code, o) => billingRedeem(code, o)))
-bill.command('portal').description('Open the Stripe Customer Portal (change plan / card / cancel)')
+bill.command('portal').description('Open Stripe payment-method management (owner/admin)')
   .option('--org <id>').option('--no-open', 'print the URL instead of opening a browser').option('--json')
   .action(guard((o) => billingPortal(o)))
 bill.command('usage').description('Usage for the current billing cycle by billing dimension (org by default; --proj for one project)')
