@@ -282,7 +282,7 @@ export function promptPasswordFrom(
   output: NodeJS.WritableStream,
   label = 'Password: ',
 ): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let value = ''
     const rl = createInterface({
       input,
@@ -291,6 +291,10 @@ export function promptPasswordFrom(
       terminal: Boolean((input as NodeJS.ReadStream).isTTY),
     })
     output.write(label)
+    rl.on('SIGINT', () => {
+      reject(new CliCancel())
+      rl.close()
+    })
     rl.on('line', (line) => {
       value = line
       rl.close()

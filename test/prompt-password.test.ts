@@ -1,6 +1,6 @@
 import { PassThrough, Readable, Writable } from 'node:stream'
 import { describe, expect, it } from 'vitest'
-import { mutePasswordOutput, promptPasswordFrom } from '../src/util.js'
+import { CliCancel, mutePasswordOutput, promptPasswordFrom } from '../src/util.js'
 
 function capture(): { output: Writable; text: () => string } {
   let written = ''
@@ -82,13 +82,14 @@ describe('promptPasswordFrom', () => {
       expect(text()).not.toContain('secret')
     })
 
-    it('finishes on Ctrl-C instead of hanging', async () => {
+    it('cancels on Ctrl-C without submitting a password', async () => {
       const { input, rawModes } = fakeTtyInput()
       const { output } = capture()
       const answer = promptPasswordFrom(input, output)
+      const cancelled = expect(answer).rejects.toBeInstanceOf(CliCancel)
       input.write('sec')
       input.write('\x03')
-      await expect(answer).resolves.toBe('')
+      await cancelled
       expect(rawModes.at(-1)).toBe(false)
     })
   })
