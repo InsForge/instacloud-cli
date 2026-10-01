@@ -279,13 +279,35 @@ export function mutePasswordOutput(real: NodeJS.WritableStream): Writable {
 }
 
 // Hidden password prompt. The label is written to the real stdout; keystrokes go to a mute stream.
-export function promptPassword(label = 'Password: '): Promise<string> {
+// `close` covers stdin ending without a newline (Ctrl-D, /dev/null, an empty pipe). A real line
+// is stored first, then close resolves once.
+export function promptPasswordFrom(
+  input: NodeJS.ReadableStream,
+  output: NodeJS.WritableStream,
+  label = 'Password: ',
+): Promise<string> {
   return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: mutePasswordOutput(process.stdout), terminal: true })
-    process.stdout.write(label)
-    rl.once('line', (line) => {
-      rl.close()
-      resolve(line)
+    let value = ''
+    let settled = false
+    const done = () => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    const rl = createInterface({
+      input,
+      output: mutePasswordOutput(output),
+      terminal: Boolean((input as NodeJS.ReadStream).isTTY && (output as NodeJS.WriteStream).isTTY),
     })
+    output.write(label)
+    rl.on('line', (line) => {
+      value = line
+      rl.close()
+    })
+    rl.on('close', done)
   })
+}
+
+export function promptPassword(label = 'Password: '): Promise<string> {
+  return promptPasswordFrom(process.stdin, process.stdout, label)
 }
