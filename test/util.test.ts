@@ -148,6 +148,11 @@ describe('handleApproval', () => {
 })
 
 describe('nextActionsLines', () => {
+  it('uses a placeholder for secret values in next-action commands', () => {
+    const lines = nextActionsLines([{ op: 'secrets.set', reason: 'Set the credential.', args: { name: 'TOKEN', value: 'live-sensitive-value' } }])
+    expect(lines).toEqual(['Next:', '  • Set the credential.  →  insta secrets set TOKEN <value>'])
+  })
+
   it('renders a mapped op as an insta command with args, plus its reason', () => {
     const lines = nextActionsLines([{ op: 'service.add', reason: 'Add a service first.', args: { type: 'postgres', name: 'db' } }])
     expect(lines[0]).toBe('Next:')

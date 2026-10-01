@@ -234,7 +234,7 @@ const targetGroup = (a: Record<string, unknown>): string => (a.target === 'db' ?
 const OP_COMMAND: Record<string, (a: Record<string, unknown>) => string> = {
   'service.add': (a) => `insta service add ${a.type ?? '<type>'} ${a.name ?? '<name>'}`,
   deploy: (a) => `insta deploy${a.branch ? ` --branch ${a.branch}` : ''}`,
-  'secrets.set': (a) => `insta secrets set ${a.name ?? '<NAME>'} ${a.value ?? '<value>'}`,
+  'secrets.set': (a) => `insta secrets set ${a.name ?? '<NAME>'} <value>`,
   metrics: (a) => `insta ${targetGroup(a)} metrics`,
   logs: (a) => `insta ${targetGroup(a)} logs`,
   'approvals.approve': (a) => `insta agent approvals approve ${a.approvalId ?? '<id>'}`,
