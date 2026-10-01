@@ -68,8 +68,28 @@ test('renderCodexConfig keeps a quote or newline inside the url string', () => {
   expect(out.split('\n').some((line) => line.startsWith('command ='))).toBe(false)
 })
 
+test('renderCodexConfig keeps a backslash, quote, and newline inside the url string', () => {
+  const out = renderCodexConfig(null, 'https://x\\"\r\n[mcp_servers.evil]\ncommand = "calc"')!
+  expect(out.endsWith('url = "https://x\\\\\\"\\r\\n[mcp_servers.evil]\\ncommand = \\"calc\\""\n')).toBe(true)
+  expect(out).toMatch(/^url = "[^\r\n]*"$/m)
+  expect(out.split('\n').some((line) => line.startsWith('command ='))).toBe(false)
+})
+
+test('tomlBasicString escapes backslash and quote', () => {
+  expect(tomlBasicString('a\\b"c')).toBe('"a\\\\b\\"c"')
+})
+
+test('tomlBasicString escapes each control character it has a short form for', () => {
+  expect(tomlBasicString('a\bb')).toBe('"a\\bb"')
+  expect(tomlBasicString('a\fb')).toBe('"a\\fb"')
+  expect(tomlBasicString('a\rb')).toBe('"a\\rb"')
+  expect(tomlBasicString('a\nb')).toBe('"a\\nb"')
+})
+
 test('tomlBasicString escapes remaining control characters and leaves tab raw', () => {
   expect(tomlBasicString('a\u0000b\fc')).toBe('"a\\u0000b\\fc"')
+  expect(tomlBasicString('a\u000Bb')).toBe('"a\\u000bb"')
+  expect(tomlBasicString('a\u007Fb')).toBe('"a\\u007fb"')
   expect(tomlBasicString('tab\there')).toBe('"tab\there"')
 })
 
