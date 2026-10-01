@@ -136,7 +136,7 @@ export function validateManifest(m: TemplateManifest): string[] {
     // platform's own check (provisioning/templateManifest.ts) so an author hears it here.
     if (type && MANAGED_TYPES.includes(type)) {
       const bare = svc as Record<string, unknown>
-      for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn']) {
+      for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn', 'command', 'mountPath']) {
         if (bare[field] !== undefined) {
           problems.push(`${where}.${field}: a ${type} service is platform-managed and carries no ${field} — declare it bare ({ type: ${type} })`)
         }

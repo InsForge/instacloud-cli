@@ -50,6 +50,7 @@ export function normalizeInfoServices(raw: unknown): InfoService[] {
     name, type: s?.type, port: s?.port,
     volumeGib: s?.volumeGib ?? s?.volume?.size,
     volume: s?.volume === true || s?.volumeGib != null || s?.volume?.size != null,
+    mountPath: typeof s?.mountPath === 'string' ? s.mountPath : undefined,
   })
   if (Array.isArray(raw)) return raw.map((s: any) => one(s?.name ?? '?', s))
   if (raw && typeof raw === 'object') return Object.entries(raw as Record<string, any>).map(([name, s]) => one(name, s))
