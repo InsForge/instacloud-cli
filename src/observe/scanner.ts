@@ -30,7 +30,7 @@ const DETECTORS: Detector[] = [
   { name: 'stripe_secret_key', rx: /\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}\b/gd, group: false },
   { name: 'llm_api_key', rx: /\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/gd, group: false },
   { name: 'google_api_key', rx: /\bAIza[0-9A-Za-z_-]{35}\b/gd, group: false },
-  { name: 'private_key_block', rx: /-----BEGIN ((?:[A-Z ]+ )?PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/gd, group: false },
+  { name: 'private_key_block', rx: /-----BEGIN ((?:[A-Z ]+ )?PRIVATE KEY)-----(?:(?:[ \t\r\n]|\\[rn])*(?:Proc-Type|DEK-Info):[^\r\n\\]*(?:\r?\n|\\[rn]|$))*(?:[A-Za-z0-9+/=\r\n \t]|\\[rn])*(?:-----END \1-----)?/gd, group: false },
   { name: 'jwt', rx: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/gd, group: false },
   { name: 'db_conn_string', rx: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^:\s/@]+:[^@\s/]+@[^\s'"]+/gd, group: false },
   { name: 'bearer_token', rx: /\bbearer\s+([A-Za-z0-9._-]{20,})/gid, group: true },
@@ -199,7 +199,7 @@ export function scanEvent(event: ToolEvent, opts: { ignorePath?: (p: string) => 
     let redacted = ''
     let cursor = 0
     const hits = scanText(text).map(([start, end, detector, secret]) => {
-      const fp = fingerprint(secret, detector)
+      const fp = fingerprint(secret.trimEnd(), detector)
       redacted += text.slice(cursor, start)
       const offset = redacted.length
       redacted += `«${fp}»`

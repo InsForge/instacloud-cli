@@ -77,4 +77,34 @@ describe('credential scanner', () => {
     expect(findings[0]!.snippet).not.toContain('d4'.repeat(5))
     expect(findings[0]!.fingerprint).toContain('••••----:')
   })
+
+  it('keeps a quoted PEM header separate from a later secret', () => {
+    const findings = scanEvent({ tool_name: 'Read', tool_response: "if (pem.startsWith('-----BEGIN PRIVATE KEY-----')) parse(pem)\nconst stripe = 'sk_live_abcdef0123456789ABCDEF'\n" })
+    expect(findings.map((f) => f.detector)).toEqual(['private_key_block', 'stripe_secret_key'])
+    expect(findings[0]!.fingerprint).toContain('••••----:')
+    expect(findings[1]!.snippet).toContain('const stripe')
+    for (const finding of findings) expect(finding.fingerprint).not.toMatch(/[\r\n]/)
+  })
+
+  it.each(['', 'private_key='])('redacts truncated encrypted PEM content after %s without newline fingerprints', (prefix) => {
+    const body = 'MII' + 'e5'.repeat(40)
+    const findings = scanEvent({ tool_name: 'Read', tool_response: `${prefix}-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,0123456789ABCDEF\n\n${body}\n` })
+    expect(findings).toHaveLength(1)
+    expect(findings[0]!.snippet).not.toContain('e5'.repeat(5))
+    expect(findings[0]!.fingerprint).toContain('••••e5e5:')
+    expect(findings[0]!.fingerprint).not.toMatch(/[\r\n]/)
+  })
+
+  it.each(['\\n', '\\r\\n'])('redacts PEM source strings with escaped %j separators', (newline) => {
+    const body = 'MII' + 'f6'.repeat(40)
+    for (const metadata of ['', `Proc-Type: 4,ENCRYPTED${newline}DEK-Info: AES-256-CBC,0123456789ABCDEF${newline}${newline}`]) {
+      for (const ending of ['', `${newline}-----END RSA PRIVATE KEY-----`]) {
+        const content = `const key = "-----BEGIN RSA PRIVATE KEY-----${newline}${metadata}${body}${ending}"; const stripe = 'sk_live_abcdef0123456789ABCDEF'`
+        const findings = scanEvent({ tool_name: 'Read', tool_response: content })
+        expect(findings.map((f) => f.detector)).toEqual(['private_key_block', 'stripe_secret_key'])
+        for (const finding of findings) expect(finding.snippet).not.toContain('f6'.repeat(5))
+        expect(findings[1]!.snippet).toContain('const stripe')
+      }
+    }
+  })
 })
