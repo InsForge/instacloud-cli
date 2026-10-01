@@ -73,10 +73,10 @@ pins the visible top level; changing it is a design decision, not a code change.
    **Nothing here blocks a merge.** The `cli parity` workflow in the MCP repository runs weekly,
    diffs the published command surface against the last release it recorded, asks a model whether
    each new leaf is already reachable through an existing tool, and opens an issue there assigned
-   to whoever wrote the CLI pull request. The question arrives whatever this rule did, so the cost
-   of forgetting is answering it a week later in somebody else's repository. Answering it here is
-   cheaper: name the tool, or the reason, in the pull request body, and close the issue with the
-   same sentence when it arrives.
+   to whoever wrote the CLI pull request. The question arrives whether or not the rule was
+   followed, so the cost of forgetting is answering it a week later in somebody else's
+   repository. Answering it here is cheaper: name the tool, or the reason, in the pull request
+   body, and close the issue with the same sentence when it arrives.
 
 Where things go: settings (limits/volume/always-on/scale) live under the service type;
 `logs`/`metrics` live under the service type via `addObservability()` in `index.ts`; anything
