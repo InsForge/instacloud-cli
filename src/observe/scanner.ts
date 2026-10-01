@@ -30,7 +30,7 @@ const DETECTORS: Detector[] = [
   { name: 'stripe_secret_key', rx: /\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}\b/gd, group: false },
   { name: 'llm_api_key', rx: /\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/gd, group: false },
   { name: 'google_api_key', rx: /\bAIza[0-9A-Za-z_-]{35}\b/gd, group: false },
-  { name: 'private_key_block', rx: /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/gd, group: false },
+  { name: 'private_key_block', rx: /-----BEGIN ((?:[A-Z ]+ )?PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/gd, group: false },
   { name: 'jwt', rx: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/gd, group: false },
   { name: 'db_conn_string', rx: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^:\s/@]+:[^@\s/]+@[^\s'"]+/gd, group: false },
   { name: 'bearer_token', rx: /\bbearer\s+([A-Za-z0-9._-]{20,})/gid, group: true },
@@ -68,16 +68,12 @@ function fingerprint(secret: string, detector: string): string {
   return `${detector}:${tail}:#${h}`
 }
 
-function snippet(text: string, span: [number, number], fp: string): string {
-  const [s, e] = span
-  const redacted = text.slice(0, s) + '«' + fp + '»' + text.slice(e)
-  const marker = '«' + fp + '»'
-  const i = redacted.indexOf(marker)
-  const start = Math.max(0, i - 36)
-  const end = Math.min(redacted.length, i + marker.length + 36)
-  let out = redacted.slice(start, end).replace(/\s+/g, ' ').trim()
+function snippet(text: string, offset: number, fp: string): string {
+  const start = Math.max(0, offset - 36)
+  const end = Math.min(text.length, offset + fp.length + 2 + 36)
+  let out = text.slice(start, end).replace(/\s+/g, ' ').trim()
   if (start > 0) out = '…' + out
-  if (end < redacted.length) out = out + '…'
+  if (end < text.length) out = out + '…'
   return out.slice(0, 160)
 }
 
@@ -121,7 +117,12 @@ function scanText(text: string): Array<[number, number, string, string]> {
   hits.sort((a, b) => a[0] - b[0] || a[1] - b[1]) // stable: earlier detector wins an equal span
   const kept: Array<[number, number, string, string]> = []
   for (const r of hits) {
-    if (kept.some((k) => !(r[1] <= k[0] || r[0] >= k[1]))) continue
+    const previous = kept.at(-1)
+    if (previous && r[0] < previous[1]) {
+      previous[1] = Math.max(previous[1], r[1])
+      previous[3] = text.slice(previous[0], previous[1])
+      continue
+    }
     kept.push(r)
   }
   return kept
@@ -195,10 +196,20 @@ export function scanEvent(event: ToolEvent, opts: { ignorePath?: (p: string) => 
   for (const [surface, text] of [...leaves(ti, 'input'), ...leaves(tr, 'output')]) {
     if (!text || text.length > 1_000_000) continue
     const side: 'input' | 'output' = surface.startsWith('input') ? 'input' : 'output'
-    for (const [start, end, detector, secret] of scanText(text)) {
+    let redacted = ''
+    let cursor = 0
+    const hits = scanText(text).map(([start, end, detector, secret]) => {
       const fp = fingerprint(secret, detector)
+      redacted += text.slice(cursor, start)
+      const offset = redacted.length
+      redacted += `«${fp}»`
+      cursor = end
+      return { detector, fp, offset }
+    })
+    redacted += text.slice(cursor)
+    for (const { detector, fp, offset } of hits) {
       const [kind, sev, sink, note] = classify(tool, side, command, filePath, secretFileTarget)
-      add(kind, sev, detector, `${tool}:${surface}`, sink, fp, snippet(text, [start, end], fp), note)
+      add(kind, sev, detector, `${tool}:${surface}`, sink, fp, snippet(redacted, offset, fp), note)
     }
   }
   return findings
