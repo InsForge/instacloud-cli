@@ -63,14 +63,20 @@ pins the visible top level; changing it is a design decision, not a code change.
    in `frontend/`, MCP copy, and platform error strings that spell the path — and it ships in the
    order the design's §9 gives (docs/copy merge right after the CLI release, never before).
 6. **Rule: a new command says whether an agent can reach it.** A new leaf command ships with the
-   matching MCP tool in `InsForge/instacloud-mcp`, or with a line in the pull request saying why an
-   agent should not have one: credential minting, anything that needs this machine, anything the
-   platform denies agents. The two pull requests are independent — MCP tools are additive and need
-   no arming flag, so neither side waits for the other. Between July and September eight CLI
-   capabilities took 14 to 41 days to reach MCP, and every one of them was a new leaf: `service
-   rename`, `regions`, always-on, limits, volume, `postgres stats`, managed-database query, and the
-   bought-domain commands. No new leaf command without a matching MCP tool or a stated
-   reason.
+   matching MCP tool in `InsForge/instacloud-mcp`, or with a decision that it should not have one:
+   credential minting, anything that needs this machine, anything the platform denies agents. The
+   two pull requests are independent — MCP tools are additive and need no arming flag, so neither
+   side waits for the other. Between July and September eight CLI capabilities took 14 to 41 days
+   to reach MCP, and every one of them was a new leaf: `service rename`, `regions`, always-on,
+   limits, volume, `postgres stats`, managed-database query, and the bought-domain commands.
+
+   **Nothing here blocks a merge.** The `cli parity` workflow in the MCP repository runs weekly,
+   diffs the published command surface against the last release it recorded, asks a model whether
+   each new leaf is already reachable through an existing tool, and opens an issue there assigned
+   to whoever wrote the CLI pull request. The question arrives whether or not the rule was
+   followed, so the cost of forgetting is answering it a week later in somebody else's
+   repository. Answering it here is cheaper: name the tool, or the reason, in the pull request
+   body, and close the issue with the same sentence when it arrives.
 
 Where things go: settings (limits/volume/always-on/scale) live under the service type;
 `logs`/`metrics` live under the service type via `addObservability()` in `index.ts`; anything
