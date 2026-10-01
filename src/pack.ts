@@ -148,31 +148,8 @@ function walk(
   }
 }
 
-// The walk classifies with lstat and the read happens later, so a plain readFileSync would
-// FOLLOW a symlink that replaced the file in between and put a file from outside the directory
-// into an archive that promises none. Two guards, and neither is a full one on its own:
-//
-//   O_NOFOLLOW refuses when the final component is a symlink AT OPEN TIME, closing the swap the
-//   walk cannot see. Undefined on Windows, where it degrades to the check below.
-//
-//   fstat on the OPEN HANDLE must still describe the file the walk measured: same inode, same
-//   device, same size. Its job is the tar's own consistency -- a file rewritten to a different
-//   length mid-pack would otherwise produce a header whose count disagrees with its payload.
-//
-// Two things neither closes, and both are stated rather than implied away:
-//
-//   An ANCESTOR directory swapped for a symlink. Node exposes no openat, so resolving each
-//   component against a directory handle is not available here.
-//
-//   A same-size plain file deleted and recreated. Measured on linux rather than assumed: the
-//   inode is REUSED and mtimeNs/ctimeNs are byte-identical for a delete+create inside one
-//   timestamp tick, so no stat-based identity can see it. It is also the least interesting case
-//   -- the symlink promise still holds, the tar stays well formed because the length did not
-//   move, and the archive simply carries a slightly newer copy of a file the caller owns.
-//
-// The residual on both is narrow: someone able to rewrite files and directories inside the tree
-// being packed can already put any bytes they like into it by writing them.
-export function readEntry(abs: string, e: Found): Buffer {
+// O_NOFOLLOW closes final-component symlink swaps only on platforms that expose it.
+export function readEntry(abs: string, e: Found, platform: string = process.platform): Buffer {
   const noFollow = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0
   let fd: number
   try {
@@ -185,8 +162,10 @@ export function readEntry(abs: string, e: Found): Buffer {
   }
   try {
     const st = fstatSync(fd)
+    // Some Windows libuv versions omit lstat's device ID; inode and size must still match.
+    const missingDevice = platform === 'win32' && (e.dev === 0 || e.dev === 0n)
     const same = st.isFile() && st.size === e.size
-      && (e.ino === undefined || st.ino === e.ino) && (e.dev === undefined || st.dev === e.dev)
+      && (e.ino === undefined || st.ino === e.ino) && (e.dev === undefined || missingDevice || st.dev === e.dev)
     if (!same) throw new Error(`${e.path} changed while packing — re-run the deploy`)
     return readFileSync(fd)
   } finally {

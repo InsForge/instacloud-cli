@@ -535,6 +535,34 @@ describe('readEntry — the file read cannot be swapped out from under the walk'
     expect(readEntry(abs, found('a.txt', st)).toString()).toBe('hello\n')
   })
 
+  it.each([0, 0n])('reads an unchanged Windows file when lstat reports device %s', (dev) => {
+    const abs = join(mk(), '.dockerignore')
+    writeFileSync(abs, 'node_modules\n')
+    const st = lstatSync(abs)
+    expect(readEntry(abs, found('.dockerignore', { ...st, dev }), 'win32').toString()).toBe('node_modules\n')
+  })
+
+  it.each(['linux', 'darwin'])('rejects a zero device mismatch on %s', (platform) => {
+    const abs = join(mk(), 'a.txt')
+    writeFileSync(abs, 'hello\n')
+    const st = lstatSync(abs)
+    expect(() => readEntry(abs, found('a.txt', { ...st, dev: 0 }), platform)).toThrow(/changed while packing/)
+  })
+
+  it('rejects a known device mismatch on Windows', () => {
+    const abs = join(mk(), 'a.txt')
+    writeFileSync(abs, 'hello\n')
+    const st = lstatSync(abs)
+    expect(() => readEntry(abs, found('a.txt', { ...st, dev: st.dev + 1 }), 'win32')).toThrow(/changed while packing/)
+  })
+
+  it.each(['ino', 'size'] as const)('rejects a changed %s when the Windows device is unavailable', (field) => {
+    const abs = join(mk(), 'a.txt')
+    writeFileSync(abs, 'hello\n')
+    const st = lstatSync(abs)
+    expect(() => readEntry(abs, found('a.txt', { ...st, dev: 0, [field]: st[field] + 1 }), 'win32')).toThrow(/changed while packing/)
+  })
+
   itModes('refuses a file replaced by a symlink after the walk', () => {
     const dir = mk()
     const abs = join(dir, 'a.txt')
@@ -583,8 +611,4 @@ describe('readEntry — the file read cannot be swapped out from under the walk'
     expect(out).not.toContain('WORLD')
     expect(out).toMatch(/changed while packing/)
   })
-
-  // NOT tested: a same-size DELETE and recreate at the same path. Measured on linux, the inode is
-  // reused and mtimeNs/ctimeNs are identical inside one timestamp tick, so no stat-based check can
-  // see it. Asserting either way would encode a guess -- the limitation is documented at readEntry.
 })
