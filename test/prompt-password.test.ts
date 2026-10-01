@@ -13,7 +13,6 @@ function capture(): { output: Writable; text: () => string } {
   return { output, text: () => written }
 }
 
-// A TTY stdin as readline sees it: isTTY plus setRawMode, with every mode change recorded.
 function fakeTtyInput(): { input: PassThrough; rawModes: boolean[] } {
   const rawModes: boolean[] = []
   const input = Object.assign(new PassThrough(), {
