@@ -29,7 +29,7 @@ export type ManifestService = {
   port?: number
   healthcheck?: string
   volume?: boolean // needs a /data disk; the platform owns the size
-  alwaysOn?: boolean // idle mode; undeclared = the platform default (always-on for compute)
+  alwaysOn?: boolean // idle mode; undeclared = the platform default (scale-to-zero for compute, always-on for a worker)
   env?: ManifestEnv
 }
 

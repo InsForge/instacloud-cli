@@ -124,8 +124,9 @@ export function servicesAddRequestBody(type: string, name: string, branch: strin
     type, name, ...(branch ? { branch } : {}), public: !!opts.public,
     ...(opts.image ? { image: opts.image } : {}), ...(opts.port !== undefined ? { port: parsePort(opts.port, { allowZero: type === 'compute' }) } : {}),
     ...(opts.region ? { region: opts.region } : {}),
-    // Sent whenever the flag was given, false included: compute is born always-on by default,
-    // so `--no-always-on` must reach the API as an explicit false. Omitted means the platform default.
+    // Sent whenever the flag was given, false included: the birth default is platform config
+    // (INSTA_COMPUTE_ALWAYS_ON_DEFAULT, scale-to-zero unless set), so an explicit --no-always-on
+    // must reach the API as false to hold whatever that config says. Omitted means the platform default.
     ...(opts.alwaysOn !== undefined ? { alwaysOn: opts.alwaysOn } : {}),
     ...(opts.volume !== undefined ? { volumeGib: parseVolumeGib(opts.volume) } : {}),
     ...(opts.mountPath !== undefined ? { volumeMountPath: opts.mountPath } : {}),
