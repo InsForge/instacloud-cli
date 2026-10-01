@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   assertType, assertServiceName, parseCount, parsePort, parseAccess, resolveServiceId, resolveComputeServiceId, SERVICE_TYPES,
-  servicesAddRequestBody, servicesAdd, serviceListLine, serviceAddedLine,
+  servicesAddRequestBody, servicesAdd, serviceListLine, serviceAddedLine, parsePgVersion,
 } from '../src/commands/services.js'
 
 describe('assertType', () => {
@@ -144,6 +144,17 @@ describe('servicesAddRequestBody', () => {
     expect(servicesAddRequestBody('compute', 'api', 'main', { alwaysOn: false })).toMatchObject({ alwaysOn: false })
     expect(servicesAddRequestBody('compute', 'api', 'main', {})).not.toHaveProperty('alwaysOn')
   })
+  it('sends --pg-version as a number, omits it when absent (absent = the platform default major)', () => {
+    expect(servicesAddRequestBody('postgres', 'db', 'main', { pgVersion: '17' })).toMatchObject({ pgVersion: 17 })
+    expect(servicesAddRequestBody('postgres', 'db', 'main', {})).not.toHaveProperty('pgVersion')
+  })
+})
+
+describe('parsePgVersion', () => {
+  it('reads a whole major and rejects anything else', () => {
+    expect(parsePgVersion(' 18 ')).toBe(18)
+    for (const raw of ['17.2', 'latest', '', '0x11']) expect(() => parsePgVersion(raw)).toThrow(/invalid Postgres major/)
+  })
 })
 
 describe('servicesAdd validation (throws before any network/config access)', () => {
@@ -170,6 +181,10 @@ describe('servicesAdd validation (throws before any network/config access)', () 
   })
   it('rejects --public for a non-storage type', async () => {
     await expect(servicesAdd('compute', 'api', { public: true })).rejects.toThrow(/--public is only valid for storage services/)
+  })
+  it('rejects --pg-version for a non-postgres type, and a junk major for postgres', async () => {
+    await expect(servicesAdd('mysql', 'db', { pgVersion: '17' })).rejects.toThrow(/--pg-version is only valid for postgres services/)
+    await expect(servicesAdd('postgres', 'db', { pgVersion: 'latest' })).rejects.toThrow(/invalid Postgres major/)
   })
   it('rejects --region for a storage type', async () => {
     await expect(servicesAdd('storage', 'bkt', { region: 'us-east' })).rejects.toThrow(/--region is not valid for storage services/)

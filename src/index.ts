@@ -158,6 +158,7 @@ svc.command('add [type] [name]').description('Provision a service on demand (com
   .option('--no-always-on', 'compute only: create as scale-to-zero — idle machines suspend and wake on the next request')
   .option('--mount-path <path>', 'compute only: container mount path for a new volume (requires --volume; default /data)')
   .option('--volume <gi>', 'compute only: attach a persistent volume of this many whole Gi (also attachable later: `insta compute volume <name> --size <gi>`). Any plan may attach up to its own plan cap (10Gi free, 50Gi paid by default; the bare `insta compute volume <name>` read prints it as plan max); a size above the free cap is paid. Volume services keep 1 machine and stop (cold wake) instead of suspend when idle')
+  .option('--pg-version <major>', 'postgres only: the Postgres major version to create the database on — 16, 17 or 18 (default 16). Fixed for the database\'s lifetime; branches keep it')
   .option('--json')
   .action(guard(async (type, name, o) => {
     const a = await resolveServiceArgs(type, name, serviceArgsDeps(o.json), o)
