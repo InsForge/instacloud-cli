@@ -209,6 +209,14 @@ export async function domainNameserversReset(domainName: string, opts: RecordsOp
   for (const line of domainLines(r, !opts.org)) info(line)
 }
 
+export async function domainRenew(domainName: string, mode: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
+  if (mode !== 'on' && mode !== 'off') die('mode must be on or off')
+  const { api, orgId } = await orgDeps(opts, deps)
+  const r = await api.request<Purchased>('PATCH', domainPath(orgId, domainName), { autorenew: mode === 'on' })
+  if (opts.json) return printJson(r)
+  info(`${r.domainName}  auto-renew ${r.autorenew ? 'on' : 'off'}`)
+}
+
 export async function domainTransferLock(domainName: string, mode: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
   if (mode !== 'on' && mode !== 'off') die('mode must be on or off')
   const locked = mode === 'on'

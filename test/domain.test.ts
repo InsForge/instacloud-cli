@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest'
-import { domainSearch, domainBuy, domainAttach, domainCheck, domainDelegate, domainDetach, domainList, domainNameserversReset, domainNameserversSet, domainStatus, domainTransferCode, domainTransferLock, domainRecordsAdd, domainRecordsList, domainRecordsRemove, domainRecordsSet, ownerOf, searchLines } from '../src/commands/domain.js'
+import { domainSearch, domainBuy, domainAttach, domainCheck, domainDelegate, domainDetach, domainList, domainNameserversReset, domainNameserversSet, domainStatus, domainRenew, domainTransferCode, domainTransferLock, domainRecordsAdd, domainRecordsList, domainRecordsRemove, domainRecordsSet, ownerOf, searchLines } from '../src/commands/domain.js'
 import type { DomainDeps } from '../src/commands/compute.js'
 
 const services = [
@@ -511,5 +511,34 @@ describe('domain transfer', () => {
     const { deps: d } = deps({ '/auth-code': { authCode: 'EPP-123' } })
     await domainTransferCode('myapp.com', { json: true }, d)
     expect(JSON.parse(out())).toEqual({ authCode: 'EPP-123' })
+  })
+})
+
+
+describe('domain renewal', () => {
+  it.each(['on', 'off'])('sets auto-renew %s without altering other settings', async (mode) => {
+    const autorenew = mode === 'on'
+    const { deps: d, calls } = deps({ '/domains/myapp.com': { domainName: 'myapp.com', autorenew } })
+    await domainRenew('myapp.com', mode, {}, d)
+    expect(calls).toEqual([{ method: 'PATCH', path: '/orgs/org1/domains/myapp.com', body: { autorenew } }])
+    expect(out()).toBe(`myapp.com  auto-renew ${mode}\n`)
+  })
+  it('uses the selected org and encoded name and returns the platform JSON', async () => {
+    const response = { domainName: 'myapp.com', autorenew: false, locked: true }
+    const { deps: d, calls } = deps({ '/domains/myapp.com%2Fother': response })
+    await domainRenew('myapp.com/other', 'off', { org: 'org9', json: true }, d)
+    expect(calls).toEqual([{ method: 'PATCH', path: '/orgs/org9/domains/myapp.com%2Fother', body: { autorenew: false } }])
+    expect(JSON.parse(out())).toEqual(response)
+  })
+  it('prints the returned renewal setting', async () => {
+    const { deps: d } = deps({ '/domains/myapp.com': { domainName: 'myapp.com', autorenew: false } })
+    await domainRenew('myapp.com', 'on', {}, d)
+    expect(out()).toBe('myapp.com  auto-renew off\n')
+  })
+  it('rejects an invalid mode before making any request', async () => {
+    const { deps: d, calls } = deps()
+    await expect(domainRenew('myapp.com', 'yes', {}, d)).rejects.toThrow('exit 1')
+    expect(calls).toEqual([])
+    expect(stderr.join('')).toContain('mode must be on or off')
   })
 })
