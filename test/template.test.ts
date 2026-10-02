@@ -143,8 +143,9 @@ describe('validateManifest', () => {
   it('accepts a bare managed datastore and refuses every field the platform owns', () => {
     for (const type of ['postgres', 'redis', 'mysql', 'mongodb'] as const) {
       expect(validateManifest({ code: 'x', version: '1', services: { store: { type } } } as unknown as TemplateManifest)).toEqual([])
-      for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn']) {
-        const m = { code: 'x', version: '1', services: { store: { type, [field]: true } } } as unknown as TemplateManifest
+      for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn', 'command', 'mountPath']) {
+        const value = field === 'mountPath' ? '/x' : true
+        const m = { code: 'x', version: '1', services: { store: { type, [field]: value } } } as unknown as TemplateManifest
         expect(validateManifest(m).join('\n')).toContain(`a ${type} service is platform-managed and carries no ${field}`)
       }
     }
@@ -314,6 +315,15 @@ describe('validateManifest', () => {
     expect(validateManifest(worker({ healthcheck: '/' })).join('\n')).toMatch(/a worker has no HTTP endpoint/)
     expect(validateManifest(worker({ alwaysOn: false })).join('\n')).toMatch(/a worker cannot scale to zero/)
   })
+
+  it('accepts command and mountPath, and refuses the shapes the platform refuses', () => {
+    const web = (extra: Record<string, unknown>) =>
+      ({ code: 'x', version: '1', services: { app: { type: 'web', image: 'a:1', healthcheck: '/', ...extra } } }) as unknown as TemplateManifest
+    expect(validateManifest(web({ command: 'run', volume: true, mountPath: '/app/storage' }))).toEqual([])
+    expect(validateManifest(web({ command: ' ' })).join('\n')).toMatch(/services\.app\.command must be a non-empty string/)
+    expect(validateManifest(web({ mountPath: '/a' })).join('\n')).toMatch(/services\.app\.mountPath requires volume: true/)
+    expect(validateManifest(web({ volume: true, mountPath: 'a' })).join('\n')).toMatch(/services\.app\.mountPath must be an absolute path/)
+  })
 })
 
 describe('parseManifestYaml', () => {
@@ -390,6 +400,8 @@ describe('templateInfoLines', () => {
     expect(templateInfoLines(boolTpl)).toContain('services (1): agent (web, port 7681, persistent /data)')
     const sizedTpl = { ...tpl, services: [{ name: 'agent', type: 'web', port: 7681, volumeGib: 10 }] }
     expect(templateInfoLines(sizedTpl)).toContain('services (1): agent (web, port 7681, 10Gi volume)')
+    const customMountTpl = { ...tpl, services: [{ name: 'agent', type: 'web', port: 7681, volume: true, mountPath: '/app/storage' }] }
+    expect(templateInfoLines(customMountTpl)).toContain('services (1): agent (web, port 7681, persistent /app/storage)')
   })
 
   it('renders header fields, a services summary, and grouped variables', () => {
@@ -416,11 +428,13 @@ describe('templateInfoLines', () => {
       bool: { type: 'worker', volume: true },
       worker: { type: 'worker', volume: { size: 5 } },
       norm: { volumeGib: 3 },
+      custom: { type: 'web', port: 7681, volume: true, mountPath: '/app/storage' },
     })).toEqual([
-      { name: 'app', type: 'web', port: 80, volumeGib: undefined, volume: false },
-      { name: 'bool', type: 'worker', port: undefined, volumeGib: undefined, volume: true },
-      { name: 'worker', type: 'worker', port: undefined, volumeGib: 5, volume: true },
-      { name: 'norm', type: undefined, port: undefined, volumeGib: 3, volume: true },
+      { name: 'app', type: 'web', port: 80, volumeGib: undefined, volume: false, mountPath: undefined },
+      { name: 'bool', type: 'worker', port: undefined, volumeGib: undefined, volume: true, mountPath: undefined },
+      { name: 'worker', type: 'worker', port: undefined, volumeGib: 5, volume: true, mountPath: undefined },
+      { name: 'norm', type: undefined, port: undefined, volumeGib: 3, volume: true, mountPath: undefined },
+      { name: 'custom', type: 'web', port: 7681, volumeGib: undefined, volume: true, mountPath: '/app/storage' },
     ])
   })
   it('accepts flat variable arrays too', () => {

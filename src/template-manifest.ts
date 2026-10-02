@@ -29,7 +29,10 @@ export type ManifestService = {
   port?: number
   healthcheck?: string
   volume?: boolean // needs a /data disk; the platform owns the size
+  volumeGib?: number // registry-only field, kept for normalization
   alwaysOn?: boolean // idle mode; undeclared = the platform default (scale-to-zero for compute, always-on for a worker)
+  command?: string // entrypoint command override (runtime field)
+  mountPath?: string // absolute path for volume mount (runtime field)
   env?: ManifestEnv
 }
 
@@ -133,7 +136,7 @@ export function validateManifest(m: TemplateManifest): string[] {
     // platform's own check (provisioning/templateManifest.ts) so an author hears it here.
     if (type && MANAGED_TYPES.includes(type)) {
       const bare = svc as Record<string, unknown>
-      for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn']) {
+      for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn', 'command', 'mountPath']) {
         if (bare[field] !== undefined) {
           problems.push(`${where}.${field}: a ${type} service is platform-managed and carries no ${field} — declare it bare ({ type: ${type} })`)
         }
@@ -183,6 +186,14 @@ export function validateManifest(m: TemplateManifest): string[] {
     }
     if (authored.spec !== undefined) {
       problems.push(`${where}: compute size is the platform's to choose — remove spec`)
+    }
+    // Validate runtime fields: command and mountPath
+    if (svc.command !== undefined && (typeof svc.command !== 'string' || !svc.command.trim())) {
+      problems.push(`${where}.command must be a non-empty string`)
+    }
+    if (svc.mountPath !== undefined) {
+      if (svc.volume !== true) problems.push(`${where}.mountPath requires volume: true`)
+      else if (typeof svc.mountPath !== 'string' || !svc.mountPath.startsWith('/')) problems.push(`${where}.mountPath must be an absolute path`)
     }
     const env = svc.env ?? {}
     for (const group of ['fixed', 'generated', 'required', 'optional'] as const) {
