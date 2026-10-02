@@ -118,6 +118,34 @@ describe('domainStatusLines (check: every stage + where it routes)', () => {
     ])
   })
 
+  it.each(['active', 'pending_validation'])('edge TXT unchecked defers to certificate status %s', (ssl) => {
+    const edge = { type: 'TXT', name: '_cf-custom-hostname.app.customer.com', value: 'edge-token', status: 'unchecked', purpose: 'edge_ownership' }
+    const lines = domainStatusLines({ ...active, ssl, dns: [edge, ...active.dns] })
+    expect(lines[1]).toContain('ownership   verified')
+    expect(lines.find((line) => line.includes('edge TXT'))).toBe('  edge TXT    unchecked   _cf-custom-hostname.app.customer.com -> edge-token (Cloudflare validates this record; see certificate status below)')
+    expect(lines.join('\n')).not.toContain('re-run insta domain check')
+    expect(lines.at(-1)).not.toContain('unchecked')
+    if (ssl === 'active') expect(lines.at(-1)).toBe('  serving     https://app.customer.com')
+    else expect(lines.at(-1)).toBe('  serving     not yet     (certificate)')
+  })
+
+  it('an edge TXT cannot stand in for the platform ownership record', () => {
+    const lines = domainStatusLines({ ...active, dns: [
+      ...active.dns.filter((r) => r.type !== 'TXT'),
+      { type: 'TXT', name: '_cf-custom-hostname.app.customer.com', value: 'edge-token', status: 'unchecked', purpose: 'edge_ownership' },
+    ] })
+    expect(lines.at(-1)).toContain('no ownership TXT from the platform')
+  })
+
+  it.each(['missing', 'mismatch', 'unchecked'])('other validation TXT records remain blockers: %s', (status) => {
+    const lines = domainStatusLines({ ...active, dns: [
+      ...active.dns,
+      { type: 'TXT', name: '_validation.app.customer.com', value: 'tok', status },
+    ] })
+    expect(lines.at(-1)).toContain('not yet')
+    expect(lines.at(-1)).toContain('_validation.app.customer.com')
+  })
+
   it('pending: each missing stage says what the user must still do', () => {
     const lines = domainStatusLines(bound)
     expect(lines[1]).toBe('  ownership   pending     add TXT _insta-verify.app.customer.com -> insta-verify=tok123')
