@@ -61,7 +61,7 @@ export function resolveDomainTarget(services: ComputeRow[], host: string, group?
 // does not report them (older builds) — the renderers say so rather than inventing a value.
 export type DomainView = {
   hostname: string; flyApp: string; configured: boolean; status: string
-  dns: Array<{ type: string; name: string; value: string; note?: string; status?: string }>
+  dns: Array<{ type: string; name: string; value: string; note?: string; status?: string; purpose?: string }>
   service?: string | null; region?: string | null
   ssl?: string; errorReason?: string
   origin?: string; edgeOrigin?: string; originOk?: boolean
@@ -142,7 +142,7 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
   }
   const records = recordsOf(r)
   const out = [`${r.hostname} -> ${targetOf(r)}`]
-  const txt = records.find((d) => d.type === 'TXT')
+  const txt = records.find((d) => d.type === 'TXT' && d.purpose !== 'edge_ownership')
   // The ROUTING records for the hostname, whatever type they take: a CNAME for a subdomain, or the
   // A/AAAA PAIR an apex needs (Fly's apex path emits both). All of them, not the first one —
   // a correct A beside a missing AAAA is not "routing is fine".
@@ -151,12 +151,6 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
   const blockers: string[] = []
   const stage = (label: string, state: string, detail: string) => out.push(`  ${pad(label, 12)}${pad(state, 10)}${detail ? `  ${detail}` : ''}`)
 
-  // The ONE verdict rule, applied to EVERY record the platform returned regardless of its role.
-  // A record is settled only when the platform says `ok` — or, for a provider that reports no
-  // per-record status at all (Fly), when it vouched for the whole set with `configured`. missing,
-  // mismatch and never-checked are each outstanding and each add a blocker. Applying this to only
-  // some records lets an apex whose AAAA is missing, or a still-pending validation record, ride
-  // under a `serving https://…` line.
   const verdictOf = (d: DomainView['dns'][number]) => d.status ?? (r.configured ? 'ok' : 'unchecked')
 
   if (txt) {
@@ -194,14 +188,14 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
     else { stage(lbl, 'unchecked', `${d.type} ${d.name} -> ${d.value} (not checked yet — re-run insta domain check)`); blockers.push(`${d.type} unchecked`) }
   }
 
-  // Everything else the platform returned — a Let's Encrypt validation CNAME, any extra record.
-  // Same rule, no exemption: an outstanding record is outstanding whatever its role.
   for (const d of records) {
     if (d === txt || isRouting(d)) continue
     const st = verdictOf(d)
     const lbl = d.type.toLowerCase()
     const where = `${d.name} -> ${d.value}${d.note ? `  (${d.note})` : ''}`
-    if (st === 'ok') stage(lbl, 'ok', where)
+    if (d.type === 'TXT' && d.purpose === 'edge_ownership' && st === 'unchecked') {
+      stage('edge TXT', 'unchecked', `${where} (Cloudflare validates this record; see certificate status below)`)
+    } else if (st === 'ok') stage(lbl, 'ok', where)
     else if (st === 'mismatch') { stage(lbl, 'mismatch', `${d.type} ${d.name} must point at ${d.value}`); blockers.push(`fix the ${d.type} ${d.name}`) }
     else if (st === 'missing') { stage(lbl, 'pending', `add ${where}`); blockers.push(`add the ${d.type} ${d.name}`) }
     else { stage(lbl, 'unchecked', `${where} (not checked yet — re-run insta domain check)`); blockers.push(`${d.type} ${d.name} unchecked`) }
