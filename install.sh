@@ -204,7 +204,7 @@ fi
 # MUST run before `agent setup` (`setup agent` on older CLIs): that step registers the MCP server, and it derives the MCP host and
 # registration name from the persisted environment. Switching afterwards would leave the machine's
 # agents pointed at production's MCP server while the CLI talked to staging.
-if [ -n "$ENV_NAME" ]; then
+if [ -n "$ENV_NAME" ] && [ "${INSTA_UPGRADE:-0}" != "1" ]; then
   echo
   if ! "$INSTALL_DIR/$BIN" env use "$ENV_NAME"; then
     # HARD FAIL, deliberately. The environment was requested and could not be applied, so this
