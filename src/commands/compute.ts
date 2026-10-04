@@ -1,5 +1,6 @@
 import { AgentApprovalRequired, ApiClient, ApiError, requireProject } from '../api.js'
 import { AgentSessionMissing } from '../agent.js'
+import { safeText } from '../config.js'
 import { info, printJson, handleApproval, relayExitCode, writeFileAtomicSync, resolveThroughSymlink } from '../util.js'
 import { resolveComputeServiceId, resolveSoleService, q, parseVolumeGib, parseCount } from './services.js'
 
@@ -1532,7 +1533,7 @@ export function renewalFailureNotice(alias: string, err: unknown): string {
     return `${head}. Agent mode found no agent session for its project in this directory. Run ssh from the project directory, or ask a person to run "${fix}".`
   }
   if (err instanceof AgentApprovalRequired) {
-    return `${head} and renewing it needs approval. ${err.message.replace(/\s+/g, ' ').trim()} Retry after it is approved.`
+    return `${head} and renewing it needs approval. ${safeText(err.message.replace(/\s+/g, ' ')).trim()} Retry after it is approved.`
   }
   if (err instanceof ApiError && err.status === 403 && err.message.endsWith('denied by agent policy')) {
     return `${head} and this project's agent policy does not allow renewing it.`

@@ -299,7 +299,7 @@ async function readLinkPlane(root: string): Promise<{ projectId: string; apiUrl:
 
 /** Text safe to echo to a terminal: C0 and C1 control characters and DEL removed — ESC and the
  *  single-byte C1 introducers (U+009B CSI among them) alike, so no escape sequence survives. */
-function safeText(text: string): string {
+export function safeText(text: string): string {
   return String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
 }
 

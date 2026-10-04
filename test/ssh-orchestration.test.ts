@@ -1872,6 +1872,15 @@ d('an expired certificate that could not be renewed says why', () => {
     expect(said.split('\n'), 'the notice spans more than one line').toHaveLength(2)
   })
 
+  it('strips terminal control sequences from the platform approval text', async () => {
+    const body = { status: 'approval_required', message: 'Approval required.\u001b[2J\u009b31m Review it at https://example.invalid/approvals/a1' }
+    const { said } = await run(EXPIRED_CERT, () => Promise.resolve({ status: 202, body }))
+    expect(said, 'an ESC reached the terminal').not.toContain('\u001b')
+    expect(said, 'a C1 CSI reached the terminal').not.toContain('\u009b')
+    expect(said).toContain('https://example.invalid/approvals/a1')
+    expect(said.split('\n'), 'the notice spans more than one line').toHaveLength(2)
+  })
+
   it('tells an agent with no session where to run ssh from', async () => {
     configureAgent({ source: 'cli-detected', client: 'claude-code' })
     try {
