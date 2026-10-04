@@ -1892,6 +1892,28 @@ d('an expired certificate that could not be renewed says why', () => {
     }
   })
 
+  it('says another ssh is renewing it when it loses the renewal lock', async () => {
+    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    const held = acquireRenewalLock('api.insta')
+    expect(held, 'the test could not take the renewal lock').toBeDefined()
+    try {
+      const { said, asked } = await run(EXPIRED_CERT, () => Promise.reject(new Error('the loser sent a request')))
+      expect(asked, 'the loser of the lock race reached the platform').toBe(0)
+      expect(said).toBe('insta: the SSH certificate for api.insta is missing or expired and another ssh is renewing it right now. Retry in a moment.\n')
+    } finally {
+      held!()
+    }
+  })
+
+  it('says why when a renewal is abandoned after the mint', async () => {
+    installTheKeyCertWasIssuedFor()
+    const good = { certificate: CERT, host: 'ssh.us-west-1.compute.example', username: 'u-svc-1', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
+    // The record vanishes while the mint is in flight, so the commit gives up.
+    const { said } = await run(EXPIRED_CERT, () => { writeAliasStore({}); return Promise.resolve({ status: 200, body: good }) })
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8'), 'the abandoned renewal installed a certificate').toBe(EXPIRED_CERT + '\n')
+    expect(said).toBe('insta: the SSH certificate for api.insta is missing or expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
+  })
+
   it('names a policy denial only when the platform says the agent policy denied it', () => {
     const policy = new ApiError(403, 'compute.shell, secrets.read denied by agent policy')
     const other = new ApiError(403, 'a shell needs an interactive login: run `insta login --oauth`')

@@ -1525,10 +1525,16 @@ function readUserText(path: string): string {
   return text
 }
 
+/** Another process holds this alias's renewal lock and is renewing it now. */
+class RenewalInProgress extends Error {}
+
 /** The one line a missing or expired certificate that could not be renewed gets: the cause and the fix. */
 export function renewalFailureNotice(alias: string, err: unknown): string {
   const head = `insta: the SSH certificate for ${alias} is missing or expired`
   const fix = `insta compute ssh ${alias.slice(0, -ALIAS_SUFFIX.length)}`
+  if (err instanceof RenewalInProgress) {
+    return `${head} and another ssh is renewing it right now. Retry in a moment.`
+  }
   if (err instanceof AgentSessionMissing) {
     return `${head}. Agent mode found no agent session for its project in this directory. Run ssh from the project directory, or ask a person to run "${fix}".`
   }
@@ -1563,6 +1569,8 @@ export function renewalFailureNotice(alias: string, err: unknown): string {
  */
 export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQUEST_TIMEOUT_MS): Promise<void> {
   let release: (() => void) | undefined
+  let attempted = false
+  let cause: unknown
   try {
     if (!isSafeAlias(alias)) return
     // Repair BEFORE the renewal gate, because the stanza can lag the store
@@ -1579,6 +1587,8 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
       }, { waitMs: KNOWN_HOSTS_LOCK_WAIT_MS })
     }
     if (!certNeedsRenewal(instaCertPath(alias))) return
+    if (!readAliasStore()[alias]) return // not an alias this CLI manages: stay silent
+    attempted = true
 
     // An IDE opens several connections at once and `scp` adds more, so the
     // near-expiry certificate is observed by every one of them simultaneously
@@ -1590,7 +1600,10 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
     // a lock that can hang `ssh` itself -- strictly worse than the duplicate
     // request it would prevent. The loser simply lets the winner renew.
     release = acquireRenewalLock(alias)
-    if (!release) return
+    if (!release) {
+      cause = new RenewalInProgress()
+      return
+    }
     // Re-checked after the lock. Without this the second process through the
     // door renews again over the certificate the first just wrote -- the lock
     // would serialise the stampede instead of collapsing it.
@@ -1690,12 +1703,13 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
       out.staged.discard()
     }
   } catch (err) {
-    // Swallowed unless this ssh is about to fail on it: then one line says why.
-    if (certNeedsRenewal(instaCertPath(alias), { marginMs: 0 })) {
-      process.stderr.write(renewalFailureNotice(alias, err) + '\n')
-    }
+    cause = err
   } finally {
     release?.()
+    // Silent unless this ssh is about to fail: any attempt that left the certificate expired says why.
+    if (attempted && certNeedsRenewal(instaCertPath(alias), { marginMs: 0 })) {
+      process.stderr.write(renewalFailureNotice(alias, cause) + '\n')
+    }
   }
 }
 
