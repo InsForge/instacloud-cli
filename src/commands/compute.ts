@@ -1,5 +1,5 @@
 import { AgentApprovalRequired, ApiClient, ApiError, requireProject } from '../api.js'
-import { agentMode, AgentSessionMissing } from '../agent.js'
+import { AgentSessionMissing } from '../agent.js'
 import { info, printJson, handleApproval, relayExitCode, writeFileAtomicSync, resolveThroughSymlink } from '../util.js'
 import { resolveComputeServiceId, resolveSoleService, q, parseVolumeGib, parseCount } from './services.js'
 
@@ -1524,6 +1524,22 @@ function readUserText(path: string): string {
   return text
 }
 
+/** The one line a missing or expired certificate that could not be renewed gets: the cause and the fix. */
+export function renewalFailureNotice(alias: string, err: unknown): string {
+  const head = `insta: the SSH certificate for ${alias} is missing or expired`
+  const fix = `insta compute ssh ${alias.slice(0, -ALIAS_SUFFIX.length)}`
+  if (err instanceof AgentSessionMissing) {
+    return `${head}. Agent mode found no agent session for its project in this directory. Run ssh from the project directory, or ask a person to run "${fix}".`
+  }
+  if (err instanceof AgentApprovalRequired) {
+    return `${head} and renewing it needs approval. ${err.message.replace(/\s+/g, ' ').trim()} Retry after it is approved.`
+  }
+  if (err instanceof ApiError && err.status === 403 && err.message.endsWith('denied by agent policy')) {
+    return `${head} and this project's agent policy does not allow renewing it.`
+  }
+  return `${head} and could not be renewed. Run "${fix}" to renew it.`
+}
+
 /**
  * The renewal hook OpenSSH runs while PARSING the config, before it connects.
  *
@@ -1544,22 +1560,6 @@ function readUserText(path: string): string {
  *    outage must not fail the parse: the existing certificate stays in place.
  *    Only an already expired one earns a single stderr line saying why.
  */
-/** The one line an expired certificate that could not be renewed gets: what failed and the fix. */
-export function renewalFailureNotice(alias: string, err: unknown, agent: boolean): string {
-  const head = `insta: the SSH certificate for ${alias} has expired`
-  const fix = `insta compute ssh ${alias.slice(0, -ALIAS_SUFFIX.length)}`
-  if (err instanceof AgentSessionMissing) {
-    return `${head}. Agent mode found no agent session for its project in this directory. Run ssh from the project directory, or ask a person to run "${fix}".`
-  }
-  if (err instanceof AgentApprovalRequired) {
-    return `${head} and renewing it needs approval. ${err.message.replace(/\s+/g, ' ').trim()} Retry after it is approved.`
-  }
-  if (agent && err instanceof ApiError && err.status === 403) {
-    return `${head} and this project's agent policy does not allow renewing it.`
-  }
-  return `${head} and could not be renewed. Run "${fix}" to renew it.`
-}
-
 export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQUEST_TIMEOUT_MS): Promise<void> {
   let release: (() => void) | undefined
   try {
@@ -1691,7 +1691,7 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
   } catch (err) {
     // Swallowed unless this ssh is about to fail on it: then one line says why.
     if (certNeedsRenewal(instaCertPath(alias), { marginMs: 0 })) {
-      process.stderr.write(renewalFailureNotice(alias, err, agentMode() !== null) + '\n')
+      process.stderr.write(renewalFailureNotice(alias, err) + '\n')
     }
   } finally {
     release?.()

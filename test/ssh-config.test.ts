@@ -982,7 +982,7 @@ describe('renewal hook is silent and fail-safe', () => {
     await expect(computeSSH(undefined, { ensureCert: 'api.insta' })).resolves.toBeUndefined()
     for (const s of [log, err, out]) expect(s, 'the renewal hook printed into the ssh session').not.toHaveBeenCalled()
     expect(errOut.mock.calls.map((c) => String(c[0])).join('')).toBe(
-      'insta: the SSH certificate for api.insta has expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
+      'insta: the SSH certificate for api.insta is missing or expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
   })
 
   it('says nothing, and touches nothing, for an alias that is not ours', async () => {

@@ -105,13 +105,13 @@ const EXPIRED_CERT = !keygen ? '' : (() => {
   execFileSync('ssh-keygen', ['-q', '-s', join(fixtures, 'ca'), '-I', 'stale', '-n', 'u-svc-1', '-V', '-2h:-1h', `${old}.pub`])
   return readFileSync(`${old}-cert.pub`, 'utf8').trim()
 })()
-/** Still valid, but inside the 5 minute renewal margin, so renewal is attempted. */
-const NEAR_EXPIRY_CERT = !keygen ? '' : (() => {
-  const near = join(fixtures, 'near')
+/** Still valid but inside the 5 minute renewal margin; minted on call so a slow run cannot outlive it. */
+const nearExpiryCert = () => {
+  const near = join(mkdtempSync(join(fixtures, 'near-')), 'key')
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', near, '-C', 'near@insta'])
   execFileSync('ssh-keygen', ['-q', '-s', join(fixtures, 'ca'), '-I', 'near', '-n', 'u-svc-1', '-V', '-1h:+2m', `${near}.pub`])
   return readFileSync(`${near}-cert.pub`, 'utf8').trim()
-})()
+}
 /** A REAL certificate, in date, signed by the same CA -- for a key that is not
  *  ours. `ssh-keygen -L` is perfectly happy with it, and it authenticates
  *  nothing on this machine. */
@@ -1855,11 +1855,11 @@ d('an expired certificate that could not be renewed says why', () => {
 
   it('says why when an expired certificate could not be renewed', async () => {
     const { said } = await run(EXPIRED_CERT, () => Promise.reject(new Error('network down')))
-    expect(said).toBe('insta: the SSH certificate for api.insta has expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
+    expect(said).toBe('insta: the SSH certificate for api.insta is missing or expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
   })
 
   it('stays silent while the certificate still works', async () => {
-    const { said, asked } = await run(NEAR_EXPIRY_CERT, () => Promise.reject(new Error('network down')))
+    const { said, asked } = await run(nearExpiryCert(), () => Promise.reject(new Error('network down')))
     expect(asked, 'renewal was never attempted, so silence proves nothing').toBe(1)
     expect(said).toBe('')
   })
@@ -1883,10 +1883,11 @@ d('an expired certificate that could not be renewed says why', () => {
     }
   })
 
-  it('says a denied agent is denied by policy, and a denied person only that renewal failed', () => {
-    const denied = new ApiError(403, 'compute.shell denied by agent policy')
-    expect(renewalFailureNotice('api.insta', denied, true)).toContain("this project's agent policy does not allow renewing it")
-    expect(renewalFailureNotice('api.insta', denied, false)).toContain('could not be renewed')
-    expect(renewalFailureNotice('api.insta', new AgentApprovalRequired({ message: 'x' }), false)).toContain('needs approval')
+  it('names a policy denial only when the platform says the agent policy denied it', () => {
+    const policy = new ApiError(403, 'compute.shell, secrets.read denied by agent policy')
+    const other = new ApiError(403, 'a shell needs an interactive login: run `insta login --oauth`')
+    expect(renewalFailureNotice('api.insta', policy)).toContain("this project's agent policy does not allow renewing it")
+    expect(renewalFailureNotice('api.insta', other)).toContain('could not be renewed')
+    expect(renewalFailureNotice('api.insta', new AgentApprovalRequired({ message: 'x' }))).toContain('needs approval')
   })
 })
