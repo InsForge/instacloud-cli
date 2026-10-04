@@ -1504,7 +1504,8 @@ d('an automatic renewal moves the alias with the certificate', () => {
     expect(lines).not.toContain('  ControlPersist 10m')
   })
 
-  it.skipIf(process.platform === 'win32')('says why when an expired certificate cannot even get its stale stanza repaired', async () => {
+  // Root can write into a 0500 directory, so the blocked repair this needs only happens for other users.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('says why when an expired certificate cannot even get its stale stanza repaired', async () => {
     await anInstalledAlias()
     const cfgPath = configPath()
     writeFileSync(cfgPath, readFileSync(cfgPath, 'utf8').replace(/  ControlPersist \S+/, '  ControlPersist 10m'))
@@ -1900,6 +1901,13 @@ d('an expired certificate that could not be renewed says why', () => {
     expect(said.split('\n'), 'the notice spans more than one line').toHaveLength(2)
   })
 
+  it('strips bidi controls that could reorder the approval text on screen', async () => {
+    const body = { status: 'approval_required', message: 'Approval required. ‮Review it‬ at ⁦https://example.invalid/approvals/a1⁩' }
+    const { said } = await run(EXPIRED_CERT, () => Promise.resolve({ status: 202, body }))
+    expect(said, 'a bidi control reached the terminal').not.toMatch(/[‎‏‪-‮⁦-⁩]/)
+    expect(said).toContain('https://example.invalid/approvals/a1')
+  })
+
   it('tells an agent with no session where to run ssh from', async () => {
     configureAgent({ source: 'cli-detected', client: 'claude-code' })
     try {
@@ -1928,7 +1936,8 @@ d('an expired certificate that could not be renewed says why', () => {
     installTheKeyCertWasIssuedFor()
     const good = { certificate: CERT, host: 'ssh.us-west-1.compute.example', username: 'u-svc-1', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
     // The record vanishes while the mint is in flight, so the commit gives up.
-    const { said } = await run(EXPIRED_CERT, () => { writeAliasStore({}); return Promise.resolve({ status: 200, body: good }) })
+    const { said, asked } = await run(EXPIRED_CERT, () => { writeAliasStore({}); return Promise.resolve({ status: 200, body: good }) })
+    expect(asked, 'the mint was never reached, so this is not the abandoned-commit path').toBe(1)
     expect(readFileSync(instaCertPath('api.insta'), 'utf8'), 'the abandoned renewal installed a certificate').toBe(EXPIRED_CERT + '\n')
     expect(said).toBe('insta: the SSH certificate for api.insta is missing or expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
   })
