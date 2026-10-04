@@ -1533,7 +1533,7 @@ export function renewalFailureNotice(alias: string, err: unknown): string {
   const head = `insta: the SSH certificate for ${alias} is missing or expired`
   const fix = `insta compute ssh ${alias.slice(0, -ALIAS_SUFFIX.length)}`
   if (err instanceof RenewalInProgress) {
-    return `${head} and another ssh is renewing it right now. Retry in a moment.`
+    return `${head} and another ssh may be renewing it right now. Retry in a moment, or run "${fix}".`
   }
   if (err instanceof AgentSessionMissing) {
     return `${head}. Agent mode found no agent session for its project in this directory. Run ssh from the project directory, or ask a person to run "${fix}".`
@@ -1569,10 +1569,13 @@ export function renewalFailureNotice(alias: string, err: unknown): string {
  */
 export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQUEST_TIMEOUT_MS): Promise<void> {
   let release: (() => void) | undefined
-  let attempted = false
+  let explainOnExit = false
   let cause: unknown
   try {
     if (!isSafeAlias(alias)) return
+    const managed = readAliasStore()
+    if (!managed[alias]) return // not an alias this CLI manages: stay silent
+    explainOnExit = true // set before the repair, which can throw too
     // Repair BEFORE the renewal gate, because the stanza can lag the store
     // with no certificate due: an alias set up before the Port line existed
     // dials :22 on every connection, and waiting for its certificate to age
@@ -1580,15 +1583,16 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
     // predicate is content drift, so the common case -- an up-to-date stanza --
     // is one file read and a string compare, with no lock taken; only a stale
     // stanza takes the alias-store lock, re-checks under it and rewrites.
-    if (configBlockStale(readAliasStore())) {
+    if (configBlockStale(managed)) {
       withAliasStoreLock(() => {
         const store = readAliasStore()
         if (store[alias] && configBlockStale(store)) installConfigBlock(store)
       }, { waitMs: KNOWN_HOSTS_LOCK_WAIT_MS })
     }
-    if (!certNeedsRenewal(instaCertPath(alias))) return
-    if (!readAliasStore()[alias]) return // not an alias this CLI manages: stay silent
-    attempted = true
+    if (!certNeedsRenewal(instaCertPath(alias))) {
+      explainOnExit = false // the certificate works, so no second check on the way out
+      return
+    }
 
     // An IDE opens several connections at once and `scp` adds more, so the
     // near-expiry certificate is observed by every one of them simultaneously
@@ -1706,8 +1710,8 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
     cause = err
   } finally {
     release?.()
-    // Silent unless this ssh is about to fail: any attempt that left the certificate expired says why.
-    if (attempted && certNeedsRenewal(instaCertPath(alias), { marginMs: 0 })) {
+    // Silent unless this ssh is about to fail: any exit that left the certificate expired says why.
+    if (explainOnExit && certNeedsRenewal(instaCertPath(alias), { marginMs: 0 })) {
       process.stderr.write(renewalFailureNotice(alias, cause) + '\n')
     }
   }

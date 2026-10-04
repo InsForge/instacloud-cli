@@ -1504,6 +1504,25 @@ d('an automatic renewal moves the alias with the certificate', () => {
     expect(lines).not.toContain('  ControlPersist 10m')
   })
 
+  it.skipIf(process.platform === 'win32')('says why when an expired certificate cannot even get its stale stanza repaired', async () => {
+    await anInstalledAlias()
+    const cfgPath = configPath()
+    writeFileSync(cfgPath, readFileSync(cfgPath, 'utf8').replace(/  ControlPersist \S+/, '  ControlPersist 10m'))
+    const sshDir = join(home, '.ssh')
+    chmodSync(sshDir, 0o500) // the repair's write into ~/.ssh fails
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    let said = ''
+    try {
+      await renew(() => { throw new Error('reached the platform past a failed repair') })
+      said = err.mock.calls.map((c) => String(c[0])).join('')
+    } finally {
+      err.mockRestore()
+      chmodSync(sshDir, 0o700)
+    }
+    expect(readFileSync(cfgPath, 'utf8'), 'the repair was not actually blocked, so this proves nothing').toContain('  ControlPersist 10m')
+    expect(said).toBe('insta: the SSH certificate for api.insta is missing or expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
+  })
+
   it('moves a block that slid below other configuration back to the top', async () => {
     // OpenSSH takes the first obtained value per keyword, so a `Host *` that
     // ended up above our block -- a dotfiles tool, a hand edit -- overrides its
@@ -1899,7 +1918,7 @@ d('an expired certificate that could not be renewed says why', () => {
     try {
       const { said, asked } = await run(EXPIRED_CERT, () => Promise.reject(new Error('the loser sent a request')))
       expect(asked, 'the loser of the lock race reached the platform').toBe(0)
-      expect(said).toBe('insta: the SSH certificate for api.insta is missing or expired and another ssh is renewing it right now. Retry in a moment.\n')
+      expect(said).toBe('insta: the SSH certificate for api.insta is missing or expired and another ssh may be renewing it right now. Retry in a moment, or run "insta compute ssh api".\n')
     } finally {
       held!()
     }
