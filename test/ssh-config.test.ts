@@ -971,13 +971,18 @@ describe('renewal hook is silent and fail-safe', () => {
     await quietly('api.insta')
   })
 
-  // A record exists and the certificate is missing, so this path goes all the
-  // way to the platform -- which is not there. Everything downstream of the
-  // certificate check lives inside the same silent boundary.
-  it('says nothing when the platform cannot be reached', async () => {
+  // No certificate and no platform, so this ssh will fail: the hook says why, on stderr only.
+  it('says only why, in one stderr line, when the platform cannot be reached', async () => {
     writeAliasStore({ 'api.insta': { projectId: 'p1', branch: 'main', serviceId: 's1', host: 'h', username: 'u' } })
     expect(existsSync(instaCertPath('api.insta'))).toBe(false)
-    await quietly('api.insta')
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const errOut = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    await expect(computeSSH(undefined, { ensureCert: 'api.insta' })).resolves.toBeUndefined()
+    for (const s of [log, err, out]) expect(s, 'the renewal hook printed into the ssh session').not.toHaveBeenCalled()
+    expect(errOut.mock.calls.map((c) => String(c[0])).join('')).toBe(
+      'insta: the SSH certificate for api.insta has expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
   })
 
   it('says nothing, and touches nothing, for an alias that is not ours', async () => {

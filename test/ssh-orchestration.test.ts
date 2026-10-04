@@ -11,7 +11,9 @@ import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mk
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
-import { computeSSH, installCertAuthority, instaCertPath, instaAliasStorePath, instaKeyPath, writeAliasStore, readAliasStore, validateCertResponse, acquireLockFile, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate } from '../src/commands/compute.js'
+import { computeSSH, installCertAuthority, instaCertPath, instaAliasStorePath, instaKeyPath, writeAliasStore, readAliasStore, validateCertResponse, acquireLockFile, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate, renewalFailureNotice } from '../src/commands/compute.js'
+import { configureAgent } from '../src/agent.js'
+import { ApiError, AgentApprovalRequired } from '../src/api.js'
 import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, BLOCK_BEGIN,
 } from '../src/commands/ssh-config.js'
 import { canSymlink } from './support/can-symlink.js'
@@ -102,6 +104,13 @@ const EXPIRED_CERT = !keygen ? '' : (() => {
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', old, '-C', 'old@insta'])
   execFileSync('ssh-keygen', ['-q', '-s', join(fixtures, 'ca'), '-I', 'stale', '-n', 'u-svc-1', '-V', '-2h:-1h', `${old}.pub`])
   return readFileSync(`${old}-cert.pub`, 'utf8').trim()
+})()
+/** Still valid, but inside the 5 minute renewal margin, so renewal is attempted. */
+const NEAR_EXPIRY_CERT = !keygen ? '' : (() => {
+  const near = join(fixtures, 'near')
+  execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', near, '-C', 'near@insta'])
+  execFileSync('ssh-keygen', ['-q', '-s', join(fixtures, 'ca'), '-I', 'near', '-n', 'u-svc-1', '-V', '-1h:+2m', `${near}.pub`])
+  return readFileSync(`${near}-cert.pub`, 'utf8').trim()
 })()
 /** A REAL certificate, in date, signed by the same CA -- for a key that is not
  *  ours. `ssh-keygen -L` is perfectly happy with it, and it authenticates
@@ -1822,5 +1831,62 @@ d('the key sent for certification is derived from the PRIVATE key', () => {
     await expect(computeSSH('api', {}, d)).rejects.toThrow(/cannot be read by ssh-keygen/)
     expect(bodies, 'a certificate was requested for a key that cannot be used').toEqual([])
     expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe('the-working-certificate\n')
+  })
+})
+
+d('an expired certificate that could not be renewed says why', () => {
+  const run = async (cert: string, respond: () => Promise<{ status: number; body: unknown }>) => {
+    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    writeFileSync(instaCertPath('api.insta'), cert + '\n')
+    writeAliasStore({ 'api.insta': { projectId: 'proj-1', serviceId: 'svc-1', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1' } })
+    let asked = 0
+    const mod = await import('../src/api.js')
+    const fetchImpl = async () => { asked++; const r = await respond(); return { status: r.status, text: async () => JSON.stringify(r.body) } }
+    const load = vi.spyOn(mod.ApiClient, 'load').mockResolvedValue(new mod.ApiClient({ apiUrl: 'https://example.invalid', accessToken: 't' } as never, fetchImpl as never))
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      await ensureCertForAlias('api.insta', 2_000)
+      return { said: err.mock.calls.map((c) => String(c[0])).join(''), asked }
+    } finally {
+      err.mockRestore()
+      load.mockRestore()
+    }
+  }
+
+  it('says why when an expired certificate could not be renewed', async () => {
+    const { said } = await run(EXPIRED_CERT, () => Promise.reject(new Error('network down')))
+    expect(said).toBe('insta: the SSH certificate for api.insta has expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
+  })
+
+  it('stays silent while the certificate still works', async () => {
+    const { said, asked } = await run(NEAR_EXPIRY_CERT, () => Promise.reject(new Error('network down')))
+    expect(asked, 'renewal was never attempted, so silence proves nothing').toBe(1)
+    expect(said).toBe('')
+  })
+
+  it('names the approval a restricted project is waiting on, in one line', async () => {
+    const body = { status: 'approval_required', message: 'Approval required.\nReview it at https://example.invalid/approvals/a1' }
+    const { said } = await run(EXPIRED_CERT, () => Promise.resolve({ status: 202, body }))
+    expect(said).toContain('needs approval')
+    expect(said).toContain('https://example.invalid/approvals/a1')
+    expect(said.split('\n'), 'the notice spans more than one line').toHaveLength(2)
+  })
+
+  it('tells an agent with no session where to run ssh from', async () => {
+    configureAgent({ source: 'cli-detected', client: 'claude-code' })
+    try {
+      const { said, asked } = await run(EXPIRED_CERT, () => Promise.reject(new Error('the request was sent')))
+      expect(asked, 'a request was sent without an agent session').toBe(0)
+      expect(said).toContain('no agent session for its project in this directory')
+    } finally {
+      configureAgent(null)
+    }
+  })
+
+  it('says a denied agent is denied by policy, and a denied person only that renewal failed', () => {
+    const denied = new ApiError(403, 'compute.shell denied by agent policy')
+    expect(renewalFailureNotice('api.insta', denied, true)).toContain("this project's agent policy does not allow renewing it")
+    expect(renewalFailureNotice('api.insta', denied, false)).toContain('could not be renewed')
+    expect(renewalFailureNotice('api.insta', new AgentApprovalRequired({ message: 'x' }), false)).toContain('needs approval')
   })
 })

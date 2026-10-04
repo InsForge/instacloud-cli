@@ -1,4 +1,5 @@
-import { ApiClient, ApiError, requireProject } from '../api.js'
+import { AgentApprovalRequired, ApiClient, ApiError, requireProject } from '../api.js'
+import { agentMode, AgentSessionMissing } from '../agent.js'
 import { info, printJson, handleApproval, relayExitCode, writeFileAtomicSync, resolveThroughSymlink } from '../util.js'
 import { resolveComputeServiceId, resolveSoleService, q, parseVolumeGib, parseCount } from './services.js'
 
@@ -824,7 +825,7 @@ import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
-  aliasFor, certifiesPublicKey, hasOwnedBlock, isSafeAlias, isSafeConfigValue, isSafeSSHHost, isSafeSSHUsername, isSafeTimestamp, isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, planCertAuthority, renderConfigBlock, revertCertAuthority, upsertConfigBlock, type HostEntry, ownedBlock, ownedBlockIsFirst } from './ssh-config.js'
+  ALIAS_SUFFIX, aliasFor, certifiesPublicKey, hasOwnedBlock, isSafeAlias, isSafeConfigValue, isSafeSSHHost, isSafeSSHUsername, isSafeTimestamp, isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, planCertAuthority, renderConfigBlock, revertCertAuthority, upsertConfigBlock, type HostEntry, ownedBlock, ownedBlockIsFirst } from './ssh-config.js'
 
 /** Where this CLI keeps its own SSH material. Deliberately NOT ~/.ssh: we never
  *  touch a key the user already had, and a dedicated key pairs with
@@ -1068,6 +1069,7 @@ type MintedCert = CertResponse & { staged: StagedCertificate }
 
 async function mintCert(api: ApiClient, projectId: string, serviceId: string, publicKey: string, alias: string, signal?: AbortSignal): Promise<MintedCert> {
   const res = await api.rawRequest('POST', `/projects/${projectId}/services/${serviceId}/ssh-cert`, { publicKey }, { signal })
+  if (res.status === 202 && res.body?.status === 'approval_required') throw new AgentApprovalRequired(res.body)
   if (res.status < 200 || res.status >= 300) {
     throw new ApiError(res.status, res.body?.error ?? 'could not issue an ssh certificate')
   }
@@ -1539,10 +1541,25 @@ function readUserText(path: string): string {
  *    rule __update-check relies on), so the fast path is genuinely local only
  *    when the hook enters through that name.
  *  - Silent and fail-safe. An unlinked directory, an expired login or a network
- *    outage must not print anything or fail the parse: the existing certificate
- *    stays in place and the login then fails with SSH's own message, not a CLI
- *    error spliced into the middle of an ssh session.
+ *    outage must not fail the parse: the existing certificate stays in place.
+ *    Only an already expired one earns a single stderr line saying why.
  */
+/** The one line an expired certificate that could not be renewed gets: what failed and the fix. */
+export function renewalFailureNotice(alias: string, err: unknown, agent: boolean): string {
+  const head = `insta: the SSH certificate for ${alias} has expired`
+  const fix = `insta compute ssh ${alias.slice(0, -ALIAS_SUFFIX.length)}`
+  if (err instanceof AgentSessionMissing) {
+    return `${head}. Agent mode found no agent session for its project in this directory. Run ssh from the project directory, or ask a person to run "${fix}".`
+  }
+  if (err instanceof AgentApprovalRequired) {
+    return `${head} and renewing it needs approval. ${err.message.replace(/\s+/g, ' ').trim()} Retry after it is approved.`
+  }
+  if (agent && err instanceof ApiError && err.status === 403) {
+    return `${head} and this project's agent policy does not allow renewing it.`
+  }
+  return `${head} and could not be renewed. Run "${fix}" to renew it.`
+}
+
 export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQUEST_TIMEOUT_MS): Promise<void> {
   let release: (() => void) | undefined
   try {
@@ -1671,8 +1688,11 @@ export async function ensureCertForAlias(alias: string, timeoutMs = RENEWAL_REQU
     } finally {
       out.staged.discard()
     }
-  } catch {
-    // Deliberately swallowed. See above.
+  } catch (err) {
+    // Swallowed unless this ssh is about to fail on it: then one line says why.
+    if (certNeedsRenewal(instaCertPath(alias), { marginMs: 0 })) {
+      process.stderr.write(renewalFailureNotice(alias, err, agentMode() !== null) + '\n')
+    }
   } finally {
     release?.()
   }

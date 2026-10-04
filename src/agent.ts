@@ -23,6 +23,9 @@ export function canonicalTarget(path: string): string {
 }
 const guidance = 'agent session missing, expired, or for another project/environment — run `insta agent setup`'
 
+/** No usable agent session for the project, looked up from the current directory. */
+export class AgentSessionMissing extends Error {}
+
 export async function issueAgentSession(api: SessionApi, projectId?: string): Promise<Session> {
   const pair = generateKeyPairSync('ed25519')
   const client = mode?.client ?? detectAgent(false)?.client ?? 'unknown'
@@ -62,7 +65,7 @@ export async function loadAgentSession(apiUrl: string, projectId: string, cwd = 
     if (session.projectId !== projectId || session.apiUrl !== apiUrl.replace(/\/+$/, '') || !session.token || !session.privateKey
       || !Number.isFinite(Date.parse(session.expiresAt)) || Date.parse(session.expiresAt) <= Date.now()) throw new Error()
     return session
-  } catch { throw new Error(guidance) }
+  } catch { throw new AgentSessionMissing(guidance) }
 }
 
 // Which project a request is scoped to, when the path itself does not say. Some project-owned
