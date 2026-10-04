@@ -1480,6 +1480,21 @@ d('an automatic renewal moves the alias with the certificate', () => {
     expect(readFileSync(instaCertPath('api.insta'), 'utf8'), 'the fresh certificate was replaced').toBe(certBefore)
   })
 
+  it.skipIf(process.platform === 'win32')('repairs a stanza still keeping connections for ten minutes', async () => {
+    installTheKeyCertWasIssuedFor()
+    const { deps: d } = deps({ installCA: undefined, installConfig: undefined })
+    await computeSSH('api', { setup: true }, d)
+    const cfgPath = configPath()
+    writeFileSync(cfgPath, readFileSync(cfgPath, 'utf8').replace(/  ControlPersist \S+/, '  ControlPersist 10m'))
+    expect(readFileSync(cfgPath, 'utf8'), 'no ControlPersist line to age').toContain('  ControlPersist 10m')
+
+    await renew(() => { throw new Error('the hook minted for a certificate that was not due') })
+
+    const lines = readFileSync(cfgPath, 'utf8').split('\n')
+    expect(lines, 'the ten-minute stanza was not repaired').toContain('  ControlPersist 60s')
+    expect(lines).not.toContain('  ControlPersist 10m')
+  })
+
   it('moves a block that slid below other configuration back to the top', async () => {
     // OpenSSH takes the first obtained value per keyword, so a `Host *` that
     // ended up above our block -- a dotfiles tool, a hand edit -- overrides its

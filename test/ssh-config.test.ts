@@ -477,6 +477,11 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
     expect(cp.length, `ControlPath is ${cp.length} bytes (limit 104): ${cp}`).toBeLessThan(104)
   })
 
+  it('drops a multiplexed connection a minute after its last session', () => {
+    // A master outliving the 300s scale-to-zero idle stays pinned to a pod that is gone.
+    expect(effective('api.insta', rendered()).get('controlpersist')).toBe('60')
+  })
+
   it('does not let a % in the path reach the ControlPath tokens', () => {
     // ControlPath carries tokens we MEANT, and `ssh -G` does expand that one --
     // so it is the check that the escaping did not spill outside the two path
@@ -1288,7 +1293,7 @@ describe('the generated config works on Windows, where multiplexing does not', (
     for (const platform of ['darwin', 'linux'] as const) {
       const out = renderConfigBlock({ entries: [entry()], identityFile: '/home/dev/.insta/ssh/id_ed25519', knownHostsFile: KNOWN_HOSTS, platform })
       expect(out, `${platform} lost connection multiplexing`).toContain('ControlMaster auto')
-      expect(out).toContain('ControlPersist 10m')
+      expect(out).toContain('ControlPersist 60s')
       // Keyed on %C, never %r@%h:%p: a Unix-domain socket path caps at 104 bytes
       // and the route-key user plus the gateway host overflowed it.
       expect(out, `${platform} ControlPath must be the fixed-length %C form`).toContain('ControlPath ~/.insta/ssh/cm-%C')
