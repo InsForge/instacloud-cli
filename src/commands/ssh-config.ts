@@ -186,9 +186,7 @@ export function renderConfigBlock(o: ConfigBlockOpts): string {
       // full ssh-agent gets intermittent, unexplainable auth failures.
       '  IdentitiesOnly yes',
     )
-    // Connection multiplexing collapses scp, an IDE's several connections and a
-    // second terminal onto ONE connection; without it a single developer can
-    // reach the per-service session cap in an afternoon.
+    // Multiplexing spares a handshake per ssh, and 60s keeps a master from outliving a pod that scaled to zero.
     //
     // The socket is keyed on %C -- a hash of (local host, remote host, port,
     // user) -- not %r@%h:%p. A ControlPath is a Unix-domain socket, whose path
@@ -208,7 +206,7 @@ export function renderConfigBlock(o: ConfigBlockOpts): string {
       lines.push(
         '  ControlMaster auto',
         '  ControlPath ~/.insta/ssh/cm-%C',
-        '  ControlPersist 10m',
+        '  ControlPersist 60s',
       )
     }
     if (o.ensureCertCommand) {

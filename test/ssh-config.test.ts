@@ -477,6 +477,11 @@ describe.skipIf(!ssh || process.platform === 'win32')('effective configuration (
     expect(cp.length, `ControlPath is ${cp.length} bytes (limit 104): ${cp}`).toBeLessThan(104)
   })
 
+  it('drops a multiplexed connection a minute after its last session', () => {
+    // A master outliving the 300s scale-to-zero idle stays pinned to a pod that is gone.
+    expect(effective('api.insta', rendered()).get('controlpersist')).toBe('60')
+  })
+
   it('does not let a % in the path reach the ControlPath tokens', () => {
     // ControlPath carries tokens we MEANT, and `ssh -G` does expand that one --
     // so it is the check that the escaping did not spill outside the two path
@@ -966,13 +971,18 @@ describe('renewal hook is silent and fail-safe', () => {
     await quietly('api.insta')
   })
 
-  // A record exists and the certificate is missing, so this path goes all the
-  // way to the platform -- which is not there. Everything downstream of the
-  // certificate check lives inside the same silent boundary.
-  it('says nothing when the platform cannot be reached', async () => {
+  // No certificate and no platform, so this ssh will fail: the hook says why, on stderr only.
+  it('says only why, in one stderr line, when the platform cannot be reached', async () => {
     writeAliasStore({ 'api.insta': { projectId: 'p1', branch: 'main', serviceId: 's1', host: 'h', username: 'u' } })
     expect(existsSync(instaCertPath('api.insta'))).toBe(false)
-    await quietly('api.insta')
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const errOut = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    await expect(computeSSH(undefined, { ensureCert: 'api.insta' })).resolves.toBeUndefined()
+    for (const s of [log, err, out]) expect(s, 'the renewal hook printed into the ssh session').not.toHaveBeenCalled()
+    expect(errOut.mock.calls.map((c) => String(c[0])).join('')).toBe(
+      'insta: the SSH certificate for api.insta is missing or expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
   })
 
   it('says nothing, and touches nothing, for an alias that is not ours', async () => {
@@ -1288,7 +1298,7 @@ describe('the generated config works on Windows, where multiplexing does not', (
     for (const platform of ['darwin', 'linux'] as const) {
       const out = renderConfigBlock({ entries: [entry()], identityFile: '/home/dev/.insta/ssh/id_ed25519', knownHostsFile: KNOWN_HOSTS, platform })
       expect(out, `${platform} lost connection multiplexing`).toContain('ControlMaster auto')
-      expect(out).toContain('ControlPersist 10m')
+      expect(out).toContain('ControlPersist 60s')
       // Keyed on %C, never %r@%h:%p: a Unix-domain socket path caps at 104 bytes
       // and the route-key user plus the gateway host overflowed it.
       expect(out, `${platform} ControlPath must be the fixed-length %C form`).toContain('ControlPath ~/.insta/ssh/cm-%C')

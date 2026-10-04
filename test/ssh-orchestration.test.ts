@@ -11,7 +11,9 @@ import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mk
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
-import { computeSSH, installCertAuthority, instaCertPath, instaAliasStorePath, instaKeyPath, writeAliasStore, readAliasStore, validateCertResponse, acquireLockFile, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate } from '../src/commands/compute.js'
+import { computeSSH, installCertAuthority, instaCertPath, instaAliasStorePath, instaKeyPath, writeAliasStore, readAliasStore, validateCertResponse, acquireLockFile, acquireRenewalLock, ensureCertForAlias, hostPatternFor, stageCertificate, renewalFailureNotice } from '../src/commands/compute.js'
+import { configureAgent } from '../src/agent.js'
+import { ApiError, AgentApprovalRequired } from '../src/api.js'
 import { isSSHCertificateRecord, mayWidenCAHost, parseCAPublicKey, BLOCK_BEGIN,
 } from '../src/commands/ssh-config.js'
 import { canSymlink } from './support/can-symlink.js'
@@ -103,6 +105,13 @@ const EXPIRED_CERT = !keygen ? '' : (() => {
   execFileSync('ssh-keygen', ['-q', '-s', join(fixtures, 'ca'), '-I', 'stale', '-n', 'u-svc-1', '-V', '-2h:-1h', `${old}.pub`])
   return readFileSync(`${old}-cert.pub`, 'utf8').trim()
 })()
+/** Still valid but inside the 5 minute renewal margin; minted on call so a slow run cannot outlive it. */
+const nearExpiryCert = () => {
+  const near = join(mkdtempSync(join(fixtures, 'near-')), 'key')
+  execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', near, '-C', 'near@insta'])
+  execFileSync('ssh-keygen', ['-q', '-s', join(fixtures, 'ca'), '-I', 'near', '-n', 'u-svc-1', '-V', '-1h:+2m', `${near}.pub`])
+  return readFileSync(`${near}-cert.pub`, 'utf8').trim()
+}
 /** A REAL certificate, in date, signed by the same CA -- for a key that is not
  *  ours. `ssh-keygen -L` is perfectly happy with it, and it authenticates
  *  nothing on this machine. */
@@ -1480,6 +1489,41 @@ d('an automatic renewal moves the alias with the certificate', () => {
     expect(readFileSync(instaCertPath('api.insta'), 'utf8'), 'the fresh certificate was replaced').toBe(certBefore)
   })
 
+  it.skipIf(process.platform === 'win32')('repairs a stanza still keeping connections for ten minutes', async () => {
+    installTheKeyCertWasIssuedFor()
+    const { deps: d } = deps({ installCA: undefined, installConfig: undefined })
+    await computeSSH('api', { setup: true }, d)
+    const cfgPath = configPath()
+    writeFileSync(cfgPath, readFileSync(cfgPath, 'utf8').replace(/  ControlPersist \S+/, '  ControlPersist 10m'))
+    expect(readFileSync(cfgPath, 'utf8'), 'no ControlPersist line to age').toContain('  ControlPersist 10m')
+
+    await renew(() => { throw new Error('the hook minted for a certificate that was not due') })
+
+    const lines = readFileSync(cfgPath, 'utf8').split('\n')
+    expect(lines, 'the ten-minute stanza was not repaired').toContain('  ControlPersist 60s')
+    expect(lines).not.toContain('  ControlPersist 10m')
+  })
+
+  // Root can write into a 0500 directory, so the blocked repair this needs only happens for other users.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('says why when an expired certificate cannot even get its stale stanza repaired', async () => {
+    await anInstalledAlias()
+    const cfgPath = configPath()
+    writeFileSync(cfgPath, readFileSync(cfgPath, 'utf8').replace(/  ControlPersist \S+/, '  ControlPersist 10m'))
+    const sshDir = join(home, '.ssh')
+    chmodSync(sshDir, 0o500) // the repair's write into ~/.ssh fails
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    let said = ''
+    try {
+      await renew(() => { throw new Error('reached the platform past a failed repair') })
+      said = err.mock.calls.map((c) => String(c[0])).join('')
+    } finally {
+      err.mockRestore()
+      chmodSync(sshDir, 0o700)
+    }
+    expect(readFileSync(cfgPath, 'utf8'), 'the repair was not actually blocked, so this proves nothing').toContain('  ControlPersist 10m')
+    expect(said).toBe('insta: the SSH certificate for api.insta is missing or expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
+  })
+
   it('moves a block that slid below other configuration back to the top', async () => {
     // OpenSSH takes the first obtained value per keyword, so a `Host *` that
     // ended up above our block -- a dotfiles tool, a hand edit -- overrides its
@@ -1807,5 +1851,102 @@ d('the key sent for certification is derived from the PRIVATE key', () => {
     await expect(computeSSH('api', {}, d)).rejects.toThrow(/cannot be read by ssh-keygen/)
     expect(bodies, 'a certificate was requested for a key that cannot be used').toEqual([])
     expect(readFileSync(instaCertPath('api.insta'), 'utf8')).toBe('the-working-certificate\n')
+  })
+})
+
+d('an expired certificate that could not be renewed says why', () => {
+  const run = async (cert: string, respond: () => Promise<{ status: number; body: unknown }>) => {
+    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    writeFileSync(instaCertPath('api.insta'), cert + '\n')
+    writeAliasStore({ 'api.insta': { projectId: 'proj-1', serviceId: 'svc-1', host: 'ssh.us-west-1.compute.example', username: 'u-svc-1' } })
+    let asked = 0
+    const mod = await import('../src/api.js')
+    const fetchImpl = async () => { asked++; const r = await respond(); return { status: r.status, text: async () => JSON.stringify(r.body) } }
+    const load = vi.spyOn(mod.ApiClient, 'load').mockResolvedValue(new mod.ApiClient({ apiUrl: 'https://example.invalid', accessToken: 't' } as never, fetchImpl as never))
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      await ensureCertForAlias('api.insta', 2_000)
+      return { said: err.mock.calls.map((c) => String(c[0])).join(''), asked }
+    } finally {
+      err.mockRestore()
+      load.mockRestore()
+    }
+  }
+
+  it('says why when an expired certificate could not be renewed', async () => {
+    const { said } = await run(EXPIRED_CERT, () => Promise.reject(new Error('network down')))
+    expect(said).toBe('insta: the SSH certificate for api.insta is missing or expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
+  })
+
+  it('stays silent while the certificate still works', async () => {
+    const { said, asked } = await run(nearExpiryCert(), () => Promise.reject(new Error('network down')))
+    expect(asked, 'renewal was never attempted, so silence proves nothing').toBe(1)
+    expect(said).toBe('')
+  })
+
+  it('names the approval a restricted project is waiting on, in one line', async () => {
+    const body = { status: 'approval_required', message: 'Approval required.\nReview it at https://example.invalid/approvals/a1' }
+    const { said } = await run(EXPIRED_CERT, () => Promise.resolve({ status: 202, body }))
+    expect(said).toContain('needs approval')
+    expect(said).toContain('https://example.invalid/approvals/a1')
+    expect(said.split('\n'), 'the notice spans more than one line').toHaveLength(2)
+  })
+
+  it('strips terminal control sequences from the platform approval text', async () => {
+    const body = { status: 'approval_required', message: 'Approval required.\u001b[2J\u009b31m Review it at https://example.invalid/approvals/a1' }
+    const { said } = await run(EXPIRED_CERT, () => Promise.resolve({ status: 202, body }))
+    expect(said, 'an ESC reached the terminal').not.toContain('\u001b')
+    expect(said, 'a C1 CSI reached the terminal').not.toContain('\u009b')
+    expect(said).toContain('https://example.invalid/approvals/a1')
+    expect(said.split('\n'), 'the notice spans more than one line').toHaveLength(2)
+  })
+
+  it('strips bidi controls that could reorder the approval text on screen', async () => {
+    const body = { status: 'approval_required', message: 'Approval required. ‮Review it‬ at ⁦https://example.invalid/approvals/a1⁩' }
+    const { said } = await run(EXPIRED_CERT, () => Promise.resolve({ status: 202, body }))
+    expect(said, 'a bidi control reached the terminal').not.toMatch(/[‎‏‪-‮⁦-⁩]/)
+    expect(said).toContain('https://example.invalid/approvals/a1')
+  })
+
+  it('tells an agent with no session where to run ssh from', async () => {
+    configureAgent({ source: 'cli-detected', client: 'claude-code' })
+    try {
+      const { said, asked } = await run(EXPIRED_CERT, () => Promise.reject(new Error('the request was sent')))
+      expect(asked, 'a request was sent without an agent session').toBe(0)
+      expect(said).toContain('no agent session for its project in this directory')
+    } finally {
+      configureAgent(null)
+    }
+  })
+
+  it('says another ssh is renewing it when it loses the renewal lock', async () => {
+    mkdirSync(join(home, '.insta', 'ssh'), { recursive: true })
+    const held = acquireRenewalLock('api.insta')
+    expect(held, 'the test could not take the renewal lock').toBeDefined()
+    try {
+      const { said, asked } = await run(EXPIRED_CERT, () => Promise.reject(new Error('the loser sent a request')))
+      expect(asked, 'the loser of the lock race reached the platform').toBe(0)
+      expect(said).toBe('insta: the SSH certificate for api.insta is missing or expired and another ssh may be renewing it right now. Retry in a moment, or run "insta compute ssh api".\n')
+    } finally {
+      held!()
+    }
+  })
+
+  it('says why when a renewal is abandoned after the mint', async () => {
+    installTheKeyCertWasIssuedFor()
+    const good = { certificate: CERT, host: 'ssh.us-west-1.compute.example', username: 'u-svc-1', expiresAt: '2026-09-14T22:00:00Z', caPublicKey: CA }
+    // The record vanishes while the mint is in flight, so the commit gives up.
+    const { said, asked } = await run(EXPIRED_CERT, () => { writeAliasStore({}); return Promise.resolve({ status: 200, body: good }) })
+    expect(asked, 'the mint was never reached, so this is not the abandoned-commit path').toBe(1)
+    expect(readFileSync(instaCertPath('api.insta'), 'utf8'), 'the abandoned renewal installed a certificate').toBe(EXPIRED_CERT + '\n')
+    expect(said).toBe('insta: the SSH certificate for api.insta is missing or expired and could not be renewed. Run "insta compute ssh api" to renew it.\n')
+  })
+
+  it('names a policy denial only when the platform says the agent policy denied it', () => {
+    const policy = new ApiError(403, 'compute.shell, secrets.read denied by agent policy')
+    const other = new ApiError(403, 'a shell needs an interactive login: run `insta login --oauth`')
+    expect(renewalFailureNotice('api.insta', policy)).toContain("this project's agent policy does not allow renewing it")
+    expect(renewalFailureNotice('api.insta', other)).toContain('could not be renewed')
+    expect(renewalFailureNotice('api.insta', new AgentApprovalRequired({ message: 'x' }))).toContain('needs approval')
   })
 })
