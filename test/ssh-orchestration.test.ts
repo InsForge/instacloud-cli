@@ -741,6 +741,22 @@ d('the branch the alias was set up on is the one it stays on', () => {
     expect(readAliasStore()['api.insta']).not.toHaveProperty('branch')
   })
 
+  it('targets --project without reading the link, on main', async () => {
+    const paths: string[] = []
+    const loadProject = async () => { throw new Error('the link was read despite --project') }
+    const { deps: d } = deps({ loadApi: recordingApi(paths), loadProject })
+    await computeSSH('api', { project: 'proj-2' }, d)
+    expect(paths[0]).toBe('/projects/proj-2/services?branch=main')
+    expect(readAliasStore()['api.insta']).toMatchObject({ projectId: 'proj-2', branch: 'main' })
+  })
+
+  it('combines --project with --branch', async () => {
+    const paths: string[] = []
+    const { deps: d } = deps({ loadApi: recordingApi(paths), loadProject: project('proj-1', 'main') })
+    await computeSSH('api', { project: 'proj-2', branch: 'feature-x' }, d)
+    expect(paths[0]).toBe('/projects/proj-2/services?branch=feature-x')
+  })
+
   it('refuses the same alias on a different branch of the same project', async () => {
     // The collision this field exists for, and the one case the branch is the
     // ONLY thing distinguishing: same project, same service name, two branches.
