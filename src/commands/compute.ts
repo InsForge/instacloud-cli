@@ -849,7 +849,7 @@ export const userKnownHostsPath = () => join(homedir(), '.ssh', 'known_hosts')
 /** The renewal-hook command prefix. ssh-config.ts appends the validated alias. */
 export const ENSURE_CERT_COMMAND = 'insta __ssh-ensure-cert'
 
-type SSHOpts = LifeOpts & { setup?: boolean; ensureCert?: string; json?: boolean }
+type SSHOpts = LifeOpts & { setup?: boolean; ensureCert?: string; project?: string; json?: boolean }
 
 /** What an alias stands for. The renewal hook is handed nothing but the alias —
  *  no positional argument, no guarantee the cwd is even a linked project — so
@@ -1953,7 +1953,8 @@ export async function computeSSH(serviceName: string | undefined, opts: SSHOpts,
   const mint = deps.mint ?? mintCert
   const emit = deps.emit ?? info
   const api = await (deps.loadApi ?? ApiClient.load)()
-  const p = await (deps.loadProject ?? requireProject)()
+  // 'main' is what a link records by default; anything else makes assertAliasFree refuse a setup of the same service from a linked directory.
+  const p = opts.project !== undefined ? { projectId: opts.project, branch: 'main' } : await (deps.loadProject ?? requireProject)()
   const branch = opts.branch ?? p.branch
   const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
   const svc = resolveSoleService(services as ComputeRow[], 'compute', serviceName)
