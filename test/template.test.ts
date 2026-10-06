@@ -8,7 +8,7 @@ import {
 } from '../src/template-manifest.js'
 import {
   templateListLines, templateInfoLines, normalizeInfoServices, normalizeInfoVariables,
-  parseSetFlags, resolveVariables, missingVariablesFrom, looksLikePath, deployMode, templateDeploy,
+  parseSetFlags, resolveVariables, missingVariablesFrom, looksLikePath, deployMode, templateDeploy, publicBucketLines,
   stepIndexFor, deploymentUrls, serviceStateLines, partialMessage, watchDeployment, DEPLOY_STEPS,
 } from '../src/commands/template.js'
 import { ApiError } from '../src/api.js'
@@ -84,13 +84,10 @@ describe('validateManifest', () => {
     const m = { ...MANIFEST, services: { app: { type: 'worker', image: 'nginx:latest' } } }
     expect(validateManifest(m).join('\n')).toMatch(/not a pin/)
   })
-  // The platform's service model (templateManifest.ts): type is web|worker|postgres|redis|mysql|
-  // mongodb, image XOR build. `lambda` (not a managed type — see services.ts's own fixture) stands
-  // in for an unknown type so this stays about the enum + image/build rules, not the bare-datastore ones.
-  it('requires a known type and exactly one of image/build', () => {
-    const m: TemplateManifest = { code: 'x', version: '1', services: { a: { type: 'lambda' as any, image: 'a:1', build: 'b' }, b: {} } }
+  // The CLI judges only the compute vocabulary, web and worker. image XOR build is its rule.
+  it('requires exactly one of image/build on a web or worker service', () => {
+    const m: TemplateManifest = { code: 'x', version: '1', services: { a: { type: 'web', image: 'a:1', build: 'b', healthcheck: '/' }, b: { type: 'worker' } } }
     const problems = validateManifest(m)
-    expect(problems).toContain('services.a.type must be one of web, worker, postgres, redis, mysql, mongodb')
     expect(problems).toContain('services.a: image and build are mutually exclusive')
     expect(problems).toContain('services.b: one of image or build is required')
   })
@@ -106,81 +103,84 @@ describe('validateManifest', () => {
     expect(validateManifest(m)).toEqual([])
   })
 
-  // Bare means bare: the platform owns the image, port, sizing, credentials and env, and silently
-  // ignores anything a manifest sets. Naming the field here beats being ignored server-side.
-  it('refuses a postgres service that tries to configure itself', () => {
+  // Everything but web and worker is the platform's to judge, so the CLI never blocks a type or a
+  // field it merely does not know. An old CLI stays usable against a newer platform.
+  it('sends a postgres service that tries to configure itself on to the platform to refuse', () => {
     const m: TemplateManifest = {
       code: 'x', version: '1',
       services: { db: { type: 'postgres', image: 'postgres:16', port: 5432, volume: true } },
     }
-    const problems = validateManifest(m).join('\n')
-    expect(problems).toMatch(/services\.db\.image: a postgres service is platform-managed and carries no image/)
-    expect(problems).toMatch(/services\.db\.port: .* carries no port/)
-    expect(problems).toMatch(/services\.db\.volume: .* carries no volume/)
-    // The bare branch returns before the image/build rules, so it must not also demand an image.
-    expect(problems).not.toMatch(/one of image or build is required/)
+    expect(validateManifest(m)).toEqual([])
   })
 
-  it('refuses env on a postgres service, but tolerates an empty shell', () => {
+  it('leaves env on a postgres service to the platform, and still accepts the empty shell', () => {
     const withEnv: TemplateManifest = {
       code: 'x', version: '1',
       services: { db: { type: 'postgres', env: { fixed: { A: '1' } } } },
     }
-    expect(validateManifest(withEnv).join('\n')).toMatch(/services\.db\.env: a postgres service is platform-managed and carries no env/)
-
-    // A normalized manifest round-trips through the platform carrying empty groups; accepting the
-    // shell means a published manifest can be re-validated locally without edits.
+    expect(validateManifest(withEnv)).toEqual([])
     const shell: TemplateManifest = {
       code: 'x', version: '1',
       services: { db: { type: 'postgres', env: { fixed: {}, generated: {}, required: {}, optional: {} } } },
     }
     expect(validateManifest(shell)).toEqual([])
   })
-  // The three managed datastores are declared bare, exactly as postgres is. The platform owns their
-  // image, port, sizing and credentials, so naming any of them here could only drift from the catalog.
-  // All eight bare-disallowed fields are asserted (not a subset) so a future edit that drops a name
-  // from that array ships with a red test, not a silently-narrower rule.
-  it('accepts a bare managed datastore and refuses every field the platform owns', () => {
-    for (const type of ['postgres', 'redis', 'mysql', 'mongodb'] as const) {
+
+  it('judges no field of a datastore or a bucket, for every type', () => {
+    for (const type of ['postgres', 'redis', 'mysql', 'mongodb', 'storage'] as const) {
       expect(validateManifest({ code: 'x', version: '1', services: { store: { type } } } as unknown as TemplateManifest)).toEqual([])
-      for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn', 'command', 'mountPath']) {
-        const value = field === 'mountPath' ? '/x' : true
+      for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn', 'command', 'mountPath', 'env']) {
+        const value = field === 'mountPath' ? '/x' : field === 'env' ? { fixed: { A: '1' } } : true
         const m = { code: 'x', version: '1', services: { store: { type, [field]: value } } } as unknown as TemplateManifest
-        expect(validateManifest(m).join('\n')).toContain(`a ${type} service is platform-managed and carries no ${field}`)
+        expect(validateManifest(m), `${type}.${field}`).toEqual([])
       }
     }
   })
 
-  it('names every accepted type when the type is wrong', () => {
-    const m = { code: 'x', version: '1', services: { a: { type: 'redys', image: 'a:1' } } } as unknown as TemplateManifest
-    expect(validateManifest(m).join('\n')).toContain('type must be one of web, worker, postgres, redis, mysql, mongodb')
-  })
-
-  // A YAML array like `type: [redis]` stringifies to exactly "redis", so a type check that reads
-  // it through String() would pass both the enum check and the managed-type branch, and ship the
-  // unchanged array to the platform. The type must be read as a real string instead.
-  it('rejects an array type instead of coercing it into a matching string', () => {
-    const m = { code: 'x', version: '1', services: { a: { type: ['redis'] } } } as unknown as TemplateManifest
-    const problems = validateManifest(m)
-    expect(problems).toContain('services.a.type must be one of web, worker, postgres, redis, mysql, mongodb')
-    // Must not have been read as bare-managed-redis (which would produce no other problems).
-    expect(problems.join('\n')).not.toMatch(/platform-managed/)
-  })
-
-  // The env bare-shell rule generalized from postgres-only to all four managed types — the very
-  // line this task's diff moved — so it needs its own evidence for redis, mysql and mongodb, not
-  // just the pre-existing postgres-only test above.
-  it('refuses env on any managed datastore, but tolerates the exact empty shell, for every type', () => {
-    for (const type of ['postgres', 'redis', 'mysql', 'mongodb'] as const) {
-      const withEnv = { code: 'x', version: '1', services: { db: { type, env: { fixed: { A: '1' } } } } } as unknown as TemplateManifest
-      expect(validateManifest(withEnv).join('\n')).toContain(`a ${type} service is platform-managed and carries no env`)
-
-      const shell = {
-        code: 'x', version: '1',
-        services: { db: { type, env: { fixed: {}, generated: {}, platform: {}, required: {}, optional: {} } } },
-      } as unknown as TemplateManifest
-      expect(validateManifest(shell)).toEqual([])
+  it('accepts a postgres with a pgVersion and a public bucket bound into a web service', () => {
+    const m: TemplateManifest = {
+      code: 'x', version: '1',
+      services: {
+        db: { type: 'postgres', pgVersion: 17 },
+        files: { type: 'storage', public: true },
+        app: {
+          type: 'web', image: 'a:1', healthcheck: '/',
+          env: { platform: { DATABASE_URL: '${{services.db.DATABASE_URL}}', S3_KEY: '${{services.files.AWS_ACCESS_KEY_ID}}' } },
+        },
+      },
     }
+    expect(validateManifest(m)).toEqual([])
+  })
+
+  it('does not judge a type it does not know, an array type included', () => {
+    for (const type of ['redys', 'lambda', ['redis']]) {
+      const m = { code: 'x', version: '1', services: { a: { type, image: 'a:1' } } } as unknown as TemplateManifest
+      expect(validateManifest(m), JSON.stringify(type)).toEqual([])
+    }
+  })
+
+  // `type: [redis]` stringifies to exactly "redis", so a read through String() would take it for a datastore.
+  it('does not read an array type as a datastore when it checks a url ref', () => {
+    const m = {
+      code: 'x', version: '1',
+      services: {
+        store: { type: ['redis'] },
+        app: { type: 'worker', image: 'a:1', env: { fixed: { TARGET: '${services.store.url}' } } },
+      },
+    } as unknown as TemplateManifest
+    expect(validateManifest(m)).toEqual([])
+  })
+
+  // A public bucket may get an address later, so the platform and not this CLI decides on its url or host.
+  it('leaves a fixed-value url or host ref to a bucket to the platform', () => {
+    const m: TemplateManifest = {
+      code: 'x', version: '1',
+      services: {
+        files: { type: 'storage', public: true },
+        app: { type: 'worker', image: 'a:1', env: { fixed: { TARGET: '${services.files.url}' } } },
+      },
+    }
+    expect(validateManifest(m)).toEqual([])
   })
 
   // A managed datastore has no url/host: the platform refuses a fixed-value ref to one
@@ -331,6 +331,17 @@ describe('parseManifestYaml', () => {
     const m = parseManifestYaml(['code: demo', 'version: "1.0"', 'services:', '  app:', '    type: worker', '    image: nginx:1.27'].join('\n'))
     expect(m.code).toBe('demo')
   })
+  it('returns a storage service and a key it does not know exactly as written', () => {
+    const m = parseManifestYaml([
+      'code: demo', 'version: "1.0"', 'services:',
+      '  files:', '    type: storage', '    public: true',
+      '  db:', '    type: postgres', '    pgVersion: 17', '    flavour: spicy',
+    ].join('\n'))
+    expect(m.services).toEqual({
+      files: { type: 'storage', public: true },
+      db: { type: 'postgres', pgVersion: 17, flavour: 'spicy' },
+    })
+  })
   it('lists every problem, prefixed with the source file', () => {
     expect(() => parseManifestYaml('code: demo\n', 'x/insta.template.yaml')).toThrow(/x\/insta\.template\.yaml is not deployable:[\s\S]*version is required[\s\S]*at least one service/)
   })
@@ -404,6 +415,35 @@ describe('templateInfoLines', () => {
     expect(templateInfoLines(customMountTpl)).toContain('services (1): agent (web, port 7681, persistent /app/storage)')
   })
 
+  it('says the Postgres version and whether a bucket is public', () => {
+    const t = {
+      ...tpl,
+      services: {
+        app: { type: 'web', port: 8000 },
+        db: { type: 'postgres', pgVersion: 17 },
+        assets: { type: 'storage', public: true },
+        scratch: { type: 'storage' },
+      },
+    }
+    expect(templateInfoLines(t)).toContain(
+      'services (4): app (web, port 8000), db (postgres 17), assets (storage, public), scratch (storage, private)',
+    )
+  })
+  it('names a postgres with no version plainly, and ignores pgVersion and public on other types', () => {
+    const t = { ...tpl, services: { db: { type: 'postgres' }, app: { type: 'web', port: 80, pgVersion: 17, public: true } } }
+    expect(templateInfoLines(t)).toContain('services (2): db (postgres), app (web, port 80)')
+  })
+  it('carries pgVersion and public only when they are the right kind of value', () => {
+    expect(normalizeInfoServices({
+      db: { type: 'postgres', pgVersion: 17 },
+      files: { type: 'storage', public: true },
+      odd: { type: 'postgres', pgVersion: '17', public: 'yes' },
+    })).toEqual([
+      { name: 'db', type: 'postgres', pgVersion: 17, volume: false },
+      { name: 'files', type: 'storage', public: true, volume: false },
+      { name: 'odd', type: 'postgres', volume: false },
+    ])
+  })
   it('renders header fields, a services summary, and grouped variables', () => {
     const lines = templateInfoLines(tpl)
     expect(lines[0]).toBe('plausible — Plausible')
@@ -440,6 +480,21 @@ describe('templateInfoLines', () => {
   it('accepts flat variable arrays too', () => {
     const vars = normalizeInfoVariables([{ name: 'A', required: true, description: 'a' }, { name: 'B' }])
     expect(vars).toMatchObject([{ name: 'A', required: true }, { name: 'B', required: false }])
+  })
+})
+
+describe('publicBucketLines', () => {
+  it('names each public bucket, whichever shape the services arrive in', () => {
+    const line = (name: string) => `${name}: public bucket, anyone can read its files (anonymous public-read)`
+    const map = { media: { type: 'storage', public: true }, docs: { type: 'storage', public: true }, quiet: { type: 'storage', public: false }, scratch: { type: 'storage' } }
+    expect(publicBucketLines(map)).toEqual([line('media'), line('docs')])
+    expect(publicBucketLines(Object.entries(map).map(([name, s]) => ({ name, ...s })))).toEqual([line('media'), line('docs')])
+  })
+
+  it('says nothing for a service that is not a bucket, or for no services at all', () => {
+    expect(publicBucketLines({ app: { type: 'web', public: true }, db: { type: 'postgres', public: true } })).toEqual([])
+    expect(publicBucketLines({ files: { type: 'storage', public: 'yes' } })).toEqual([])
+    expect(publicBucketLines(undefined)).toEqual([])
   })
 })
 
@@ -592,13 +647,14 @@ function fakeApi(
   deployment: any = { status: 'succeeded', services: [{ name: 'app', state: 'healthy', url: 'https://app.example' }] },
   postResult: { status: number; body: any } = { status: 200, body: { deploymentId: 'dep_1' } },
   templateVars: unknown = { required: [], optional: [] },
+  templateServices?: unknown,
 ) {
   const posts: any[] = []
   const polls: string[] = []
   const pollScopes: unknown[] = []
   const api = {
     request: async (_m: string, path: string, _body?: unknown, opts?: unknown) => {
-      if (path.startsWith('/templates/')) return { template: { code: 'plausible', variables: templateVars } }
+      if (path.startsWith('/templates/')) return { template: { code: 'plausible', variables: templateVars, ...(templateServices ? { services: templateServices } : {}) } }
       if (path.startsWith('/template-deployments/')) { polls.push(path); pollScopes.push(opts); return deployment }
       throw new Error(`unexpected GET ${path}`)
     },
@@ -648,6 +704,82 @@ describe('templateDeploy', () => {
     expect(posts[0].manifest.code).toBe('plausible-fork')
     expect(posts[0].templateCode).toBeUndefined()
     expect(stdout.join('')).toContain('deploying local template plausible-fork@1.0')
+  })
+
+  // The platform is the authority on fields: a storage service, a pgVersion and a key the CLI has
+  // never heard of all travel exactly as written, and the platform's answer decides.
+  it('sends a public bucket, a pgVersion and an unknown service key verbatim', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'insta-tpl-'))
+    mkdirSync(join(root, 'bucket'))
+    writeFileSync(join(root, 'bucket', 'insta.template.yaml'), [
+      'code: bucket', 'version: "1.0"', 'services:',
+      '  files:', '    type: storage', '    public: true',
+      '  db:', '    type: postgres', '    pgVersion: 17', '    flavour: spicy',
+      '  app:', '    type: worker', '    image: nginx:1.27', '',
+    ].join('\n'))
+    const { api, posts } = fakeApi()
+    await templateDeploy(join(root, 'bucket'), {}, { api, project: PROJECT, wait: NO_WAIT })
+    expect(posts).toHaveLength(1)
+    expect(posts[0].manifest.services).toEqual({
+      files: { type: 'storage', public: true },
+      db: { type: 'postgres', pgVersion: 17, flavour: 'spicy' },
+      app: { type: 'worker', image: 'nginx:1.27' },
+    })
+  })
+
+  // Only `template info` used to say a bucket is public, so the person deploying never heard it.
+  const PUBLIC_LINE = 'files: public bucket, anyone can read its files (anonymous public-read)'
+  const BUCKETS = {
+    files: { type: 'storage', public: true },
+    scratch: { type: 'storage' },
+    db: { type: 'postgres', pgVersion: 17 },
+    app: { type: 'worker', image: 'nginx:1.27' },
+  }
+
+  it('says which buckets are public when a local manifest deploys, and nothing about a private one', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'insta-tpl-'))
+    mkdirSync(join(root, 'bucket'))
+    writeFileSync(join(root, 'bucket', 'insta.template.yaml'), [
+      'code: bucket', 'version: "1.0"', 'services:',
+      '  files:', '    type: storage', '    public: true',
+      '  scratch:', '    type: storage',
+      '  app:', '    type: worker', '    image: nginx:1.27', '',
+    ].join('\n'))
+    const { api } = fakeApi()
+    await templateDeploy(join(root, 'bucket'), {}, { api, project: PROJECT, wait: NO_WAIT })
+    const out = stdout.join('')
+    expect(out.split('\n').filter((l) => l.includes('public bucket'))).toEqual([PUBLIC_LINE])
+    expect(out).not.toContain('scratch:')
+    // It rides with the accepted deploy, ahead of the progress lines.
+    expect(out.indexOf(PUBLIC_LINE)).toBeGreaterThan(out.indexOf('deploying template bucket to branch main'))
+    expect(out.indexOf(PUBLIC_LINE)).toBeLessThan(out.indexOf('create services'))
+  })
+
+  it('says it for a registry template too, from the detail the command already reads', async () => {
+    const { api } = fakeApi(undefined, undefined, undefined, BUCKETS)
+    await templateDeploy('plausible', {}, { api, project: PROJECT, wait: NO_WAIT })
+    expect(stdout.join('').split('\n').filter((l) => l.includes('public bucket'))).toEqual([PUBLIC_LINE])
+  })
+
+  it('says it for a fetched GitHub manifest', async () => {
+    const { api } = fakeApi()
+    const manifest = { code: 'bot', version: '1.4.0', services: BUCKETS } as TemplateManifest
+    await templateDeploy('https://github.com/acme/tpl', {}, {
+      api, project: PROJECT, wait: NO_WAIT,
+      fetchGitHub: async () => ({ source: { repo: 'acme/tpl', ref: 'main', path: '', commit: '9'.repeat(40) }, manifest }),
+    })
+    expect(stdout.join('').split('\n').filter((l) => l.includes('public bucket'))).toEqual([PUBLIC_LINE])
+  })
+
+  it('keeps the line out of --json output, and out of a deploy that is only gated', async () => {
+    const { api } = fakeApi(undefined, undefined, undefined, BUCKETS)
+    await templateDeploy('plausible', { json: true }, { api, project: PROJECT, wait: NO_WAIT })
+    expect(stdout.join('')).not.toContain('public bucket')
+    expect(JSON.parse(stdout.join(''))).toMatchObject({ status: 'succeeded' })
+    stdout.length = 0
+    const gated = fakeApi(undefined, GATED, undefined, BUCKETS)
+    await templateDeploy('plausible', {}, { api: gated.api, project: PROJECT, wait: NO_WAIT })
+    expect(stdout.join('')).toBe('')
   })
 
   // --json is a contract: stdout must parse as ONE document, so no progress line may precede it.

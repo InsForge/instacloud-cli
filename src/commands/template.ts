@@ -42,7 +42,7 @@ export function templateListLines(templates: TemplateIndexEntry[]): string[] {
 // `volume` is the boolean a manifest declares now; `volumeGib` is a size a registry published
 // before sizing moved to the platform. Both are read: the catalog serves whichever the row carries,
 // and dropping the size on its own would quietly stop saying the service HAS a disk.
-type InfoService = { name: string; type?: string; port?: number; volumeGib?: number; volume?: boolean; mountPath?: string }
+type InfoService = { name: string; type?: string; port?: number; volumeGib?: number; volume?: boolean; mountPath?: string; pgVersion?: number; public?: boolean }
 
 // The info endpoint may list services as an array or keep the manifest's map shape — render both.
 export function normalizeInfoServices(raw: unknown): InfoService[] {
@@ -51,6 +51,8 @@ export function normalizeInfoServices(raw: unknown): InfoService[] {
     volumeGib: s?.volumeGib ?? s?.volume?.size,
     volume: s?.volume === true || s?.volumeGib != null || s?.volume?.size != null,
     mountPath: typeof s?.mountPath === 'string' ? s.mountPath : undefined,
+    pgVersion: typeof s?.pgVersion === 'number' ? s.pgVersion : undefined,
+    public: typeof s?.public === 'boolean' ? s.public : undefined,
   })
   if (Array.isArray(raw)) return raw.map((s: any) => one(s?.name ?? '?', s))
   if (raw && typeof raw === 'object') return Object.entries(raw as Record<string, any>).map(([name, s]) => one(name, s))
@@ -79,6 +81,20 @@ export type TemplateInfo = {
   variables?: unknown
 }
 
+// The type plus what the manifest fixes about it: a Postgres major, or whether anyone can read a bucket.
+function infoKind(s: InfoService): string | undefined {
+  if (s.type === 'postgres' && s.pgVersion !== undefined) return `postgres ${s.pgVersion}`
+  if (s.type === 'storage') return `storage, ${s.public ? 'public' : 'private'}`
+  return s.type && s.type !== 'compute' ? s.type : undefined
+}
+
+// One line per bucket the template opens to the world, so a deploy never makes one public unannounced.
+export function publicBucketLines(services: unknown): string[] {
+  return normalizeInfoServices(services)
+    .filter((s) => s.type === 'storage' && s.public === true)
+    .map((s) => `${s.name}: public bucket, anyone can read its files (anonymous public-read)`)
+}
+
 // `bold` is injected so the renderer stays pure (tests pass identity; the command passes ANSI
 // bold on a TTY).
 export function templateInfoLines(t: TemplateInfo, bold: (s: string) => string = (s) => s): string[] {
@@ -96,7 +112,7 @@ export function templateInfoLines(t: TemplateInfo, bold: (s: string) => string =
       // A size only when the registry still carries one: a manifest names no size any more, so
       // "persistent /data" is all there is to say until the service exists.
       const disk = s.volumeGib ? `${s.volumeGib}Gi volume` : s.volume ? `persistent ${s.mountPath ?? '/data'}` : undefined
-      const bits = [s.type && s.type !== 'compute' ? s.type : undefined, s.port ? `port ${s.port}` : undefined, disk].filter(Boolean)
+      const bits = [infoKind(s), s.port ? `port ${s.port}` : undefined, disk].filter(Boolean)
       return `${s.name}${bits.length ? ` (${bits.join(', ')})` : ''}`
     })
     lines.push(`services (${services.length}): ${summary.join(', ')}`)
@@ -367,10 +383,12 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
   let manifest: TemplateManifest | undefined
   let source: GitHubSource | undefined
   let vars: TemplateVar[]
+  let services: unknown // what the template declares, for the one thing the deployer must be told
   if (mode.kind === 'github') {
     const fetched = await (deps.fetchGitHub ?? ((t: GitHubTarget) => fetchGitHubTemplate(t)))(mode.target)
     manifest = fetched.manifest
     source = fetched.source
+    services = manifest.services
     vars = collectManifestVariables(manifest)
     // Exactly ONE line in front of today's output. A second "deploying template …" line
     // would read as a duplicate of the "deploying template <code> to branch <branch>" line below,
@@ -380,12 +398,14 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
     }
   } else if (mode.kind === 'local') {
     manifest = loadTemplateManifest(mode.dir) // parse + local validation (pinned images, described vars)
+    services = manifest.services
     vars = collectManifestVariables(manifest)
     if (!quiet) info(`deploying local template ${manifest.code}@${manifest.version}`)
   } else {
     // Learn the variable set up front from the registry so prompting happens before the POST.
     const tpl = await api.request('GET', `/templates/${encodeURIComponent(mode.code)}`)
     vars = normalizeInfoVariables((tpl.template ?? tpl).variables)
+    services = (tpl.template ?? tpl).services
   }
 
   // --json asked for parseable output, so a caller that happens to own a TTY still gets the error.
@@ -421,7 +441,10 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
   const deploymentId = res.body.deploymentId ?? (res.body.deployment ?? res.body).id
   const acceptedRegion = (res.body.deployment ?? res.body).region
   const codeLabel = manifest?.code ?? target
-  if (!quiet) info(`deploying template ${codeLabel} to branch ${branchName}${acceptedRegion ? ` in ${acceptedRegion}` : ''} (${deploymentId})`)
+  if (!quiet) {
+    info(`deploying template ${codeLabel} to branch ${branchName}${acceptedRegion ? ` in ${acceptedRegion}` : ''} (${deploymentId})`)
+    for (const line of publicBucketLines(services)) info(line)
+  }
   // The poll route is keyed by deployment id, not project: name the project so agent mode signs
   // with the project-bound session (a bootstrap session is rejected as "for a different project").
   const dep = await watchDeployment((id) => api.request('GET', `/template-deployments/${id}`, undefined, { projectId: p.projectId }), deploymentId, quiet ? () => {} : info, deps.wait)

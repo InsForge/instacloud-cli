@@ -1,7 +1,7 @@
 // Local insta.template.yaml parsing + validation for `insta template deploy ./dir` — the CLI
 // twin of the platform's src/provisioning/templateManifest.ts (THE authority; the executor
 // revalidates every manifest). Local checks exist to fail fast with a file the author can act
-// on, before anything travels, so the rules here mirror the server's exactly — plus two
+// on, before anything travels, so the rules here mirror the server's for web and worker services and leave every other type to it — plus two
 // authoring lints the server does not enforce: images must be pinned, and required variables
 // need a description unless a generator answers for the user. Everything here is pure over the
 // parsed document (unit-tested); only loadTemplateManifest touches disk.
@@ -23,7 +23,9 @@ export type ManifestEnv = {
 }
 
 export type ManifestService = {
-  type?: string // web | worker | postgres | redis | mysql | mongodb (the four managed types are declared bare: no image, port, volume or env)
+  type?: string // web and worker are judged here, every other type (postgres, redis, mysql, mongodb, storage) is the platform's call
+  pgVersion?: number // postgres only, a Postgres major the platform offers, checked by the platform
+  public?: boolean // storage only, anonymous public-read, checked by the platform
   image?: string
   build?: string
   port?: number
@@ -64,9 +66,10 @@ const CODE_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
 export const ENV_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/
 const GENERATOR_RE = /^secret:([1-9]\d{0,2})$/
 
-// The platform provisions these and owns everything about them (platform templateManifest.ts).
-const MANAGED_TYPES = ['postgres', 'redis', 'mysql', 'mongodb']
-const MANIFEST_TYPES = ['web', 'worker', ...MANAGED_TYPES]
+// The compute vocabulary every CLI has known. Any other type is the platform's to accept or refuse.
+const COMPUTE_TYPES = ['web', 'worker']
+// Datastores that never gain a url or host. Storage is left off because a public bucket may get an address.
+const NO_ADDRESS_TYPES = ['postgres', 'redis', 'mysql', 'mongodb']
 
 // What counts as a digest is the PLATFORM's call, not ours: registry.ts's DIGEST regex, verbatim.
 const DIGEST = /^sha256:[a-f0-9]{64}$/
@@ -128,31 +131,8 @@ export function validateManifest(m: TemplateManifest): string[] {
     const where = `services.${name}`
     // typeof, not String(): a YAML array like [redis] would otherwise stringify to its lone element.
     const type = typeof svc.type === 'string' ? svc.type : undefined
-    if (!type || !MANIFEST_TYPES.includes(type)) {
-      problems.push(`${where}.type must be one of ${MANIFEST_TYPES.join(', ')}`)
-    }
-    // A managed datastore is BARE: the platform owns its image, port, sizing, credentials and env,
-    // so every other rule below would be asking about fields it must not carry. Mirrors the
-    // platform's own check (provisioning/templateManifest.ts) so an author hears it here.
-    if (type && MANAGED_TYPES.includes(type)) {
-      const bare = svc as Record<string, unknown>
-      for (const field of ['image', 'build', 'port', 'healthcheck', 'volume', 'volumeGib', 'spec', 'alwaysOn', 'command', 'mountPath']) {
-        if (bare[field] !== undefined) {
-          problems.push(`${where}.${field}: a ${type} service is platform-managed and carries no ${field} — declare it bare ({ type: ${type} })`)
-        }
-      }
-      const groups = ['fixed', 'generated', 'platform', 'required', 'optional']
-      const envShell = bare.env
-      if (envShell !== undefined) {
-        const emptyShell = !!envShell && typeof envShell === 'object' && !Array.isArray(envShell)
-          && Object.entries(envShell as Record<string, unknown>).every(([g, v]) =>
-            groups.includes(g) && !!v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length === 0)
-        if (!emptyShell) {
-          problems.push(`${where}.env: a ${type} service is platform-managed and carries no env — declare it bare ({ type: ${type} })`)
-        }
-      }
-      continue
-    }
+    // Every other type, and every field and env on it, is the platform's to judge. It answers 400 with its own list.
+    if (!type || !COMPUTE_TYPES.includes(type)) continue
     if (svc.image && svc.build) problems.push(`${where}: image and build are mutually exclusive`)
     if (!svc.image && !svc.build) problems.push(`${where}: one of image or build is required`)
     // A parsed YAML document holds whatever the author typed, so both scalars are type-checked the
@@ -228,7 +208,7 @@ export function validateManifest(m: TemplateManifest): string[] {
         if (!svcRef) continue
         const target = services[svcRef[1]!]
         const targetType = target && typeof target.type === 'string' ? target.type : undefined
-        if (targetType && MANAGED_TYPES.includes(targetType)) {
+        if (targetType && NO_ADDRESS_TYPES.includes(targetType)) {
           problems.push(`services.${name}.env.fixed.${varName}: '${svcRef[1]}' is a managed ${targetType}, so it has no url or host. Use its platform credentials instead: \${{services.${svcRef[1]}.<KEY>}} under env.platform`)
         }
       }
