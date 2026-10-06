@@ -42,7 +42,7 @@ export function templateListLines(templates: TemplateIndexEntry[]): string[] {
 // `volume` is the boolean a manifest declares now; `volumeGib` is a size a registry published
 // before sizing moved to the platform. Both are read: the catalog serves whichever the row carries,
 // and dropping the size on its own would quietly stop saying the service HAS a disk.
-type InfoService = { name: string; type?: string; port?: number; volumeGib?: number; volume?: boolean; mountPath?: string }
+type InfoService = { name: string; type?: string; port?: number; volumeGib?: number; volume?: boolean; mountPath?: string; pgVersion?: number; public?: boolean }
 
 // The info endpoint may list services as an array or keep the manifest's map shape — render both.
 export function normalizeInfoServices(raw: unknown): InfoService[] {
@@ -51,6 +51,8 @@ export function normalizeInfoServices(raw: unknown): InfoService[] {
     volumeGib: s?.volumeGib ?? s?.volume?.size,
     volume: s?.volume === true || s?.volumeGib != null || s?.volume?.size != null,
     mountPath: typeof s?.mountPath === 'string' ? s.mountPath : undefined,
+    pgVersion: typeof s?.pgVersion === 'number' ? s.pgVersion : undefined,
+    public: typeof s?.public === 'boolean' ? s.public : undefined,
   })
   if (Array.isArray(raw)) return raw.map((s: any) => one(s?.name ?? '?', s))
   if (raw && typeof raw === 'object') return Object.entries(raw as Record<string, any>).map(([name, s]) => one(name, s))
@@ -79,6 +81,13 @@ export type TemplateInfo = {
   variables?: unknown
 }
 
+// The type plus what the manifest fixes about it: a Postgres major, or whether anyone can read a bucket.
+function infoKind(s: InfoService): string | undefined {
+  if (s.type === 'postgres' && s.pgVersion !== undefined) return `postgres ${s.pgVersion}`
+  if (s.type === 'storage') return `storage, ${s.public ? 'public' : 'private'}`
+  return s.type && s.type !== 'compute' ? s.type : undefined
+}
+
 // `bold` is injected so the renderer stays pure (tests pass identity; the command passes ANSI
 // bold on a TTY).
 export function templateInfoLines(t: TemplateInfo, bold: (s: string) => string = (s) => s): string[] {
@@ -96,7 +105,7 @@ export function templateInfoLines(t: TemplateInfo, bold: (s: string) => string =
       // A size only when the registry still carries one: a manifest names no size any more, so
       // "persistent /data" is all there is to say until the service exists.
       const disk = s.volumeGib ? `${s.volumeGib}Gi volume` : s.volume ? `persistent ${s.mountPath ?? '/data'}` : undefined
-      const bits = [s.type && s.type !== 'compute' ? s.type : undefined, s.port ? `port ${s.port}` : undefined, disk].filter(Boolean)
+      const bits = [infoKind(s), s.port ? `port ${s.port}` : undefined, disk].filter(Boolean)
       return `${s.name}${bits.length ? ` (${bits.join(', ')})` : ''}`
     })
     lines.push(`services (${services.length}): ${summary.join(', ')}`)
