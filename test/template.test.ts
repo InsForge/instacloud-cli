@@ -8,7 +8,7 @@ import {
 } from '../src/template-manifest.js'
 import {
   templateListLines, templateInfoLines, normalizeInfoServices, normalizeInfoVariables,
-  parseSetFlags, resolveVariables, missingVariablesFrom, looksLikePath, deployMode, templateDeploy,
+  parseSetFlags, resolveVariables, missingVariablesFrom, looksLikePath, deployMode, templateDeploy, publicBucketLines,
   stepIndexFor, deploymentUrls, serviceStateLines, partialMessage, watchDeployment, DEPLOY_STEPS,
 } from '../src/commands/template.js'
 import { ApiError } from '../src/api.js'
@@ -483,6 +483,21 @@ describe('templateInfoLines', () => {
   })
 })
 
+describe('publicBucketLines', () => {
+  it('names each public bucket, whichever shape the services arrive in', () => {
+    const line = (name: string) => `${name}: public bucket, anyone can read its files (anonymous public-read)`
+    const map = { media: { type: 'storage', public: true }, docs: { type: 'storage', public: true }, quiet: { type: 'storage', public: false }, scratch: { type: 'storage' } }
+    expect(publicBucketLines(map)).toEqual([line('media'), line('docs')])
+    expect(publicBucketLines(Object.entries(map).map(([name, s]) => ({ name, ...s })))).toEqual([line('media'), line('docs')])
+  })
+
+  it('says nothing for a service that is not a bucket, or for no services at all', () => {
+    expect(publicBucketLines({ app: { type: 'web', public: true }, db: { type: 'postgres', public: true } })).toEqual([])
+    expect(publicBucketLines({ files: { type: 'storage', public: 'yes' } })).toEqual([])
+    expect(publicBucketLines(undefined)).toEqual([])
+  })
+})
+
 describe('parseSetFlags', () => {
   it('parses NAME=value pairs, last occurrence winning; values may contain =', () => {
     expect(parseSetFlags(['A=1', 'B_2=x=y', 'A=2'])).toEqual({ A: '2', B_2: 'x=y' })
@@ -632,13 +647,14 @@ function fakeApi(
   deployment: any = { status: 'succeeded', services: [{ name: 'app', state: 'healthy', url: 'https://app.example' }] },
   postResult: { status: number; body: any } = { status: 200, body: { deploymentId: 'dep_1' } },
   templateVars: unknown = { required: [], optional: [] },
+  templateServices?: unknown,
 ) {
   const posts: any[] = []
   const polls: string[] = []
   const pollScopes: unknown[] = []
   const api = {
     request: async (_m: string, path: string, _body?: unknown, opts?: unknown) => {
-      if (path.startsWith('/templates/')) return { template: { code: 'plausible', variables: templateVars } }
+      if (path.startsWith('/templates/')) return { template: { code: 'plausible', variables: templateVars, ...(templateServices ? { services: templateServices } : {}) } }
       if (path.startsWith('/template-deployments/')) { polls.push(path); pollScopes.push(opts); return deployment }
       throw new Error(`unexpected GET ${path}`)
     },
@@ -709,6 +725,61 @@ describe('templateDeploy', () => {
       db: { type: 'postgres', pgVersion: 17, flavour: 'spicy' },
       app: { type: 'worker', image: 'nginx:1.27' },
     })
+  })
+
+  // Only `template info` used to say a bucket is public, so the person deploying never heard it.
+  const PUBLIC_LINE = 'files: public bucket, anyone can read its files (anonymous public-read)'
+  const BUCKETS = {
+    files: { type: 'storage', public: true },
+    scratch: { type: 'storage' },
+    db: { type: 'postgres', pgVersion: 17 },
+    app: { type: 'worker', image: 'nginx:1.27' },
+  }
+
+  it('says which buckets are public when a local manifest deploys, and nothing about a private one', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'insta-tpl-'))
+    mkdirSync(join(root, 'bucket'))
+    writeFileSync(join(root, 'bucket', 'insta.template.yaml'), [
+      'code: bucket', 'version: "1.0"', 'services:',
+      '  files:', '    type: storage', '    public: true',
+      '  scratch:', '    type: storage',
+      '  app:', '    type: worker', '    image: nginx:1.27', '',
+    ].join('\n'))
+    const { api } = fakeApi()
+    await templateDeploy(join(root, 'bucket'), {}, { api, project: PROJECT, wait: NO_WAIT })
+    const out = stdout.join('')
+    expect(out.split('\n').filter((l) => l.includes('public bucket'))).toEqual([PUBLIC_LINE])
+    expect(out).not.toContain('scratch:')
+    // It rides with the accepted deploy, ahead of the progress lines.
+    expect(out.indexOf(PUBLIC_LINE)).toBeGreaterThan(out.indexOf('deploying template bucket to branch main'))
+    expect(out.indexOf(PUBLIC_LINE)).toBeLessThan(out.indexOf('create services'))
+  })
+
+  it('says it for a registry template too, from the detail the command already reads', async () => {
+    const { api } = fakeApi(undefined, undefined, undefined, BUCKETS)
+    await templateDeploy('plausible', {}, { api, project: PROJECT, wait: NO_WAIT })
+    expect(stdout.join('').split('\n').filter((l) => l.includes('public bucket'))).toEqual([PUBLIC_LINE])
+  })
+
+  it('says it for a fetched GitHub manifest', async () => {
+    const { api } = fakeApi()
+    const manifest = { code: 'bot', version: '1.4.0', services: BUCKETS } as TemplateManifest
+    await templateDeploy('https://github.com/acme/tpl', {}, {
+      api, project: PROJECT, wait: NO_WAIT,
+      fetchGitHub: async () => ({ source: { repo: 'acme/tpl', ref: 'main', path: '', commit: '9'.repeat(40) }, manifest }),
+    })
+    expect(stdout.join('').split('\n').filter((l) => l.includes('public bucket'))).toEqual([PUBLIC_LINE])
+  })
+
+  it('keeps the line out of --json output, and out of a deploy that is only gated', async () => {
+    const { api } = fakeApi(undefined, undefined, undefined, BUCKETS)
+    await templateDeploy('plausible', { json: true }, { api, project: PROJECT, wait: NO_WAIT })
+    expect(stdout.join('')).not.toContain('public bucket')
+    expect(JSON.parse(stdout.join(''))).toMatchObject({ status: 'succeeded' })
+    stdout.length = 0
+    const gated = fakeApi(undefined, GATED, undefined, BUCKETS)
+    await templateDeploy('plausible', {}, { api: gated.api, project: PROJECT, wait: NO_WAIT })
+    expect(stdout.join('')).toBe('')
   })
 
   // --json is a contract: stdout must parse as ONE document, so no progress line may precede it.

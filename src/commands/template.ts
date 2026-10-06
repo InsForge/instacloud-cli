@@ -88,6 +88,13 @@ function infoKind(s: InfoService): string | undefined {
   return s.type && s.type !== 'compute' ? s.type : undefined
 }
 
+// One line per bucket the template opens to the world, so a deploy never makes one public unannounced.
+export function publicBucketLines(services: unknown): string[] {
+  return normalizeInfoServices(services)
+    .filter((s) => s.type === 'storage' && s.public === true)
+    .map((s) => `${s.name}: public bucket, anyone can read its files (anonymous public-read)`)
+}
+
 // `bold` is injected so the renderer stays pure (tests pass identity; the command passes ANSI
 // bold on a TTY).
 export function templateInfoLines(t: TemplateInfo, bold: (s: string) => string = (s) => s): string[] {
@@ -376,10 +383,12 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
   let manifest: TemplateManifest | undefined
   let source: GitHubSource | undefined
   let vars: TemplateVar[]
+  let services: unknown // what the template declares, for the one thing the deployer must be told
   if (mode.kind === 'github') {
     const fetched = await (deps.fetchGitHub ?? ((t: GitHubTarget) => fetchGitHubTemplate(t)))(mode.target)
     manifest = fetched.manifest
     source = fetched.source
+    services = manifest.services
     vars = collectManifestVariables(manifest)
     // Exactly ONE line in front of today's output. A second "deploying template …" line
     // would read as a duplicate of the "deploying template <code> to branch <branch>" line below,
@@ -389,12 +398,14 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
     }
   } else if (mode.kind === 'local') {
     manifest = loadTemplateManifest(mode.dir) // parse + local validation (pinned images, described vars)
+    services = manifest.services
     vars = collectManifestVariables(manifest)
     if (!quiet) info(`deploying local template ${manifest.code}@${manifest.version}`)
   } else {
     // Learn the variable set up front from the registry so prompting happens before the POST.
     const tpl = await api.request('GET', `/templates/${encodeURIComponent(mode.code)}`)
     vars = normalizeInfoVariables((tpl.template ?? tpl).variables)
+    services = (tpl.template ?? tpl).services
   }
 
   // --json asked for parseable output, so a caller that happens to own a TTY still gets the error.
@@ -430,7 +441,10 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
   const deploymentId = res.body.deploymentId ?? (res.body.deployment ?? res.body).id
   const acceptedRegion = (res.body.deployment ?? res.body).region
   const codeLabel = manifest?.code ?? target
-  if (!quiet) info(`deploying template ${codeLabel} to branch ${branchName}${acceptedRegion ? ` in ${acceptedRegion}` : ''} (${deploymentId})`)
+  if (!quiet) {
+    info(`deploying template ${codeLabel} to branch ${branchName}${acceptedRegion ? ` in ${acceptedRegion}` : ''} (${deploymentId})`)
+    for (const line of publicBucketLines(services)) info(line)
+  }
   // The poll route is keyed by deployment id, not project: name the project so agent mode signs
   // with the project-bound session (a bootstrap session is rejected as "for a different project").
   const dep = await watchDeployment((id) => api.request('GET', `/template-deployments/${id}`, undefined, { projectId: p.projectId }), deploymentId, quiet ? () => {} : info, deps.wait)
