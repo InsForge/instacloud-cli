@@ -15,7 +15,7 @@ export type TemplateDraftVariable = {
   name: string; kind: string; value?: string; description?: string; brokenReference?: string; originalName?: string
 }
 export type TemplateDraftService = {
-  name: string; type: string; image: string | null; port: number | null; volume: boolean; mountPath: string | null
+  name: string; type: string; image: string | null; port: number | null; healthcheck?: string | null; volume: boolean; mountPath: string | null
   public?: boolean; pgVersion?: number; removed: boolean; variables: TemplateDraftVariable[]
 }
 export type TemplateDraft = {
@@ -100,6 +100,8 @@ function serviceText(s: TemplateDraftService): string {
   const bits = [
     kind,
     s.port != null ? `port ${s.port}` : undefined,
+    // Only a web service has one, and a platform that does not serve the field says nothing.
+    s.type === 'web' && s.healthcheck !== undefined ? (s.healthcheck ? `health check ${s.healthcheck}` : 'no health check') : undefined,
     s.image ? `image ${s.image}` : undefined,
     // A null mount path on a volume is the default /data.
     s.volume ? `volume at ${s.mountPath ?? '/data'}` : undefined,

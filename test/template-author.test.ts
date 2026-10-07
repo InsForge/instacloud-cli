@@ -137,7 +137,7 @@ describe('draft rendering', () => {
       '  readme    2 bytes',
       `  updated   ${UPDATED}`,
       'services (4):',
-      '  app (web, port 8080, image ghcr.io/acme/app:1.2, volume at /data)',
+      '  app (web, port 8080, health check /health, image ghcr.io/acme/app:1.2, volume at /data)',
       '    BASE_URL        required',
       '    DATABASE_URL    reference ${{services.db.DATABASE_URL}}',
       '    SESSION_SECRET  generated',
@@ -189,6 +189,26 @@ describe('template draft', () => {
     const { api } = platform({ [`GET ${DRAFT_PATH}`]: () => ({ body: { template } }) })
     await templateDraft('my-app', { json: true }, { api, project: linked() })
     expect(JSON.parse(printed())).toEqual({ template, editorUrl: EDITOR })
+  })
+  it('says each web service health check, or that it has none, and nothing for a worker or a datastore', async () => {
+    const svc = (over: Record<string, unknown>) => ({ image: null, port: null, volume: false, mountPath: null, removed: false, variables: [], ...over })
+    const template = view({ services: [
+      svc({ name: 'site', type: 'web', port: 80, healthcheck: '/healthz' }),
+      svc({ name: 'root', type: 'web', port: 81, healthcheck: '/' }),
+      svc({ name: 'bare', type: 'web', port: 82, healthcheck: null }),
+      svc({ name: 'old', type: 'web', port: 83 }),
+      svc({ name: 'queue', type: 'worker', healthcheck: '/ignored' }),
+      svc({ name: 'db', type: 'postgres', pgVersion: 16, healthcheck: null }),
+    ] })
+    const { api } = platform({ [`GET ${DRAFT_PATH}`]: () => ({ body: { template } }) })
+    await templateDraft('my-app', {}, { api, project: linked() })
+    const lines = printed().split('\n')
+    expect(lines).toContain('  site (web, port 80, health check /healthz)')
+    expect(lines).toContain('  root (web, port 81, health check /)')
+    expect(lines).toContain('  bare (web, port 82, no health check)')
+    expect(lines).toContain('  old (web, port 83)')
+    expect(lines).toContain('  queue (worker)')
+    expect(lines).toContain('  db (postgres 16)')
   })
   it('gives no link on a host without the api label', async () => {
     const { api } = platform({ [`GET ${DRAFT_PATH}`]: () => ({ body: { template: view() } }) }, 'http://localhost:7070')

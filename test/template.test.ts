@@ -227,11 +227,40 @@ describe('validateManifest', () => {
     }
     expect(validateManifest(m)).toEqual([])
   })
-  it('requires web services to declare an absolute healthcheck path', () => {
+  // The platform made the path optional (#600), so a web service without one is accepted.
+  it('accepts a web service without a healthcheck path, and refuses a relative one', () => {
     const m: TemplateManifest = { code: 'x', version: '1', services: { a: { type: 'web', image: 'a:1' }, b: { type: 'web', image: 'b:1', healthcheck: 'health' } } }
-    const problems = validateManifest(m)
-    expect(problems).toContain('services.a: web services must declare a healthcheck path')
-    expect(problems).toContain('services.b: healthcheck must be an absolute path (start with /)')
+    expect(validateManifest(m)).toEqual(['services.b: healthcheck must be an absolute path (start with /)'])
+  })
+  // The grammar is the platform's HEALTHCHECK_RE: one leading slash, then a path and query charset.
+  it('checks a given healthcheck path with the platform grammar', () => {
+    const web = (healthcheck: unknown) =>
+      ({ code: 'x', version: '1', services: { app: { type: 'web', image: 'a:1', healthcheck } } }) as unknown as TemplateManifest
+    for (const ok of ['/', '/healthz', '/api/health?full=1', '/a/b-c_d.e~f%20g']) expect(validateManifest(web(ok)), ok).toEqual([])
+    for (const bad of ['//evil.example', '/x\\y', '/a b', '/a#b', '/a\nb']) {
+      expect(validateManifest(web(bad)).join('\n'), JSON.stringify(bad)).toMatch(/^services\.app: healthcheck must be a single-slash absolute path/)
+    }
+    expect(validateManifest(web('http://x/y'))).toEqual(['services.app: healthcheck must be an absolute path (start with /)'])
+    expect(validateManifest(web('//evil.example'))).toEqual([
+      "services.app: healthcheck must be a single-slash absolute path on the service itself (no '//host', scheme, backslash or control characters), got: //evil.example",
+    ])
+  })
+  // Declared but empty or not a string is not "none", and the platform refuses it.
+  it('refuses an empty or non-string healthcheck on a web service', () => {
+    const web = (healthcheck: unknown) =>
+      ({ code: 'x', version: '1', services: { app: { type: 'web', image: 'a:1', healthcheck } } }) as unknown as TemplateManifest
+    expect(validateManifest(web(''))).toEqual(['services.app: healthcheck must be an absolute path (start with /)'])
+    for (const odd of [null, {}, ['/']]) expect(validateManifest(web(odd)), JSON.stringify(odd)).toEqual(['services.app.healthcheck must be a string'])
+  })
+  it('still refuses a healthcheck on a worker, with or without a valid path', () => {
+    const worker = (healthcheck: string) =>
+      ({ code: 'x', version: '1', services: { bg: { type: 'worker', image: 'a:1', healthcheck } } }) as unknown as TemplateManifest
+    expect(validateManifest(worker('/healthz')).join('\n')).toMatch(/a worker has no HTTP endpoint/)
+    expect(validateManifest(worker('//evil.example')).join('\n')).toMatch(/a worker has no HTTP endpoint/)
+  })
+  it('parses YAML for a web service with no healthcheck path', () => {
+    const m = parseManifestYaml(['code: demo', 'version: "1.0"', 'services:', '  app:', '    type: web', '    image: nginx:1.27'].join('\n'))
+    expect(m.services?.app?.healthcheck).toBeUndefined()
   })
   it('requires a description on required vars unless a generator answers for the user', () => {
     const m: TemplateManifest = {
@@ -392,7 +421,7 @@ describe('templateInfoLines', () => {
     maintainer: 'insforge', source: 'github.com/plausible/community-edition',
     upstream: { pinned: 'ghcr.io/plausible/community-edition:v2.1.1' },
     services: [
-      { name: 'app', type: 'web', port: 8000 },
+      { name: 'app', type: 'web', port: 8000, healthcheck: '/api/health' },
       { name: 'worker', type: 'worker', volumeGib: 10 },
     ],
     variables: {
@@ -408,11 +437,11 @@ describe('templateInfoLines', () => {
   // that half of the line the moment the catalog is republished.
   it('says a boolean-volume service has a disk, and still prints a size when the registry has one', () => {
     const boolTpl = { ...tpl, services: [{ name: 'agent', type: 'web', port: 7681, volume: true }] }
-    expect(templateInfoLines(boolTpl)).toContain('services (1): agent (web, port 7681, persistent /data)')
+    expect(templateInfoLines(boolTpl)).toContain('services (1): agent (web, port 7681, no health check, persistent /data)')
     const sizedTpl = { ...tpl, services: [{ name: 'agent', type: 'web', port: 7681, volumeGib: 10 }] }
-    expect(templateInfoLines(sizedTpl)).toContain('services (1): agent (web, port 7681, 10Gi volume)')
+    expect(templateInfoLines(sizedTpl)).toContain('services (1): agent (web, port 7681, no health check, 10Gi volume)')
     const customMountTpl = { ...tpl, services: [{ name: 'agent', type: 'web', port: 7681, volume: true, mountPath: '/app/storage' }] }
-    expect(templateInfoLines(customMountTpl)).toContain('services (1): agent (web, port 7681, persistent /app/storage)')
+    expect(templateInfoLines(customMountTpl)).toContain('services (1): agent (web, port 7681, no health check, persistent /app/storage)')
   })
 
   it('says the Postgres version and whether a bucket is public', () => {
@@ -426,12 +455,34 @@ describe('templateInfoLines', () => {
       },
     }
     expect(templateInfoLines(t)).toContain(
-      'services (4): app (web, port 8000), db (postgres 17), assets (storage, public), scratch (storage, private)',
+      'services (4): app (web, port 8000, no health check), db (postgres 17), assets (storage, public), scratch (storage, private)',
     )
   })
   it('names a postgres with no version plainly, and ignores pgVersion and public on other types', () => {
     const t = { ...tpl, services: { db: { type: 'postgres' }, app: { type: 'web', port: 80, pgVersion: 17, public: true } } }
-    expect(templateInfoLines(t)).toContain('services (2): db (postgres), app (web, port 80)')
+    expect(templateInfoLines(t)).toContain('services (2): db (postgres), app (web, port 80, no health check)')
+  })
+  it('says a web service health check, or that it has none, and nothing for any other type', () => {
+    const t = {
+      ...tpl,
+      services: {
+        site: { type: 'web', port: 80, healthcheck: '/healthz' },
+        root: { type: 'web', port: 81, healthcheck: '/' },
+        bare: { type: 'web', port: 82 },
+        queue: { type: 'worker', healthcheck: '/ignored' },
+        db: { type: 'postgres', healthcheck: '/ignored' },
+      },
+    }
+    expect(templateInfoLines(t)).toContain(
+      'services (5): site (web, port 80, health check /healthz), root (web, port 81, health check /), bare (web, port 82, no health check), queue (worker), db (postgres)',
+    )
+  })
+  it('carries a healthcheck only when it is a string', () => {
+    expect(normalizeInfoServices({ a: { type: 'web', healthcheck: '/healthz' }, b: { type: 'web', healthcheck: 5 }, c: { type: 'web' } })).toEqual([
+      { name: 'a', type: 'web', healthcheck: '/healthz', volume: false },
+      { name: 'b', type: 'web', volume: false },
+      { name: 'c', type: 'web', volume: false },
+    ])
   })
   it('carries pgVersion and public only when they are the right kind of value', () => {
     expect(normalizeInfoServices({
@@ -450,7 +501,7 @@ describe('templateInfoLines', () => {
     expect(lines).toContain('  version     2.1.1')
     expect(lines).toContain('  source      github.com/plausible/community-edition')
     expect(lines).toContain('  upstream    ghcr.io/plausible/community-edition:v2.1.1')
-    expect(lines).toContain('services (2): app (web, port 8000), worker (worker, 10Gi volume)')
+    expect(lines).toContain('services (2): app (web, port 8000, health check /api/health), worker (worker, 10Gi volume)')
     const text = lines.join('\n')
     expect(text).toMatch(/required:\n\s+BASE_URL\s+public URL\n\s+ADMIN_PWD\s+\(generated: secret:32\)/)
     expect(text).toMatch(/optional:\n\s+SMTP_HOST\s+SMTP relay \(default: localhost\)/)
