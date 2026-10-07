@@ -1,14 +1,15 @@
 import { ApiClient, ApiError, requireProject } from '../api.js'
+import type { ProjectConfig } from '../config.js'
 import { die, info, openUrl, printJson } from '../util.js'
 import { cycleLine, dimensionLines } from './metrics.js'
 
 type OrgOpt = { org?: string }
 
 // Resolve the target org: explicit --org, else the linked project's org.
-export async function resolveOrgId(opts: OrgOpt): Promise<string> {
+export async function resolveOrgId(opts: OrgOpt, project: () => Promise<ProjectConfig> = requireProject): Promise<string> {
   if (opts.org) return opts.org
   // `ProjectConfig.orgId` is typed string but INSTA_PROJECT_ID resolves a project with no org.
-  const orgId = (await requireProject()).orgId
+  const orgId = (await project()).orgId
   if (!orgId) die('INSTA_PROJECT_ID names no organization — set INSTA_ORG_ID, or pass --org <id>')
   return orgId
 }

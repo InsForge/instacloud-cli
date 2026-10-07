@@ -33,6 +33,7 @@ import * as managedDb from './commands/managed-db.js'
 import * as storageCmd from './commands/storage.js'
 import { manifest } from './commands/manifest.js'
 import * as template from './commands/template.js'
+import * as templateAuthor from './commands/template-author.js'
 import * as govern from './commands/govern.js'
 import * as observe from './commands/observe.js'
 import * as obs from './commands/metrics.js'
@@ -572,6 +573,13 @@ tpl.command('deploy <code-or-dir-or-url>').description('Deploy a template onto a
   .option('-y, --yes', 'non-interactive: missing required variables fail with a --set list instead of prompting')
   .option('--json')
   .action(guard((target, o) => template.templateDeploy(target, o)))
+// Authoring: the org's community templates, the same drafts the console editor changes.
+tpl.command('drafts').description("List your org's community templates, drafts and published, with their status")
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((o) => templateAuthor.templateDrafts(o)))
+tpl.command('draft <code>').description('Show one community template draft: its services, every variable with its choice, and the publish requirements')
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((code, o) => templateAuthor.templateDraft(code, o)))
 
 // ---- billing ----
 const bill = program.command('billing').description('Billing: current cycle overview (bare), subscribe to a tier, redeem a credit code, Stripe portal, usage by dimension')
