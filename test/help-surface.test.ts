@@ -132,6 +132,20 @@ describe('group shapes', () => {
     expect(r.stdout).toContain('--follow')
     expect(r.stdout).toContain('--json')
   }, 30_000)
+  // Authoring follows browsing and deploying: the console editor's drafts, one verb each.
+  it('template keeps list, info and deploy, then the authoring verbs', () => {
+    const help = run(['template', '--help']).stdout
+    expect(commandNames(help)).toEqual(['list', 'info', 'deploy', 'create', 'drafts', 'draft', 'edit', 'regenerate', 'publish', 'unpublish', 'delete'])
+    expect(help.replace(/\s+/g, ' ')).toContain("and author your org's community templates")
+    const create = run(['template', 'create', '--help']).stdout
+    for (const flag of ['--project <id>', '--blank', '--name <name>', '--org <id>', '--json']) expect(create, flag).toContain(flag)
+    expect(run(['template', 'edit', '--help']).stdout).toContain('Usage: insta template edit [options] <code>')
+    const noPatch = run(['template', 'edit', 'my-app'])
+    expect(noPatch.status).not.toBe(0)
+    expect(noPatch.stderr).toContain("required option '--patch <file>' not specified")
+    for (const verb of ['publish', 'delete']) expect(run(['template', verb, '--help']).stdout, verb).toContain('-y, --yes')
+    expect(run(['template', 'unpublish', '--help']).stdout).not.toContain('--yes')
+  }, 30_000)
   it('agent, config and billing carry the moved verbs', () => {
     expect(commandNames(run(['agent', '--help']).stdout)).toEqual(['setup', 'manifest', 'policy', 'approvals', 'observe', 'events'])
     expect(commandNames(run(['config', '--help']).stdout)).toEqual(['install-mcp', 'regions', 'autoupdate'])

@@ -237,12 +237,14 @@ build never reaches a production installer.
 | `insta build [dir]` · `deploy [dir]` | Verify a source dir would build; deploy a source directory (built remotely) or `--image <url>`. `insta build logs <id>` reads source-build output: `--source archive` (default) uses the deploy operation ID, `--source github` uses a GitHub build ID; `--follow` watches output, `--json` returns one snapshot |
 | `insta cron` | Branch-scoped HTTP schedules: `list` · `create` · `show` · `edit` · `pause` · `resume` · `delete` · `run` · `runs` · `preview`. Expressions are UTC and so is every time printed; `run` is one EXTRA execution and does not consume the next scheduled tick; literal header values are write-only, so `show` lists their names only — a header backed by `--secret-ref` is resolved from a project secret at send time and `show` names that secret too |
 | `insta run <cmd>` | Run a command with the branch bundle injected, nothing written to disk |
-| `insta template` | `list` · `info` · `deploy` |
+| `insta template` | Browse and deploy: `list` · `info` · `deploy`. Author your org's community templates: `create` (from a project, or `--blank`) · `drafts` · `draft` · `edit --patch <file>` · `regenerate` · `publish` · `unpublish` · `delete`. `publish` and `delete` ask on a terminal and need `--yes` anywhere else |
 | `insta billing` | Current cycle overview; `subscribe <tier>` · `portal` · `usage` |
 | `insta agent` | `setup` (this machine's coding agents) · `manifest` · `policy …` · `approvals …` · `observe …` · `events` |
 | `insta config` | `install-mcp` · `regions` · `autoupdate` |
 | `insta feedback` | Report an InstaCloud-side hurdle (bug / feature-request / friction) to the team — never for the app you are building; on InstaCloud it needs `insta login`, so the team can reply, and prints the ticket it opened; `status <ticket-id>` — New / In Progress / Resolved / Closed (the replies are in the console) |
 | `insta upgrade` | Update the CLI |
+
+The template authoring verbs need a platform that has agent template authoring, so this CLI is released only after that platform change is in production. On an older platform an agent's `edit`, `regenerate`, `publish`, `unpublish` and `delete` answer `unclassified_agent_action`, and `create --blank` says the platform does not create blank templates yet.
 
 Every command accepts `--api-url <url>` for this invocation only (internal debugging); for `compute exec`, place it before `compute`. `insta --help` documents it.
 

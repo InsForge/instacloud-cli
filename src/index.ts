@@ -562,7 +562,7 @@ program.command('run <cmd> [args...]').description('Run a command with the branc
   .action(guard((cmd, args, o) => runCmd.run([cmd, ...(args ?? [])], o)))
 
 // ---- templates (registry, local insta.template.yaml, or a GitHub URL) ----
-const tpl = program.command('template').description('Browse and deploy app templates (registry, a local dir, or a GitHub URL)')
+const tpl = program.command('template').description("Browse and deploy app templates (registry, a local dir, or a GitHub URL), and author your org's community templates")
 tpl.command('list').description('List templates in the platform registry').option('--json').action(guard((o) => template.templateList(o)))
 tpl.command('info <code>').description('Show a template: version, upstream pin, services, and its required/optional variables')
   .option('--json').action(guard((code, o) => template.templateInfo(code, o)))
