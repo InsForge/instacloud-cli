@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Readable } from 'node:stream'
+import { configureAgent } from '../src/agent.js'
 import { ApiClient, ApiError } from '../src/api.js'
 import type { ProjectConfig } from '../src/config.js'
 import {
@@ -277,7 +278,7 @@ describe('template create', () => {
 describe('template edit', () => {
   const dir = mkdtempSync(join(tmpdir(), 'insta-template-edit-'))
   afterAll(() => { rmSync(dir, { recursive: true, force: true }) })
-  const file =(name: string, text: string) => { const p = join(dir, name); writeFileSync(p, text); return p }
+  const file = (name: string, text: string) => { const p = join(dir, name); writeFileSync(p, text); return p }
   const PATCH = { tagline: 'Self-hosted app', variables: [{ service: 'app', name: 'BASE_URL', choice: { kind: 'required', description: 'public URL' } }] }
   const saved = (body: any) => ({ body: { template: view({ tagline: body.tagline, updatedAt: '2026-10-06T10:05:00.000Z' }) } })
 
@@ -289,6 +290,11 @@ describe('template edit', () => {
     expect(printed()).toBe([
       'saved my-app: My App (draft)', 'not ready to publish yet:', '  ✗ has_tagline', '  ✗ required_descriptions: app.BASE_URL', '',
     ].join('\n'))
+  })
+  it('reads a file that starts with a UTF-8 BOM', async () => {
+    const { api, calls } = platform({ [`GET ${DRAFT_PATH}`]: () => ({ body: { template: view() } }), [`PATCH ${DRAFT_PATH}`]: saved })
+    await templateEdit('my-app', { patch: file('bom.json', '﻿' + JSON.stringify(PATCH)) }, { api, project: linked() })
+    expect(calls[1]!.body).toEqual({ ...PATCH, expectedUpdatedAt: UPDATED })
   })
   it('sends the file as it is when it carries expectedUpdatedAt', async () => {
     const own = { ...PATCH, expectedUpdatedAt: '2026-10-06T09:00:00.000Z' }
@@ -442,6 +448,38 @@ describe('template publish', () => {
     expect(confirm).not.toHaveBeenCalled()
     expect(calls).toEqual([])
   })
+  it('refuses for an agent without --yes even on a terminal, before any request', async () => {
+    const confirm = vi.fn()
+    const { api, calls } = platform(routes())
+    await expect(templatePublish('my-app', { org: ORG }, { api, tty: true, agent: true, confirm })).rejects.toThrow('exit 1')
+    expect(process.exitCode).toBe(2)
+    expect(confirm).not.toHaveBeenCalled()
+    expect(calls).toEqual([])
+    expect(stderr.join('')).toBe([
+      'refusing to publish my-app without --yes: an agent passes --yes only after the person has said yes.',
+      `Publishing lists the template in the community gallery at once, with no review. Ask the person first, then run: insta template publish my-app --org ${ORG} --yes`,
+      '',
+    ].join('\n'))
+  })
+  it('reads agent mode when the deps do not say', async () => {
+    const confirm = vi.fn()
+    const { api, calls } = platform(routes())
+    configureAgent({ source: 'cli-explicit', client: 'unknown' })
+    try {
+      await expect(templatePublish('my-app', {}, { api, project: linked(), tty: true, confirm })).rejects.toThrow('exit 1')
+    } finally {
+      configureAgent(null)
+    }
+    expect(confirm).not.toHaveBeenCalled()
+    expect(calls).toEqual([])
+  })
+  it('publishes for an agent that passes --yes, without asking', async () => {
+    const confirm = vi.fn()
+    const { api, calls } = platform(routes())
+    await templatePublish('my-app', { yes: true }, { api, project: linked(), tty: true, agent: true, confirm })
+    expect(confirm).not.toHaveBeenCalled()
+    expect(calls[1]!.body).toEqual({ expectedUpdatedAt: UPDATED })
+  })
   it('publishes with --yes and no terminal, without asking', async () => {
     const confirm = vi.fn()
     const { api, calls } = platform(routes())
@@ -507,6 +545,29 @@ describe('template delete', () => {
       'Deleting cannot be undone. To go ahead, run: insta template delete my-app --yes',
       '',
     ].join('\n'))
+  })
+  it('refuses for an agent without --yes even on a terminal, before any request', async () => {
+    const confirm = vi.fn()
+    const { api, calls } = platform(routes)
+    const project = linked()
+    await expect(templateDelete('my-app', {}, { api, project, tty: true, agent: true, confirm })).rejects.toThrow('exit 1')
+    expect(process.exitCode).toBe(2)
+    expect(confirm).not.toHaveBeenCalled()
+    expect(calls).toEqual([])
+    expect(project).not.toHaveBeenCalled()
+    expect(stderr.join('')).toBe([
+      'refusing to delete the draft my-app without --yes: an agent passes --yes only after the person has said yes.',
+      'Deleting cannot be undone. To go ahead, run: insta template delete my-app --yes',
+      '',
+    ].join('\n'))
+  })
+  it('refuses under --json without --yes even on a terminal', async () => {
+    const confirm = vi.fn()
+    const { api, calls } = platform(routes)
+    await expect(templateDelete('my-app', { json: true }, { api, project: linked(), tty: true, confirm })).rejects.toThrow('exit 1')
+    expect(process.exitCode).toBe(2)
+    expect(confirm).not.toHaveBeenCalled()
+    expect(calls).toEqual([])
   })
   it('deletes with --yes and prints what it deleted under --json', async () => {
     const { api } = platform(routes)

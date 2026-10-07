@@ -1,5 +1,6 @@
 // `insta template` authoring commands: the org's community templates, from drafts to the gallery.
 import { readFileSync } from 'node:fs'
+import { agentMode } from '../agent.js'
 import { ApiClient, ApiError, requireProject } from '../api.js'
 import type { ProjectConfig } from '../config.js'
 import { info, printJson, refuse } from '../util.js'
@@ -34,6 +35,8 @@ export type TemplateAuthorDeps = {
   readStdin?: () => Promise<string>
   /** Whether a person can answer a prompt: stdin and stdout are terminals. */
   tty?: boolean
+  /** Whether an agent runs this command, read from agent mode when not given. */
+  agent?: boolean
   confirm?: (question: string) => Promise<boolean>
 }
 type OrgOpts = { org?: string; json?: boolean }
@@ -138,7 +141,8 @@ export function draftLines(t: TemplateDraft, editorUrl: string | null): string[]
 export function parsePatch(text: string, from: string): Record<string, unknown> {
   let value: unknown
   try {
-    value = JSON.parse(text)
+    // A UTF-8 BOM belongs to the file, and JSON.parse rejects it.
+    value = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text)
   } catch (e) {
     throw new Error(`the patch from ${from} is not valid JSON: ${(e as Error).message}`)
   }
@@ -179,9 +183,14 @@ export async function readAllStdin(stream: AsyncIterable<Buffer> = process.stdin
   return Buffer.concat(chunks).toString('utf8')
 }
 
-// --json is a script or an agent, never a person at a prompt.
+const byAgent = (deps: TemplateAuthorDeps): boolean => deps.agent ?? !!agentMode()
+
+// An agent on a pty and --json are never a person at the prompt.
 const canAsk = (opts: { json?: boolean }, deps: TemplateAuthorDeps): boolean =>
-  !opts.json && (deps.tty ?? (!!process.stdin.isTTY && !!process.stdout.isTTY))
+  !opts.json && !byAgent(deps) && (deps.tty ?? (!!process.stdin.isTTY && !!process.stdout.isTTY))
+
+const noAnswerReason = (deps: TemplateAuthorDeps): string =>
+  byAgent(deps) ? 'an agent passes --yes only after the person has said yes.' : 'there is no terminal to confirm on.'
 
 const orgFlag = (opts: { org?: string }): string => (opts.org ? ` --org ${opts.org}` : '')
 
@@ -271,7 +280,7 @@ export type TemplateConfirmOpts = OrgOpts & { yes?: boolean }
 export async function templatePublish(code: string, opts: TemplateConfirmOpts = {}, deps: TemplateAuthorDeps = {}): Promise<void> {
   if (!opts.yes && !canAsk(opts, deps)) {
     refuse([
-      `refusing to publish ${code} without --yes: there is no terminal to confirm on.`,
+      `refusing to publish ${code} without --yes: ${noAnswerReason(deps)}`,
       `Publishing lists the template in the community gallery at once, with no review. Ask the person first, then run: insta template publish ${code}${orgFlag(opts)} --yes`,
     ])
   }
@@ -300,7 +309,7 @@ export async function templateUnpublish(code: string, opts: OrgOpts = {}, deps: 
 export async function templateDelete(code: string, opts: TemplateConfirmOpts = {}, deps: TemplateAuthorDeps = {}): Promise<void> {
   if (!opts.yes && !canAsk(opts, deps)) {
     refuse([
-      `refusing to delete the draft ${code} without --yes: there is no terminal to confirm on.`,
+      `refusing to delete the draft ${code} without --yes: ${noAnswerReason(deps)}`,
       `Deleting cannot be undone. To go ahead, run: insta template delete ${code}${orgFlag(opts)} --yes`,
     ])
   }
