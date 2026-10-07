@@ -350,6 +350,77 @@ describe('domainStatusLines (check: every stage + where it routes)', () => {
     expect(domainStatusLines({ ...active, ssl: 'external' })[3]).toBe('  certificate external    (this plane manages no edge certificate for custom domains)')
   })
 
+  // compute#398: the plane writes Cloudflare's own reason into error_reason — on in-flight rows
+  // (why the certificate has not issued) AND on ACTIVE rows, where it reports an edge regression
+  // while the row stays active and keeps serving. A serving domain with a warning still serves.
+  const caa = 'CAA records on play.example.com do not allow ssl.com to issue; add 0 issue "letsencrypt.org" on the hostname or its parent, or remove the CAA records'
+
+  it('active + errorReason: still serving, the reason shown as a warning and not a blocker', () => {
+    const reason = 'The edge reports the certificate for app.customer.com as expired.'
+    expect(domainStatusLines({ ...active, errorReason: reason })).toEqual([
+      'app.customer.com -> api (us-east)',
+      '  ownership   verified    (TXT found)',
+      '  cname       ok          (points at cname.instacloud-dns.com)',
+      '  certificate active      (edge TLS issued)',
+      '  resolves to prod-use1-origin.instacloud-dns.com   (us-east router)   ok',
+      `  warning     active      ${reason}`,
+      '  serving     https://app.customer.com',
+    ])
+  })
+
+  it('issuing + CAA reason: not serving, the reason on the certificate line and printed exactly once', () => {
+    const lines = domainStatusLines({ ...active, configured: false, status: 'issuing_certificate', ssl: 'pending_validation', errorReason: caa })
+    expect(lines[3]).toBe(`  certificate pending     (pending_validation) ${caa}`)
+    expect(lines.join('\n').split(caa).length - 1).toBe(1)
+    expect(lines.join('\n')).not.toContain('issues once ownership is verified')
+    expect(lines.at(-1)).toBe('  serving     not yet     (certificate)')
+  })
+
+  it('pending certificate with no reason keeps the generic text (planes before compute#398)', () => {
+    const lines = domainStatusLines({ ...active, configured: false, status: 'issuing_certificate', ssl: 'pending_validation' })
+    expect(lines[3]).toBe('  certificate pending     (pending_validation — issues once ownership is verified)')
+    expect(lines.at(-1)).toBe('  serving     not yet     (certificate)')
+  })
+
+  it('a non-active row with a reason and no pending certificate still blocks on it', () => {
+    const lines = domainStatusLines({ ...bound, status: 'pending_dns', ssl: 'active', errorReason: 'Hostname validation: not pointed' })
+    expect(lines).toContain('  error       pending_dns  Hostname validation: not pointed')
+    expect(lines.at(-1)).toMatch(/^ {2}serving {5}not yet {5}\(.*Hostname validation: not pointed/)
+  })
+
+  it('error state with a pending certificate keeps its reason on the error line, not the certificate line', () => {
+    const lines = domainStatusLines({ ...active, status: 'error', ssl: 'pending_validation', errorReason: caa })
+    expect(lines[3]).toBe('  certificate pending     (pending_validation — issues once ownership is verified)')
+    expect(lines).toContain(`  error       error       ${caa}`)
+    expect(lines.at(-1)).toBe('  serving     not yet     (certificate, the plane reports an error state)')
+  })
+
+  // SUP2-139 / SUP2-151: a region with NO edge custody reports origin "" exactly like a region whose
+  // operator forgot cf-custom-origin — the CLI told customers to ask for a knob that does nothing.
+  it('unmanaged (originStatus relayed): neutral line, no cf-custom-origin hint', () => {
+    const r = { ...active, ssl: 'external', origin: '', edgeOrigin: '', originOk: false, originStatus: 'unmanaged' }
+    const res = domainResolveLine(r)
+    expect(res).toEqual({
+      line: '  resolves to UNMANAGED — us-east does not manage edge certificates for custom domains, so where app.customer.com lands cannot be confirmed from here; if it does not serve, contact support',
+      ready: false,
+    })
+    expect(domainStatusLines(r).join('\n')).not.toMatch(/cf-custom-origin|operator/)
+  })
+
+  it('unmanaged (older platform, no originStatus): ssl external is the marker', () => {
+    const noStatus: DomainView = { ...active, ssl: 'external', origin: '', edgeOrigin: '', originOk: false }
+    expect(domainResolveLine(noStatus).line).toContain('UNMANAGED')
+    expect(domainResolveLine(noStatus).line).not.toContain('cf-custom-origin')
+  })
+
+  it('unconfigured: the cf-custom-origin hint is still shown', () => {
+    const r = { ...active, origin: '', edgeOrigin: '', originOk: false, originStatus: 'unconfigured' }
+    expect(domainResolveLine(r)).toEqual({
+      line: '  resolves to NOT READY — us-east has no edge origin configured; app.customer.com would fall to the zone default. Ask an operator to set cf-custom-origin for us-east',
+      ready: false,
+    })
+  })
+
   it('Fly-backed row (no per-record status, no ssl): stages derive from `configured` and the provider status', () => {
     const fly: DomainView = {
       hostname: 'app.customer.com', flyApp: 'insta-main-api-ab12', configured: false, status: 'Awaiting configuration', service: 'api', region: 'us-east',
