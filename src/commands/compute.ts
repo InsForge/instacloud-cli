@@ -634,7 +634,7 @@ export async function serviceAlwaysOn(type: ManagedType, mode: string, serviceNa
 }
 export const computeAlwaysOn = (mode: string, serviceName: string | undefined, opts: LifeOpts): Promise<void> => serviceAlwaysOn('compute', mode, serviceName, opts)
 
-// ---- scale (same-region replica count; paid plans) ----
+// ---- scale (same-region replica cap; paid plans) ----
 type ScaleOpts = LifeOpts & { region?: string; remove?: string }
 
 const INSTANCE_ID = /^inst-[a-f0-9]{12}$/
@@ -644,7 +644,7 @@ export function removeTarget(count: string | undefined, service: string | undefi
   if (!INSTANCE_ID.test(opts.remove)) throw new Error(`invalid instance id: ${opts.remove} (expected inst-<12 hex digits>, the \`instance\` field of \`insta compute logs --json\`)`)
   if (opts.region !== undefined) throw new Error('--region does not apply to --remove')
   if (service !== undefined) {
-    throw new Error(count !== undefined && count.trim() !== '' && Number.isFinite(Number(count)) ? '--remove lowers the replica count by one; pass no count' : `unexpected argument: ${service} (usage: insta compute scale [service] --remove <instance>)`)
+    throw new Error(count !== undefined && count.trim() !== '' && Number.isFinite(Number(count)) ? '--remove names one instance; pass no count' : `unexpected argument: ${service} (usage: insta compute scale [service] --remove <instance>)`)
   }
   return count
 }
@@ -653,7 +653,7 @@ export function removeTarget(count: string | undefined, service: string | undefi
 // validated locally (1..10); the paid-plan gate is the backend's and its 403 flows verbatim.
 export async function computeScale(count: string | undefined, serviceName: string | undefined, opts: ScaleOpts): Promise<void> {
   if (opts.remove !== undefined) return computeRemoveInstance(removeTarget(count, serviceName, { remove: opts.remove, region: opts.region }), opts.remove, opts)
-  if (count === undefined) throw new Error('a replica count is required (or --remove <instance> to drop one named instance)')
+  if (count === undefined) throw new Error('a replica cap is required (or --remove <instance> to drop one named instance)')
   const machineCount = parseCount(count)
   const api = await ApiClient.load()
   const p = await requireProject()
@@ -663,7 +663,7 @@ export async function computeScale(count: string | undefined, serviceName: strin
   const res = await api.rawRequest('POST', `/projects/${p.projectId}/services/${svc.id}/scale`, { machineCount, region: opts.region })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body.service)
-  info(`scaled compute ${svc.name} to ${machineCount} replica(s)${opts.region ? ` in ${opts.region}` : ''}`)
+  info(`set compute ${svc.name} replica cap to ${machineCount}${opts.region ? ` in ${opts.region}` : ''}`)
 }
 
 // `insta compute scale [service] --remove <instance>` — DELETE /services/:id/instances/:instance.
@@ -676,7 +676,7 @@ async function computeRemoveInstance(serviceName: string | undefined, instance: 
   const res = await api.rawRequest('DELETE', `/projects/${p.projectId}/services/${svc.id}/instances/${instance}`)
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body.service)
-  info(`removed ${instance} from compute ${svc.name}; ${res.body.service?.machine_count ?? '?'} replica(s) remain`)
+  info(`removed ${instance} from compute ${svc.name}`)
 }
 
 // ---- limits (the resource ceiling; paid plans) ----

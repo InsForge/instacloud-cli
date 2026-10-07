@@ -34,6 +34,6 @@ describe('removeTarget', () => {
 
 describe('computeScale', () => {
   it('needs a count unless --remove names an instance', async () => {
-    await expect(computeScale(undefined, undefined, {})).rejects.toThrow(/replica count is required/)
+    await expect(computeScale(undefined, undefined, {})).rejects.toThrow(/replica cap is required/)
   })
 })
