@@ -67,6 +67,10 @@ export type DomainView = {
   service?: string | null; region?: string | null
   ssl?: string; errorReason?: string
   origin?: string; edgeOrigin?: string; originOk?: boolean
+  // The plane's own name for the routing verdict (ok | mismatch | unverified | unconfigured |
+  // unmanaged), relayed by the platform when the daemon reports it. Only `unmanaged` is read here:
+  // it is the one case the origin pair cannot tell apart from a misconfigured region.
+  originStatus?: string
 }
 
 const targetOf = (r: DomainView) => `${r.service ?? r.flyApp}${r.region ? ` (${r.region})` : ''}`
@@ -106,10 +110,28 @@ export function domainGuidanceLines(r: DomainView, ctx: DomainCmdCtx = {}): stri
 // answer carries no `ssl` and has no per-hostname origin concept, so its own verdict stands.
 const reportsOrigin = (r: DomainView) => r.ssl !== undefined
 
+// A deployment with NO edge custody for custom domains (a pre-Cloudflare plane). It reports
+// `origin: ""` exactly like a region whose operator forgot cf-custom-origin, so the pair alone reads
+// it backwards and names a setting this deployment does not have. The plane's own verdict
+// (`originStatus: 'unmanaged'`) decides when relayed; without it, `ssl: 'external'` is the plane's
+// marker for the same deployment class (it manages no edge certificate here) — the same fallback the
+// console uses. Only an unconfirmed origin is reinterpreted: a reported, confirmed origin stands.
+const edgeUnmanaged = (r: DomainView) =>
+  r.originStatus === 'unmanaged' ||
+  (r.originStatus === undefined && r.ssl === 'external' && (r.origin === undefined || r.origin === ''))
+
 // Where the hostname actually resolves — the region-specific origin the plane requested vs what
 // Cloudflare holds. Each shape carries its action; absent fields are reported as absent.
 export function domainResolveLine(r: DomainView): { line: string; ready: boolean } {
   const region = r.region ?? 'this region'
+  if (edgeUnmanaged(r)) {
+    // Not ready (routing cannot be confirmed from here), but no operator knob to name either:
+    // setting cf-custom-origin does nothing on a deployment with no edge custody.
+    return {
+      line: `  ${pad('resolves to', 12)}UNMANAGED — ${region} does not manage edge certificates for custom domains, so where ${r.hostname} lands cannot be confirmed from here; if it does not serve, contact support`,
+      ready: false,
+    }
+  }
   if (r.origin === undefined) {
     if (reportsOrigin(r)) {
       return {
@@ -204,10 +226,18 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
   }
 
   const ssl = r.ssl ?? (r.configured ? 'active' : undefined)
+  const reasonOnCert = !!r.errorReason && r.status !== 'error' && ssl !== undefined && ssl !== 'active' && ssl !== 'external'
   if (ssl === 'active') stage('certificate', 'active', '(edge TLS issued)')
   else if (ssl === 'external') stage('certificate', 'external', '(this plane manages no edge certificate for custom domains)')
   else if (ssl === undefined) { stage('certificate', 'pending', `(provider status: ${r.status})`); blockers.push('certificate') }
-  else { stage('certificate', 'pending', `(${ssl} — issues once ownership is verified)`); blockers.push('certificate') }
+  else {
+    // A pending certificate with a reason from the plane: the reason IS why it has not issued (a CAA
+    // block, the hostname not pointed at the edge), so it replaces the generic text here and is not
+    // repeated below. An `error` row keeps its reason on its own error line.
+    const detail = reasonOnCert ? `(${ssl}) ${r.errorReason}` : `(${ssl} — issues once ownership is verified)`
+    stage('certificate', 'pending', detail)
+    blockers.push('certificate')
+  }
 
   const resolve = domainResolveLine(r)
   out.push(resolve.line)
@@ -216,9 +246,16 @@ export function domainStatusLines(r: DomainView, ctx: DomainCmdCtx = {}): string
   if (r.status === 'error') {
     stage('error', r.status, r.errorReason || '(the plane reported an error state with no reason)')
     blockers.push('the plane reports an error state')
-  } else if (r.errorReason) {
-    stage('error', r.status, r.errorReason)
-    blockers.push(r.errorReason)
+  } else if (r.errorReason && !reasonOnCert) {
+    // On an ACTIVE row the plane keeps serving and REPORTS what the edge says has regressed (it
+    // never demotes a serving row on an edge read). That is a warning beside a serving hostname,
+    // not a blocker: turning it into one would print "not yet" for a domain taking traffic.
+    // Every other state with a reason is still being set up, and the reason is what blocks it.
+    if (r.status === 'active') stage('warning', r.status, r.errorReason)
+    else {
+      stage('error', r.status, r.errorReason)
+      blockers.push(r.errorReason)
+    }
   }
 
   // An unconfirmed routing target is one blocker among the others, not a headline that hides them:
