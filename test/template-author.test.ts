@@ -8,7 +8,8 @@ import { ApiClient, ApiError } from '../src/api.js'
 import type { ProjectConfig } from '../src/config.js'
 import {
   templateEditorUrl, templateStatusWord, draftListLines, requirementLines, readinessLines, regenerateChangeLines, draftLines,
-  parsePatch, readAllStdin, templateDrafts, templateDraft, templateCreate, templateEdit, templateRegenerate, BLANK_NOT_YET, type TemplateDraft,
+  parsePatch, readAllStdin, templateDrafts, templateDraft, templateCreate, templateEdit, templateRegenerate, templatePublish, templateUnpublish,
+  templateDelete, BLANK_NOT_YET, type TemplateDraft,
 } from '../src/commands/template-author.js'
 
 const API = 'https://api.instacloud.com'
@@ -393,5 +394,129 @@ describe('parsePatch', () => {
   it('refuses null and a bare value', () => {
     expect(() => parsePatch('null', 'f')).toThrow(/must be one JSON object/)
     expect(() => parsePatch('"x"', 'f')).toThrow(/must be one JSON object/)
+  })
+})
+
+describe('template publish', () => {
+  const PUBLISHED = view({ status: 'published', publishedVersion: '1.0.0' })
+  const routes = (publish: (body: any) => Answer = () => ({ body: { template: PUBLISHED } })) => ({
+    [`GET ${DRAFT_PATH}`]: () => ({ body: { template: view() } }),
+    [`POST ${DRAFT_PATH}/publish`]: publish,
+  })
+
+  it('says the template goes public at once, asks, and publishes the draft it read', async () => {
+    const confirm = vi.fn(async () => true)
+    const { api, calls } = platform(routes())
+    await templatePublish('my-app', {}, { api, project: linked(), tty: true, confirm })
+    expect(confirm).toHaveBeenCalledWith('Publish my-app now?')
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([`GET ${DRAFT_PATH}`, `POST ${DRAFT_PATH}/publish`])
+    expect(calls[1]!.body).toEqual({ expectedUpdatedAt: UPDATED })
+    expect(printed()).toBe([
+      'my-app becomes public in the community gallery at once, with no review. Anyone can find it and deploy it.',
+      'published my-app version 1.0.0 to the community gallery',
+      'take it out again with: insta template unpublish my-app',
+      '',
+    ].join('\n'))
+  })
+  it('publishes nothing when the person says no', async () => {
+    const { api, calls } = platform(routes())
+    await templatePublish('my-app', {}, { api, project: linked(), tty: true, confirm: async () => false })
+    expect(calls.map((c) => c.method)).toEqual(['GET'])
+    expect(printed()).toContain('nothing was published')
+  })
+  it('refuses without --yes when nobody can answer, before any request', async () => {
+    const { api, calls } = platform(routes())
+    await expect(templatePublish('my-app', { org: ORG }, { api, tty: false })).rejects.toThrow('exit 1')
+    expect(process.exitCode).toBe(2)
+    expect(calls).toEqual([])
+    expect(stderr.join('')).toBe([
+      'refusing to publish my-app without --yes: there is no terminal to confirm on.',
+      `Publishing lists the template in the community gallery at once, with no review. Ask the person first, then run: insta template publish my-app --org ${ORG} --yes`,
+      '',
+    ].join('\n'))
+  })
+  it('refuses under --json without --yes even on a terminal', async () => {
+    const confirm = vi.fn()
+    const { api, calls } = platform(routes())
+    await expect(templatePublish('my-app', { json: true }, { api, project: linked(), tty: true, confirm })).rejects.toThrow('exit 1')
+    expect(confirm).not.toHaveBeenCalled()
+    expect(calls).toEqual([])
+  })
+  it('publishes with --yes and no terminal, without asking', async () => {
+    const confirm = vi.fn()
+    const { api, calls } = platform(routes())
+    await templatePublish('my-app', { yes: true, json: true }, { api, project: linked(), tty: false, confirm })
+    expect(confirm).not.toHaveBeenCalled()
+    expect(calls[1]!.body).toEqual({ expectedUpdatedAt: UPDATED })
+    expect(JSON.parse(printed())).toEqual({ template: PUBLISHED, editorUrl: EDITOR })
+  })
+  it.each([
+    ['template_not_ready', 400, 'Add a description before publishing.'],
+    ['template_draft_changed', 409, 'This draft changed since you opened it. Review the latest version, then publish again.'],
+    ['template_taken_down', 409, 'This template was taken down by InstaCloud. Contact support to restore it.'],
+  ])("prints the platform's sentence for %s", async (code, status, sentence) => {
+    const { api } = platform(routes(() => ({ status, body: { error: sentence, code } })))
+    const e = await failure(templatePublish('my-app', { yes: true }, { api, project: linked(), tty: false }))
+    expect(e).not.toBeInstanceOf(ApiError)
+    expect(e.message).toBe(sentence)
+    expect(printed()).toBe('')
+  })
+})
+
+describe('template unpublish', () => {
+  it('takes the template out of the gallery', async () => {
+    const { api, calls } = platform({ [`POST ${DRAFT_PATH}/unpublish`]: () => ({ body: { template: view({ status: 'unpublished', publishedVersion: '1.0.0' }) } }) })
+    await templateUnpublish('my-app', {}, { api, project: linked() })
+    expect(calls).toEqual([{ method: 'POST', path: `${DRAFT_PATH}/unpublish`, body: undefined }])
+    expect(printed()).toBe('unpublished my-app: it is out of the community gallery, and deployed copies keep running\n')
+  })
+  it('prints the view and the link under --json', async () => {
+    const template = view({ status: 'unpublished', publishedVersion: '1.0.0' })
+    const { api } = platform({ [`POST ${DRAFT_PATH}/unpublish`]: () => ({ body: { template } }) })
+    await templateUnpublish('my-app', { json: true }, { api, project: linked() })
+    expect(JSON.parse(printed())).toEqual({ template, editorUrl: EDITOR })
+  })
+})
+
+describe('template delete', () => {
+  const routes = { [`DELETE ${DRAFT_PATH}`]: () => ({ body: { ok: true } }) }
+
+  it('asks on a terminal, then deletes', async () => {
+    const confirm = vi.fn(async () => true)
+    const { api, calls } = platform(routes)
+    await templateDelete('my-app', {}, { api, project: linked(), tty: true, confirm })
+    expect(confirm).toHaveBeenCalledWith('Delete the draft my-app? This cannot be undone.')
+    expect(calls).toEqual([{ method: 'DELETE', path: DRAFT_PATH, body: undefined }])
+    expect(printed()).toBe('deleted the draft my-app\n')
+  })
+  it('deletes nothing when the person says no', async () => {
+    const { api, calls } = platform(routes)
+    await templateDelete('my-app', {}, { api, project: linked(), tty: true, confirm: async () => false })
+    expect(calls).toEqual([])
+    expect(printed()).toBe('nothing was deleted\n')
+  })
+  it('refuses without --yes when nobody can answer, before any request', async () => {
+    const { api, calls } = platform(routes)
+    const project = linked()
+    await expect(templateDelete('my-app', {}, { api, project, tty: false })).rejects.toThrow('exit 1')
+    expect(process.exitCode).toBe(2)
+    expect(calls).toEqual([])
+    expect(project).not.toHaveBeenCalled()
+    expect(stderr.join('')).toBe([
+      'refusing to delete the draft my-app without --yes: there is no terminal to confirm on.',
+      'Deleting cannot be undone. To go ahead, run: insta template delete my-app --yes',
+      '',
+    ].join('\n'))
+  })
+  it('deletes with --yes and prints what it deleted under --json', async () => {
+    const { api } = platform(routes)
+    await templateDelete('my-app', { yes: true, json: true }, { api, project: linked(), tty: false })
+    expect(JSON.parse(printed())).toEqual({ ok: true, orgId: ORG, code: 'my-app' })
+  })
+  it('leaves a published template to the platform', async () => {
+    const { api } = platform({ [`DELETE ${DRAFT_PATH}`]: () => ({ status: 409, body: { error: 'a published template cannot be deleted, unpublish it instead' } }) })
+    const e = await failure(templateDelete('my-app', { yes: true }, { api, project: linked(), tty: false }))
+    expect(e).toBeInstanceOf(ApiError)
+    expect(e.message).toBe('a published template cannot be deleted, unpublish it instead')
   })
 })

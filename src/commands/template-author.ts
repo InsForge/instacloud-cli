@@ -2,8 +2,9 @@
 import { readFileSync } from 'node:fs'
 import { ApiClient, ApiError, requireProject } from '../api.js'
 import type { ProjectConfig } from '../config.js'
-import { info, printJson } from '../util.js'
+import { info, printJson, refuse } from '../util.js'
 import { resolveOrgId } from './billing.js'
+import { confirmOnTerminal } from './postgres.js'
 
 // ---- the platform's draft view, as far as this file reads it (--json passes all of it) ----
 
@@ -31,6 +32,9 @@ export type TemplateAuthorDeps = {
   /** The linked project, read only when neither --org nor --project names the target. */
   project?: () => Promise<ProjectConfig>
   readStdin?: () => Promise<string>
+  /** Whether a person can answer a prompt: stdin and stdout are terminals. */
+  tty?: boolean
+  confirm?: (question: string) => Promise<boolean>
 }
 type OrgOpts = { org?: string; json?: boolean }
 
@@ -175,6 +179,12 @@ export async function readAllStdin(stream: AsyncIterable<Buffer> = process.stdin
   return Buffer.concat(chunks).toString('utf8')
 }
 
+// --json is a script or an agent, never a person at a prompt.
+const canAsk = (opts: { json?: boolean }, deps: TemplateAuthorDeps): boolean =>
+  !opts.json && (deps.tty ?? (!!process.stdin.isTTY && !!process.stdout.isTTY))
+
+const orgFlag = (opts: { org?: string }): string => (opts.org ? ` --org ${opts.org}` : '')
+
 // ---- commands ----
 
 export async function templateDrafts(opts: OrgOpts = {}, deps: TemplateAuthorDeps = {}): Promise<void> {
@@ -254,4 +264,52 @@ export async function templateRegenerate(code: string, opts: OrgOpts = {}, deps:
   info(`regenerated ${headLine(template)}`)
   for (const line of regenerateChangeLines(changes)) info(line)
   for (const line of readinessLines(template.publishRequirements)) info(line)
+}
+
+export type TemplateConfirmOpts = OrgOpts & { yes?: boolean }
+
+export async function templatePublish(code: string, opts: TemplateConfirmOpts = {}, deps: TemplateAuthorDeps = {}): Promise<void> {
+  if (!opts.yes && !canAsk(opts, deps)) {
+    refuse([
+      `refusing to publish ${code} without --yes: there is no terminal to confirm on.`,
+      `Publishing lists the template in the community gallery at once, with no review. Ask the person first, then run: insta template publish ${code}${orgFlag(opts)} --yes`,
+    ])
+  }
+  const api = deps.api ?? (await ApiClient.load())
+  const orgId = await resolveOrgId(opts, deps.project)
+  const path = `/orgs/${orgId}/templates/${encodeURIComponent(code)}`
+  const { template: current } = await api.request<DraftAnswer>('GET', path)
+  if (!opts.yes) {
+    info(`${code} becomes public in the community gallery at once, with no review. Anyone can find it and deploy it.`)
+    if (!(await (deps.confirm ?? confirmOnTerminal)(`Publish ${code} now?`))) return info('nothing was published')
+  }
+  const { template } = await platformSentence(api.request<DraftAnswer>('POST', `${path}/publish`, { expectedUpdatedAt: current.updatedAt }))
+  if (opts.json) return printJson({ template, editorUrl: templateEditorUrl(api.apiUrl, template.orgId, template.code) })
+  info(`published ${template.code} version ${template.publishedVersion} to the community gallery`)
+  info(`take it out again with: insta template unpublish ${template.code}${orgFlag(opts)}`)
+}
+
+export async function templateUnpublish(code: string, opts: OrgOpts = {}, deps: TemplateAuthorDeps = {}): Promise<void> {
+  const api = deps.api ?? (await ApiClient.load())
+  const orgId = await resolveOrgId(opts, deps.project)
+  const { template } = await api.request<DraftAnswer>('POST', `/orgs/${orgId}/templates/${encodeURIComponent(code)}/unpublish`)
+  if (opts.json) return printJson({ template, editorUrl: templateEditorUrl(api.apiUrl, template.orgId, template.code) })
+  info(`unpublished ${template.code}: it is out of the community gallery, and deployed copies keep running`)
+}
+
+export async function templateDelete(code: string, opts: TemplateConfirmOpts = {}, deps: TemplateAuthorDeps = {}): Promise<void> {
+  if (!opts.yes && !canAsk(opts, deps)) {
+    refuse([
+      `refusing to delete the draft ${code} without --yes: there is no terminal to confirm on.`,
+      `Deleting cannot be undone. To go ahead, run: insta template delete ${code}${orgFlag(opts)} --yes`,
+    ])
+  }
+  const api = deps.api ?? (await ApiClient.load())
+  const orgId = await resolveOrgId(opts, deps.project)
+  if (!opts.yes && !(await (deps.confirm ?? confirmOnTerminal)(`Delete the draft ${code}? This cannot be undone.`))) {
+    return info('nothing was deleted')
+  }
+  await api.request('DELETE', `/orgs/${orgId}/templates/${encodeURIComponent(code)}`)
+  if (opts.json) return printJson({ ok: true, orgId, code })
+  info(`deleted the draft ${code}`)
 }

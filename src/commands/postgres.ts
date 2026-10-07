@@ -409,7 +409,7 @@ export type AccessDeps = {
   tty?: boolean
 }
 
-async function confirmOnTerminal(question: string): Promise<boolean> {
+export async function confirmOnTerminal(question: string): Promise<boolean> {
   const answer = await clack.confirm({ message: question, initialValue: false })
   if (clack.isCancel(answer)) return false
   return answer === true

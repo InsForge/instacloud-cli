@@ -594,6 +594,17 @@ tpl.command('edit <code>').description("Change a draft with the console editor's
 tpl.command('regenerate <code>').description('Rebuild a draft from its project as the project is now, keeping your edits. A blocked item is fixed in the project, then regenerated')
   .option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((code, o) => templateAuthor.templateRegenerate(code, o)))
+tpl.command('publish <code>').description('Publish the draft to the community gallery: public at once, with no review. Asks on a terminal, needs --yes anywhere else')
+  .option('-y, --yes', "publish without asking (get the person's yes first)")
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((code, o) => templateAuthor.templatePublish(code, o)))
+tpl.command('unpublish <code>').description('Take the template out of the community gallery. Deployed copies keep running')
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((code, o) => templateAuthor.templateUnpublish(code, o)))
+tpl.command('delete <code>').description('Delete a draft that was never published. Asks on a terminal, needs --yes anywhere else')
+  .option('-y, --yes', 'delete without asking')
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((code, o) => templateAuthor.templateDelete(code, o)))
 
 // ---- billing ----
 const bill = program.command('billing').description('Billing: current cycle overview (bare), subscribe to a tier, redeem a credit code, Stripe portal, usage by dimension')
