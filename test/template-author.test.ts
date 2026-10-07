@@ -1,10 +1,13 @@
 // Template authoring (spec 2026-10-06 §3): a real ApiClient over a fake fetch.
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { ApiClient, ApiError } from '../src/api.js'
 import type { ProjectConfig } from '../src/config.js'
 import {
-  templateEditorUrl, templateStatusWord, draftListLines, requirementLines, draftLines,
-  templateDrafts, templateDraft, type TemplateDraft,
+  templateEditorUrl, templateStatusWord, draftListLines, requirementLines, readinessLines, regenerateChangeLines, draftLines,
+  parsePatch, templateDrafts, templateDraft, templateCreate, templateEdit, templateRegenerate, BLANK_NOT_YET, type TemplateDraft,
 } from '../src/commands/template-author.js'
 
 const API = 'https://api.instacloud.com'
@@ -198,5 +201,187 @@ describe('template draft', () => {
     const e = await failure(templateDraft('nope', {}, { api, project: linked() }))
     expect(e).toBeInstanceOf(ApiError)
     expect(e.message).toBe('template not found')
+  })
+})
+
+describe('readinessLines', () => {
+  it('lists only what still stands between the draft and a publish', () => {
+    expect(readinessLines(view().publishRequirements)).toEqual(['not ready to publish yet:', '  ✗ has_tagline', '  ✗ required_descriptions: app.BASE_URL'])
+    expect(readinessLines([{ code: 'has_service', ok: true, items: [] }])).toEqual(['ready to publish'])
+  })
+})
+
+describe('template create', () => {
+  const CREATED = () => ({ status: 201, body: { template: view() } })
+
+  it('generates a draft from the linked project and prints its code, name, status and editor link', async () => {
+    const { api, calls } = platform({ [`POST /projects/${PROJECT}/template-drafts`]: CREATED })
+    await templateCreate({}, { api, project: linked() })
+    expect(calls).toEqual([{ method: 'POST', path: `/projects/${PROJECT}/template-drafts`, body: undefined }])
+    expect(printed()).toBe(`created my-app: My App (draft)\neditor: ${EDITOR}\n`)
+  })
+  it('takes --project and --name without reading the link', async () => {
+    const project = linked()
+    const { api, calls } = platform({ ['POST /projects/p-2/template-drafts']: CREATED })
+    await templateCreate({ project: 'p-2', name: 'Coral River' }, { api, project })
+    expect(project).not.toHaveBeenCalled()
+    expect(calls[0]!.body).toEqual({ name: 'Coral River' })
+  })
+  it('prints the view and the link under --json', async () => {
+    const { api } = platform({ [`POST /projects/${PROJECT}/template-drafts`]: CREATED })
+    await templateCreate({ json: true }, { api, project: linked() })
+    expect(JSON.parse(printed())).toEqual({ template: view(), editorUrl: EDITOR })
+  })
+  it('creates a blank draft in the org with its name', async () => {
+    const { api, calls } = platform({ [`POST /orgs/${ORG}/templates`]: CREATED })
+    await templateCreate({ blank: true, name: 'Coral River' }, { api, project: linked() })
+    expect(calls).toEqual([{ method: 'POST', path: `/orgs/${ORG}/templates`, body: { name: 'Coral River' } }])
+    expect(printed()).toContain('created my-app: My App (draft)')
+  })
+  it('creates a blank draft in --org with no body when no name is given', async () => {
+    const project = linked()
+    const { api, calls } = platform({ [`POST /orgs/${OTHER_ORG}/templates`]: CREATED })
+    await templateCreate({ blank: true, org: OTHER_ORG }, { api, project })
+    expect(project).not.toHaveBeenCalled()
+    expect(calls).toEqual([{ method: 'POST', path: `/orgs/${OTHER_ORG}/templates`, body: undefined }])
+  })
+  it('says this platform does not create blank templates yet when the route is not there', async () => {
+    const { api } = platform({})
+    const e = await failure(templateCreate({ blank: true }, { api, project: linked() }))
+    expect(e).not.toBeInstanceOf(ApiError)
+    expect(e.message).toBe(BLANK_NOT_YET)
+    expect(printed()).toBe('')
+  })
+  it('says the same to an agent, whom the governance hook refuses on a route it cannot classify', async () => {
+    const { api } = platform({ [`POST /orgs/${ORG}/templates`]: () => ({ status: 403, body: { error: 'unclassified_agent_action' } }) })
+    expect((await failure(templateCreate({ blank: true }, { api, project: linked() }))).message).toBe(BLANK_NOT_YET)
+  })
+  it("passes the route's own 404 through", async () => {
+    const { api } = platform({ [`POST /orgs/${OTHER_ORG}/templates`]: () => ({ status: 404, body: { error: 'org not found' } }) })
+    const e = await failure(templateCreate({ blank: true, org: OTHER_ORG }, { api, project: linked() }))
+    expect(e).toBeInstanceOf(ApiError)
+    expect(e.message).toBe('org not found')
+  })
+  it('refuses --blank with --project, and --org without --blank, before any request', async () => {
+    const { api, calls } = platform({})
+    expect((await failure(templateCreate({ blank: true, project: 'p-2' }, { api, project: linked() }))).message)
+      .toBe('--blank starts a template with no project, so it does not take --project')
+    expect((await failure(templateCreate({ org: OTHER_ORG }, { api, project: linked() }))).message)
+      .toBe("--org goes with --blank: a draft generated from a project belongs to that project's org")
+    expect(calls).toEqual([])
+  })
+})
+
+describe('template edit', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'insta-template-edit-'))
+  const file = (name: string, text: string) => { const p = join(dir, name); writeFileSync(p, text); return p }
+  const PATCH = { tagline: 'Self-hosted app', variables: [{ service: 'app', name: 'BASE_URL', choice: { kind: 'required', description: 'public URL' } }] }
+  const saved = (body: any) => ({ body: { template: view({ tagline: body.tagline, updatedAt: '2026-10-06T10:05:00.000Z' }) } })
+
+  it('fills expectedUpdatedAt from a fresh read when the file has none', async () => {
+    const { api, calls } = platform({ [`GET ${DRAFT_PATH}`]: () => ({ body: { template: view() } }), [`PATCH ${DRAFT_PATH}`]: saved })
+    await templateEdit('my-app', { patch: file('edits.json', JSON.stringify(PATCH)) }, { api, project: linked() })
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([`GET ${DRAFT_PATH}`, `PATCH ${DRAFT_PATH}`])
+    expect(calls[1]!.body).toEqual({ ...PATCH, expectedUpdatedAt: UPDATED })
+    expect(printed()).toBe([
+      'saved my-app: My App (draft)', 'not ready to publish yet:', '  ✗ has_tagline', '  ✗ required_descriptions: app.BASE_URL', '',
+    ].join('\n'))
+  })
+  it('sends the file as it is when it carries expectedUpdatedAt', async () => {
+    const own = { ...PATCH, expectedUpdatedAt: '2026-10-06T09:00:00.000Z' }
+    const { api, calls } = platform({ [`PATCH ${DRAFT_PATH}`]: saved })
+    await templateEdit('my-app', { patch: file('own.json', JSON.stringify(own)) }, { api, project: linked() })
+    expect(calls).toEqual([{ method: 'PATCH', path: DRAFT_PATH, body: own }])
+  })
+  it('reads the patch from stdin for -', async () => {
+    const { api, calls } = platform({ [`GET ${DRAFT_PATH}`]: () => ({ body: { template: view() } }), [`PATCH ${DRAFT_PATH}`]: saved })
+    await templateEdit('my-app', { patch: '-', org: ORG }, { api, readStdin: async () => JSON.stringify(PATCH) })
+    expect(calls[1]!.body).toEqual({ ...PATCH, expectedUpdatedAt: UPDATED })
+  })
+  it('prints the saved view and the link under --json', async () => {
+    const { api } = platform({ [`GET ${DRAFT_PATH}`]: () => ({ body: { template: view() } }), [`PATCH ${DRAFT_PATH}`]: saved })
+    await templateEdit('my-app', { patch: file('json.json', JSON.stringify(PATCH)), json: true }, { api, project: linked() })
+    expect(JSON.parse(printed())).toEqual({ template: saved(PATCH).body.template, editorUrl: EDITOR })
+  })
+  it('refuses a file that is not one JSON object before any request', async () => {
+    const { api, calls } = platform({})
+    expect((await failure(templateEdit('my-app', { patch: file('bad.json', '{"tagline": ') }, { api, project: linked() }))).message)
+      .toMatch(/^the patch from .*bad\.json is not valid JSON: /)
+    expect((await failure(templateEdit('my-app', { patch: file('list.json', '[]') }, { api, project: linked() }))).message)
+      .toMatch(/^the patch from .*list\.json must be one JSON object, the body the console editor sends/)
+    expect((await failure(templateEdit('my-app', { patch: join(dir, 'absent.json') }, { api, project: linked() }))).message)
+      .toMatch(/^cannot read the patch from .*absent\.json: /)
+    expect(calls).toEqual([])
+  })
+  it("prints the platform's sentence when the draft changed meanwhile", async () => {
+    const sentence = 'This draft changed since you opened it. Review the latest version, then save your changes again.'
+    const { api } = platform({
+      [`GET ${DRAFT_PATH}`]: () => ({ body: { template: view() } }),
+      [`PATCH ${DRAFT_PATH}`]: () => ({ status: 409, body: { error: sentence, code: 'template_draft_changed' } }),
+    })
+    const e = await failure(templateEdit('my-app', { patch: file('race.json', JSON.stringify(PATCH)) }, { api, project: linked() }))
+    expect(e).not.toBeInstanceOf(ApiError)
+    expect(e.message).toBe(sentence)
+    expect(printed()).toBe('')
+  })
+  it('leaves an uncoded refusal to the platform', async () => {
+    const { api } = platform({
+      [`GET ${DRAFT_PATH}`]: () => ({ body: { template: view() } }),
+      [`PATCH ${DRAFT_PATH}`]: () => ({ status: 400, body: { error: 'category must be one of ai, analytics' } }),
+    })
+    const e = await failure(templateEdit('my-app', { patch: file('cat.json', '{"category":"x"}') }, { api, project: linked() }))
+    expect(e).toBeInstanceOf(ApiError)
+    expect((e as ApiError).status).toBe(400)
+  })
+})
+
+describe('template regenerate', () => {
+  const CHANGES = { addedServices: ['cache'], removedServices: [], addedVariables: ['REDIS_URL'], removedVariables: ['OLD_KEY'] }
+  const rebuilt = (changes = CHANGES) => () => ({ body: { template: view(), changes } })
+
+  it('rebuilds the draft from its project and says what the project changed', async () => {
+    const { api, calls } = platform({ [`POST ${DRAFT_PATH}/regenerate`]: rebuilt() })
+    await templateRegenerate('my-app', {}, { api, project: linked() })
+    expect(calls).toEqual([{ method: 'POST', path: `${DRAFT_PATH}/regenerate`, body: undefined }])
+    expect(printed()).toBe([
+      'regenerated my-app: My App (draft)',
+      '  services added: cache',
+      '  variables added: REDIS_URL',
+      '  variables removed: OLD_KEY',
+      'not ready to publish yet:', '  ✗ has_tagline', '  ✗ required_descriptions: app.BASE_URL', '',
+    ].join('\n'))
+  })
+  it('says when the project changed nothing', () => {
+    expect(regenerateChangeLines({ addedServices: [], removedServices: [], addedVariables: [], removedVariables: [] }))
+      .toEqual(['  no service or variable was added to or removed from the project'])
+  })
+  it('prints the view, the changes and the link under --json', async () => {
+    const { api } = platform({ [`POST ${DRAFT_PATH}/regenerate`]: rebuilt() })
+    await templateRegenerate('my-app', { json: true }, { api, project: linked() })
+    expect(JSON.parse(printed())).toEqual({ template: view(), changes: CHANGES, editorUrl: EDITOR })
+  })
+  it.each([
+    'a blank template has no project to regenerate from',
+    'the source project was deleted: only the name, description, category, README and logo can still change',
+  ])("prints the platform's sentence: %s", async (sentence) => {
+    const { api } = platform({ [`POST ${DRAFT_PATH}/regenerate`]: () => ({ status: 400, body: { error: sentence } }) })
+    const e = await failure(templateRegenerate('my-app', {}, { api, project: linked() }))
+    expect(e).not.toBeInstanceOf(ApiError)
+    expect(e.message).toBe(sentence)
+    expect(printed()).toBe('')
+  })
+  it('leaves a missing draft to the platform', async () => {
+    const { api } = platform({ [`POST ${DRAFT_PATH}/regenerate`]: () => ({ status: 404, body: { error: 'template not found' } }) })
+    expect(await failure(templateRegenerate('my-app', {}, { api, project: linked() }))).toBeInstanceOf(ApiError)
+  })
+})
+
+describe('parsePatch', () => {
+  it('keeps every key of the object as written', () => {
+    expect(parsePatch('{"tagline":"x","services":[{"name":"app","removed":true}]}', 'f')).toEqual({ tagline: 'x', services: [{ name: 'app', removed: true }] })
+  })
+  it('refuses null and a bare value', () => {
+    expect(() => parsePatch('null', 'f')).toThrow(/must be one JSON object/)
+    expect(() => parsePatch('"x"', 'f')).toThrow(/must be one JSON object/)
   })
 })

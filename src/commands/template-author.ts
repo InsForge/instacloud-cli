@@ -1,5 +1,6 @@
 // `insta template` authoring commands: the org's community templates, from drafts to the gallery.
-import { ApiClient } from '../api.js'
+import { readFileSync } from 'node:fs'
+import { ApiClient, ApiError, requireProject } from '../api.js'
 import type { ProjectConfig } from '../config.js'
 import { info, printJson } from '../util.js'
 import { resolveOrgId } from './billing.js'
@@ -22,11 +23,14 @@ export type TemplateDraft = {
   publishRequirements: TemplateRequirement[]; updatedAt: string
 }
 type DraftAnswer = { template: TemplateDraft }
+/** What regenerate found added or removed in the project since the last build. */
+export type TemplateChanges = { addedServices: string[]; removedServices: string[]; addedVariables: string[]; removedVariables: string[] }
 
 export type TemplateAuthorDeps = {
   api?: Pick<ApiClient, 'apiUrl' | 'request'>
   /** The linked project, read only when neither --org nor --project names the target. */
   project?: () => Promise<ProjectConfig>
+  readStdin?: () => Promise<string>
 }
 type OrgOpts = { org?: string; json?: boolean }
 
@@ -64,6 +68,22 @@ export function draftListLines(templates: TemplateDraft[]): string[] {
 /** Each requirement with its mark, and what is still missing for an unmet one. */
 export function requirementLines(requirements: TemplateRequirement[]): string[] {
   return requirements.map((r) => `  ${r.ok ? '✓' : '✗'} ${r.code}${!r.ok && r.items.length ? `: ${r.items.join(', ')}` : ''}`)
+}
+
+/** What still stands between the draft and a publish. */
+export function readinessLines(requirements: TemplateRequirement[]): string[] {
+  const unmet = requirements.filter((r) => !r.ok)
+  return unmet.length ? ['not ready to publish yet:', ...requirementLines(unmet)] : ['ready to publish']
+}
+
+/** What a regenerate found changed in the project since the draft was last built. */
+export function regenerateChangeLines(c: TemplateChanges): string[] {
+  const rows: Array<[string, string[]]> = [
+    ['services added', c.addedServices], ['services removed', c.removedServices],
+    ['variables added', c.addedVariables], ['variables removed', c.removedVariables],
+  ]
+  const lines = rows.filter(([, names]) => names.length).map(([label, names]) => `  ${label}: ${names.join(', ')}`)
+  return lines.length ? lines : ['  no service or variable was added to or removed from the project']
 }
 
 function serviceText(s: TemplateDraftService): string {
@@ -110,6 +130,50 @@ export function draftLines(t: TemplateDraft, editorUrl: string | null): string[]
   return lines
 }
 
+/** The console editor's PATCH body, as an agent wrote it to a file or to stdin. */
+export function parsePatch(text: string, from: string): Record<string, unknown> {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch (e) {
+    throw new Error(`the patch from ${from} is not valid JSON: ${(e as Error).message}`)
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`the patch from ${from} must be one JSON object, the body the console editor sends, for example {"tagline": "Self-hosted analytics"}`)
+  }
+  return value as Record<string, unknown>
+}
+
+export const BLANK_NOT_YET = 'this platform does not create blank templates yet. Create a template from a project instead: insta template create --project <id>'
+
+async function createBlank(api: Pick<ApiClient, 'request'>, orgId: string, body: { name: string } | undefined): Promise<DraftAnswer> {
+  try {
+    return await api.request<DraftAnswer>('POST', `/orgs/${orgId}/templates`, body)
+  } catch (e) {
+    // No route yet: Fastify's own 404 for a person, the governance hook's refusal for an agent.
+    const missing = e instanceof ApiError
+      && ((e.status === 404 && e.body?.error === 'Not Found') || (e.status === 403 && e.body?.error === 'unclassified_agent_action'))
+    if (missing) throw new Error(BLANK_NOT_YET)
+    throw e
+  }
+}
+
+// A coded answer is a whole sentence for the person: print it without the HTTP status.
+async function platformSentence<T>(call: Promise<T>): Promise<T> {
+  try {
+    return await call
+  } catch (e) {
+    if (e instanceof ApiError && typeof e.body?.code === 'string') throw new Error(e.message)
+    throw e
+  }
+}
+
+async function readAllStdin(): Promise<string> {
+  let data = ''
+  for await (const chunk of process.stdin) data += chunk
+  return data
+}
+
 // ---- commands ----
 
 export async function templateDrafts(opts: OrgOpts = {}, deps: TemplateAuthorDeps = {}): Promise<void> {
@@ -127,4 +191,66 @@ export async function templateDraft(code: string, opts: OrgOpts = {}, deps: Temp
   const editorUrl = templateEditorUrl(api.apiUrl, template.orgId, template.code)
   if (opts.json) return printJson({ template, editorUrl })
   for (const line of draftLines(template, editorUrl)) info(line)
+}
+
+export type TemplateCreateOpts = OrgOpts & { project?: string; blank?: boolean; name?: string }
+
+export async function templateCreate(opts: TemplateCreateOpts = {}, deps: TemplateAuthorDeps = {}): Promise<void> {
+  if (opts.blank && opts.project) throw new Error('--blank starts a template with no project, so it does not take --project')
+  if (opts.org && !opts.blank) throw new Error("--org goes with --blank: a draft generated from a project belongs to that project's org")
+  // Presence, not truthiness: an empty --name reaches the platform's own sentence.
+  const body = opts.name !== undefined ? { name: opts.name } : undefined
+  const api = deps.api ?? (await ApiClient.load())
+  let answer: DraftAnswer
+  if (opts.blank) {
+    answer = await createBlank(api, await resolveOrgId(opts, deps.project), body)
+  } else {
+    const projectId = opts.project ?? (await (deps.project ?? requireProject)()).projectId
+    answer = await api.request<DraftAnswer>('POST', `/projects/${projectId}/template-drafts`, body)
+  }
+  const { template } = answer
+  const editorUrl = templateEditorUrl(api.apiUrl, template.orgId, template.code)
+  if (opts.json) return printJson({ template, editorUrl })
+  info(`created ${headLine(template)}`)
+  if (editorUrl) info(`editor: ${editorUrl}`)
+}
+
+export type TemplateEditOpts = OrgOpts & { patch: string }
+
+export async function templateEdit(code: string, opts: TemplateEditOpts, deps: TemplateAuthorDeps = {}): Promise<void> {
+  const from = opts.patch === '-' ? 'stdin' : opts.patch
+  let text: string
+  try {
+    text = opts.patch === '-' ? await (deps.readStdin ?? readAllStdin)() : readFileSync(opts.patch, 'utf8')
+  } catch (e) {
+    throw new Error(`cannot read the patch from ${from}: ${(e as Error).message}`)
+  }
+  const patch = parsePatch(text, from)
+  const api = deps.api ?? (await ApiClient.load())
+  const orgId = await resolveOrgId(opts, deps.project)
+  const path = `/orgs/${orgId}/templates/${encodeURIComponent(code)}`
+  // Without one, the edit applies to the draft as it is now.
+  const expectedUpdatedAt = patch.expectedUpdatedAt ?? (await api.request<DraftAnswer>('GET', path)).template.updatedAt
+  const { template } = await platformSentence(api.request<DraftAnswer>('PATCH', path, { ...patch, expectedUpdatedAt }))
+  if (opts.json) return printJson({ template, editorUrl: templateEditorUrl(api.apiUrl, template.orgId, template.code) })
+  info(`saved ${headLine(template)}`)
+  for (const line of readinessLines(template.publishRequirements)) info(line)
+}
+
+export async function templateRegenerate(code: string, opts: OrgOpts = {}, deps: TemplateAuthorDeps = {}): Promise<void> {
+  const api = deps.api ?? (await ApiClient.load())
+  const orgId = await resolveOrgId(opts, deps.project)
+  let answer: DraftAnswer & { changes: TemplateChanges }
+  try {
+    answer = await api.request('POST', `/orgs/${orgId}/templates/${encodeURIComponent(code)}/regenerate`)
+  } catch (e) {
+    // Its 400s are sentences for the person: a blank draft, a deleted source project.
+    if (e instanceof ApiError && e.status === 400) throw new Error(e.message)
+    throw e
+  }
+  const { template, changes } = answer
+  if (opts.json) return printJson({ template, changes, editorUrl: templateEditorUrl(api.apiUrl, template.orgId, template.code) })
+  info(`regenerated ${headLine(template)}`)
+  for (const line of regenerateChangeLines(changes)) info(line)
+  for (const line of readinessLines(template.publishRequirements)) info(line)
 }
