@@ -33,6 +33,7 @@ import * as managedDb from './commands/managed-db.js'
 import * as storageCmd from './commands/storage.js'
 import { manifest } from './commands/manifest.js'
 import * as template from './commands/template.js'
+import * as templateAuthor from './commands/template-author.js'
 import * as govern from './commands/govern.js'
 import * as observe from './commands/observe.js'
 import * as obs from './commands/metrics.js'
@@ -561,7 +562,7 @@ program.command('run <cmd> [args...]').description('Run a command with the branc
   .action(guard((cmd, args, o) => runCmd.run([cmd, ...(args ?? [])], o)))
 
 // ---- templates (registry, local insta.template.yaml, or a GitHub URL) ----
-const tpl = program.command('template').description('Browse and deploy app templates (registry, a local dir, or a GitHub URL)')
+const tpl = program.command('template').description("Browse and deploy app templates (registry, a local dir, or a GitHub URL), and author your org's community templates")
 tpl.command('list').description('List templates in the platform registry').option('--json').action(guard((o) => template.templateList(o)))
 tpl.command('info <code>').description('Show a template: version, upstream pin, services, and its required/optional variables')
   .option('--json').action(guard((code, o) => template.templateInfo(code, o)))
@@ -572,6 +573,38 @@ tpl.command('deploy <code-or-dir-or-url>').description('Deploy a template onto a
   .option('-y, --yes', 'non-interactive: missing required variables fail with a --set list instead of prompting')
   .option('--json')
   .action(guard((target, o) => template.templateDeploy(target, o)))
+// Authoring: the org's community templates, the same drafts the console editor changes.
+tpl.command('create').description("Create a community template draft from the linked project (or --project), or an empty one with --blank. Prints its code, status and the console editor link")
+  .option('--project <id>', 'project to generate the draft from (default: the linked project)')
+  .option('--blank', 'start with no project and no services (needs a platform that creates blank templates)')
+  .option('--name <name>', 'template name, 1 to 80 characters (default: the project name, or New template with --blank)')
+  .option('--org <id>', "org of a --blank draft (default: linked project's org)")
+  .option('--json')
+  .action(guard((o) => templateAuthor.templateCreate(o)))
+tpl.command('drafts').description("List your org's community templates, drafts and published, with their status")
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((o) => templateAuthor.templateDrafts(o)))
+tpl.command('draft <code>').description('Show one community template draft: its services, every variable with its choice, and the publish requirements')
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((code, o) => templateAuthor.templateDraft(code, o)))
+tpl.command('edit <code>').description("Change a draft with the console editor's PATCH body as JSON. Without expectedUpdatedAt in it, the draft's current one is used")
+  .requiredOption('--patch <file>', 'JSON file holding the PATCH body, or - to read it from stdin')
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((code, o) => templateAuthor.templateEdit(code, o)))
+tpl.command('regenerate <code>').description('Rebuild a draft from its project as the project is now, keeping your edits. A blocked item is fixed in the project, then regenerated')
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((code, o) => templateAuthor.templateRegenerate(code, o)))
+tpl.command('publish <code>').description('Publish the draft to the community gallery: public at once, with no review. Asks on a terminal, needs --yes anywhere else, and always for an agent')
+  .option('-y, --yes', "publish without asking (get the person's yes first)")
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((code, o) => templateAuthor.templatePublish(code, o)))
+tpl.command('unpublish <code>').description('Take the template out of the community gallery. Deployed copies keep running')
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((code, o) => templateAuthor.templateUnpublish(code, o)))
+tpl.command('delete <code>').description('Delete a draft that was never published. Asks on a terminal, needs --yes anywhere else, and always for an agent')
+  .option('-y, --yes', 'delete without asking')
+  .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .action(guard((code, o) => templateAuthor.templateDelete(code, o)))
 
 // ---- billing ----
 const bill = program.command('billing').description('Billing: current cycle overview (bare), subscribe to a tier, redeem a credit code, Stripe portal, usage by dimension')
