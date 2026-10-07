@@ -294,7 +294,7 @@ export async function upgrade(current: string, deps: UpgradeDeps = {}): Promise<
   if (channel === 'npm') {
     await run({ cmd: 'npm', args: ['install', '-g', `insta@${latest ?? 'latest'}`], env: process.env })
   } else {
-    const shellEnv = { ...process.env, INSTA_INSTALL_DIR: installDir }
+    const shellEnv = { ...process.env, INSTA_INSTALL_DIR: installDir, INSTA_UPGRADE: '1' }
     const sh = { cmd: 'sh', args: ['-c', `curl -fsSL ${INSTALL_SH} | sh`] }
     if (!latest) {
       await run({ ...sh, env: shellEnv })
