@@ -168,10 +168,11 @@ async function platformSentence<T>(call: Promise<T>): Promise<T> {
   }
 }
 
-async function readAllStdin(): Promise<string> {
-  let data = ''
-  for await (const chunk of process.stdin) data += chunk
-  return data
+// Decode once at the end: a multi-byte character can straddle two chunks.
+export async function readAllStdin(stream: AsyncIterable<Buffer> = process.stdin): Promise<string> {
+  const chunks: Buffer[] = []
+  for await (const chunk of stream) chunks.push(chunk)
+  return Buffer.concat(chunks).toString('utf8')
 }
 
 // ---- commands ----

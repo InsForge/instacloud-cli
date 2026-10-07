@@ -1,13 +1,14 @@
 // Template authoring (spec 2026-10-06 §3): a real ApiClient over a fake fetch.
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { Readable } from 'node:stream'
 import { ApiClient, ApiError } from '../src/api.js'
 import type { ProjectConfig } from '../src/config.js'
 import {
   templateEditorUrl, templateStatusWord, draftListLines, requirementLines, readinessLines, regenerateChangeLines, draftLines,
-  parsePatch, templateDrafts, templateDraft, templateCreate, templateEdit, templateRegenerate, BLANK_NOT_YET, type TemplateDraft,
+  parsePatch, readAllStdin, templateDrafts, templateDraft, templateCreate, templateEdit, templateRegenerate, BLANK_NOT_YET, type TemplateDraft,
 } from '../src/commands/template-author.js'
 
 const API = 'https://api.instacloud.com'
@@ -274,7 +275,8 @@ describe('template create', () => {
 
 describe('template edit', () => {
   const dir = mkdtempSync(join(tmpdir(), 'insta-template-edit-'))
-  const file = (name: string, text: string) => { const p = join(dir, name); writeFileSync(p, text); return p }
+  afterAll(() => { rmSync(dir, { recursive: true, force: true }) })
+  const file =(name: string, text: string) => { const p = join(dir, name); writeFileSync(p, text); return p }
   const PATCH = { tagline: 'Self-hosted app', variables: [{ service: 'app', name: 'BASE_URL', choice: { kind: 'required', description: 'public URL' } }] }
   const saved = (body: any) => ({ body: { template: view({ tagline: body.tagline, updatedAt: '2026-10-06T10:05:00.000Z' }) } })
 
@@ -373,6 +375,14 @@ describe('template regenerate', () => {
   it('leaves a missing draft to the platform', async () => {
     const { api } = platform({ [`POST ${DRAFT_PATH}/regenerate`]: () => ({ status: 404, body: { error: 'template not found' } }) })
     expect(await failure(templateRegenerate('my-app', {}, { api, project: linked() }))).toBeInstanceOf(ApiError)
+  })
+})
+
+describe('readAllStdin', () => {
+  it('decodes a multi-byte character split across two chunks once', async () => {
+    const bytes = Buffer.from('{"tagline":"你好"}', 'utf8')
+    const cut = bytes.indexOf(0xe4) + 1
+    expect(await readAllStdin(Readable.from([bytes.subarray(0, cut), bytes.subarray(cut)]))).toBe('{"tagline":"你好"}')
   })
 })
 
