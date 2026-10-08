@@ -634,7 +634,7 @@ export async function serviceAlwaysOn(type: ManagedType, mode: string, serviceNa
 }
 export const computeAlwaysOn = (mode: string, serviceName: string | undefined, opts: LifeOpts): Promise<void> => serviceAlwaysOn('compute', mode, serviceName, opts)
 
-// ---- scale (same-region replica count; paid plans) ----
+// ---- scale (same-region replica cap; paid plans) ----
 type ScaleOpts = LifeOpts & { region?: string; remove?: string }
 
 const INSTANCE_ID = /^inst-[a-f0-9]{12}$/
@@ -644,7 +644,7 @@ export function removeTarget(count: string | undefined, service: string | undefi
   if (!INSTANCE_ID.test(opts.remove)) throw new Error(`invalid instance id: ${opts.remove} (expected inst-<12 hex digits>, the \`instance\` field of \`insta compute logs --json\`)`)
   if (opts.region !== undefined) throw new Error('--region does not apply to --remove')
   if (service !== undefined) {
-    throw new Error(count !== undefined && count.trim() !== '' && Number.isFinite(Number(count)) ? '--remove lowers the replica count by one; pass no count' : `unexpected argument: ${service} (usage: insta compute scale [service] --remove <instance>)`)
+    throw new Error(count !== undefined && count.trim() !== '' && Number.isFinite(Number(count)) ? '--remove names one instance; pass no count' : `unexpected argument: ${service} (usage: insta compute scale [service] --remove <instance>)`)
   }
   return count
 }
@@ -653,7 +653,7 @@ export function removeTarget(count: string | undefined, service: string | undefi
 // validated locally (1..10); the paid-plan gate is the backend's and its 403 flows verbatim.
 export async function computeScale(count: string | undefined, serviceName: string | undefined, opts: ScaleOpts): Promise<void> {
   if (opts.remove !== undefined) return computeRemoveInstance(removeTarget(count, serviceName, { remove: opts.remove, region: opts.region }), opts.remove, opts)
-  if (count === undefined) throw new Error('a replica count is required (or --remove <instance> to drop one named instance)')
+  if (count === undefined) throw new Error('a replica cap is required (or --remove <instance> to drop one named instance)')
   const machineCount = parseCount(count)
   const api = await ApiClient.load()
   const p = await requireProject()
@@ -663,7 +663,7 @@ export async function computeScale(count: string | undefined, serviceName: strin
   const res = await api.rawRequest('POST', `/projects/${p.projectId}/services/${svc.id}/scale`, { machineCount, region: opts.region })
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body.service)
-  info(`scaled compute ${svc.name} to ${machineCount} replica(s)${opts.region ? ` in ${opts.region}` : ''}`)
+  info(`set compute ${svc.name} replica cap to ${machineCount}${opts.region ? ` in ${opts.region}` : ''}`)
 }
 
 // `insta compute scale [service] --remove <instance>` — DELETE /services/:id/instances/:instance.
@@ -676,7 +676,7 @@ async function computeRemoveInstance(serviceName: string | undefined, instance: 
   const res = await api.rawRequest('DELETE', `/projects/${p.projectId}/services/${svc.id}/instances/${instance}`)
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body.service)
-  info(`removed ${instance} from compute ${svc.name}; ${res.body.service?.machine_count ?? '?'} replica(s) remain`)
+  info(`removed ${instance} from compute ${svc.name}; replica cap is now ${res.body.service?.machine_count ?? '?'}`)
 }
 
 // ---- limits (the resource ceiling; paid plans) ----
@@ -1792,9 +1792,21 @@ export function acquireLockFile(path: string, now: number, staleMs: number): (()
   // ask whether the holder still exists.
   const token = `${process.pid}:${randomUUID()}`
   const release = () => {
+    // The claim a takeover of this token takes, so a release and a takeover never interleave.
+    const claim = takeoverClaim(path, token)
+    let claimed = false
+    try {
+      linkSync(path, claim)
+      claimed = true
+    } catch (e) {
+      // Leave the lock unless the disk has no hardlinks, where no takeover can claim it either.
+      if (!LINK_UNSUPPORTED.has(String((e as NodeJS.ErrnoException)?.code))) return
+    }
     try {
       if (readFileSync(path, 'utf8') === token) unlinkSync(path)
-    } catch { /* already gone, or taken over by someone else */ }
+    } catch { /* already gone, or taken over by someone else */ } finally {
+      if (claimed) try { unlinkSync(claim) } catch { /* the inode keeps its other name */ }
+    }
   }
   const take = (): (() => void) | undefined => {
     try {
@@ -1925,21 +1937,22 @@ function processAlive(pid: number): boolean {
  *  `path` keeps its inode throughout, so there is no moment at which the lock
  *  at `path` can have become somebody else's between the check and the act:
  *  the holder judged dead cannot release, every other breaker is behind the
- *  claim, and a release by anyone else checks for its own token first. Should
- *  the old holder's release ever run, it reads a foreign token and leaves the
- *  file alone.
+ *  claim, and a release by anyone else checks for its own token first.
+ *  The old holder's release takes this same claim, so it never lands inside a takeover.
+ *  A release that cannot take it leaves the lock, to be broken like an abandoned one.
  *
  *  Residual, and deliberately not "fixed": a breaker killed between the link
- *  and its write leaves the claim behind, and that one token can then no
- *  longer be broken (removing the claim by hand is the way out, and the busy
- *  message names the lock). Every scheme for reaping an abandoned claim needs
+ *  and its write, or a release killed before its unlink, leaves the claim
+ *  behind, and that one token can then no longer be broken or released
+ *  (removing the claim by hand is the way out, and the busy message names
+ *  the lock). Every scheme for reaping an abandoned claim needs
  *  to decide the claim is dead and then remove it -- the same check-then-act
  *  this function exists to eliminate, one level up. A claim left behind AFTER
  *  the write is inert: the lock now carries the breaker's token, and the next
  *  breaker keys its claim on that. A wedged lock is recoverable and says so;
  *  two writers in the same section silently lose the user's config. */
 function breakStaleLock(path: string, stale: string, mine: string): boolean {
-  const claim = `${path}.stale.${createHash('sha256').update(stale).digest('hex').slice(0, 32)}`
+  const claim = takeoverClaim(path, stale)
   try {
     linkSync(path, claim)
   } catch {
@@ -1964,6 +1977,14 @@ function breakStaleLock(path: string, stale: string, mine: string): boolean {
   } finally {
     try { unlinkSync(claim) } catch { /* the inode keeps its other name */ }
   }
+}
+
+/** link() errors from a disk without hardlinks, where a release may skip its claim. */
+const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'])
+
+/** The hardlink that arbitrates breaking or releasing the lock `token` names. */
+function takeoverClaim(path: string, token: string): string {
+  return `${path}.stale.${createHash('sha256').update(token).digest('hex').slice(0, 32)}`
 }
 
 /** Side-effect seams, following the `TrackDeps` convention used by telemetry.
