@@ -157,7 +157,7 @@ export function validateManifest(m: TemplateManifest): string[] {
       if (svc.alwaysOn === false) problems.push(`${where}.alwaysOn: a worker cannot scale to zero — nothing is routed to it, so nothing would wake it; remove alwaysOn or set it true`)
     }
     // Optional on a web service, and a given path must pass the platform's grammar.
-    if (svc.healthcheck !== undefined) {
+    if (svc.type !== 'worker' && svc.healthcheck !== undefined) {
       const healthcheck = scalarString(svc.healthcheck)
       if (healthcheck === null) problems.push(`${where}.healthcheck must be a string`)
       else if (!healthcheck.startsWith('/')) problems.push(`${where}: healthcheck must be an absolute path (start with /)`)

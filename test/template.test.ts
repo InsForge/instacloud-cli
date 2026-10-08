@@ -252,11 +252,15 @@ describe('validateManifest', () => {
     expect(validateManifest(web(''))).toEqual(['services.app: healthcheck must be an absolute path (start with /)'])
     for (const odd of [null, {}, ['/']]) expect(validateManifest(web(odd)), JSON.stringify(odd)).toEqual(['services.app.healthcheck must be a string'])
   })
-  it('still refuses a healthcheck on a worker, with or without a valid path', () => {
-    const worker = (healthcheck: string) =>
+  // A worker is told to remove the path, so it gets no second problem about the path grammar.
+  it('refuses a healthcheck on a worker once, whatever the value', () => {
+    const worker = (healthcheck: unknown) =>
       ({ code: 'x', version: '1', services: { bg: { type: 'worker', image: 'a:1', healthcheck } } }) as unknown as TemplateManifest
-    expect(validateManifest(worker('/healthz')).join('\n')).toMatch(/a worker has no HTTP endpoint/)
-    expect(validateManifest(worker('//evil.example')).join('\n')).toMatch(/a worker has no HTTP endpoint/)
+    for (const value of ['/healthz', '//x', '//evil.example', 'health', '', null]) {
+      const problems = validateManifest(worker(value))
+      expect(problems, JSON.stringify(value)).toHaveLength(1)
+      expect(problems[0], JSON.stringify(value)).toMatch(/^services\.bg\.healthcheck: a worker has no HTTP endpoint/)
+    }
   })
   it('parses YAML for a web service with no healthcheck path', () => {
     const m = parseManifestYaml(['code: demo', 'version: "1.0"', 'services:', '  app:', '    type: web', '    image: nginx:1.27'].join('\n'))
