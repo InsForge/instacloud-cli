@@ -1799,9 +1799,8 @@ export function acquireLockFile(path: string, now: number, staleMs: number): (()
       linkSync(path, claim)
       claimed = true
     } catch (e) {
-      // EEXIST is a takeover in progress, so the lock is no longer ours to remove.
-      if ((e as NodeJS.ErrnoException)?.code === 'EEXIST') return
-      // Any other error (gone, no hardlinks) fails every takeover too, so the check below is safe.
+      // Leave the lock unless the disk has no hardlinks, where no takeover can claim it either.
+      if (!LINK_UNSUPPORTED.has(String((e as NodeJS.ErrnoException)?.code))) return
     }
     try {
       if (readFileSync(path, 'utf8') === token) unlinkSync(path)
@@ -1940,6 +1939,7 @@ function processAlive(pid: number): boolean {
  *  the holder judged dead cannot release, every other breaker is behind the
  *  claim, and a release by anyone else checks for its own token first.
  *  The old holder's release takes this same claim, so it never lands inside a takeover.
+ *  A release that cannot take it leaves the lock, to be broken like an abandoned one.
  *
  *  Residual, and deliberately not "fixed": a breaker killed between the link
  *  and its write, or a release killed before its unlink, leaves the claim
@@ -1978,6 +1978,9 @@ function breakStaleLock(path: string, stale: string, mine: string): boolean {
     try { unlinkSync(claim) } catch { /* the inode keeps its other name */ }
   }
 }
+
+/** link() errors from a disk without hardlinks, where a release may skip its claim. */
+const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'])
 
 /** The hardlink that arbitrates breaking or releasing the lock `token` names. */
 function takeoverClaim(path: string, token: string): string {

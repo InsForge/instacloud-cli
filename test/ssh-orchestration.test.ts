@@ -636,6 +636,35 @@ describe('the renewal lock survives a holder that outlives the staleness window'
     }
     expect(interrupted, 'the takeover never landed inside the release').toBeGreaterThanOrEqual(2)
   })
+
+  it('a release that cannot take its claim leaves the lock, unless the disk has no hardlinks', () => {
+    // A transient link failure must not reopen the race, and a disk without hardlinks still releases.
+    const lock = join(home, '.insta', 'ssh', 'api.insta.renew.lock')
+    const patched = fs as unknown as Record<string, (...args: unknown[]) => unknown>
+    const realLink = patched.linkSync!
+    const releaseWithLinkError = (code: string) => {
+      const a = acquireRenewalLock('api.insta')!
+      expect(a).toBeTruthy()
+      patched.linkSync = (p: unknown, ...rest: unknown[]) => {
+        if (String(p) === lock) throw Object.assign(new Error(code), { code })
+        return realLink(p, ...rest)
+      }
+      syncBuiltinESMExports()
+      try { a() } finally { patched.linkSync = realLink; syncBuiltinESMExports() }
+    }
+
+    releaseWithLinkError('ENOSPC')
+    expect(existsSync(lock), 'a release without its claim removed the lock').toBe(true)
+    expect(acquireRenewalLock('api.insta'), 'the lock left behind was not held').toBeUndefined()
+    const b = acquireRenewalLock('api.insta', Date.now() + 61_000)
+    expect(b, 'the lock left behind could not be broken once stale').toBeTruthy()
+    b!()
+
+    releaseWithLinkError('EPERM')
+    const c = acquireRenewalLock('api.insta')
+    expect(c, 'a disk without hardlinks never released').toBeTruthy()
+    c!()
+  })
 })
 
 // Everything above either stubs the two install steps or asserts a REFUSAL.
