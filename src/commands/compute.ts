@@ -676,7 +676,7 @@ async function computeRemoveInstance(serviceName: string | undefined, instance: 
   const res = await api.rawRequest('DELETE', `/projects/${p.projectId}/services/${svc.id}/instances/${instance}`)
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body.service)
-  info(`removed ${instance} from compute ${svc.name}`)
+  info(`removed ${instance} from compute ${svc.name}; replica cap is now ${res.body.service?.machine_count ?? '?'}`)
 }
 
 // ---- limits (the resource ceiling; paid plans) ----
