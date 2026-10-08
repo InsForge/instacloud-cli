@@ -7,7 +7,8 @@
 // single piece -- only from running the steps together and watching what
 // happens, and in what order.
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest'
-import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import fs, { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
@@ -601,6 +602,40 @@ describe('the renewal lock survives a holder that outlives the staleness window'
     expect(c, 'the lock was never released').toBeTruthy()
     c!()
   })
+
+  it('a takeover landing inside the superseded holder release still leaves one holder', () => {
+    // B breaks A's aged lock just before the Nth fs call of A's release on the lock, one N per pass.
+    const lock = join(home, '.insta', 'ssh', 'api.insta.renew.lock')
+    const patched = fs as unknown as Record<string, (...args: unknown[]) => unknown>
+    const steps = ['linkSync', 'readFileSync', 'unlinkSync']
+    let interrupted = 0
+    for (let at = 1; ; at++) {
+      const a = acquireRenewalLock('api.insta')!
+      expect(a).toBeTruthy()
+      const real = Object.fromEntries(steps.map((s) => [s, patched[s]!]))
+      let calls = 0
+      let inB = false
+      let b: (() => void) | undefined
+      for (const s of steps) {
+        patched[s] = (p: unknown, ...rest: unknown[]) => {
+          if (!inB && String(p) === lock && ++calls === at) {
+            inB = true
+            try { b = acquireRenewalLock('api.insta', Date.now() + 61_000) } finally { inB = false }
+          }
+          return real[s]!(p, ...rest)
+        }
+      }
+      syncBuiltinESMExports()
+      try { a() } finally { Object.assign(patched, real); syncBuiltinESMExports() }
+      const c = acquireRenewalLock('api.insta')
+      const holders = [b && 'B', c && 'C'].filter(Boolean)
+      b?.(); c?.()
+      if (calls < at) break
+      interrupted++
+      expect(holders, `a takeover before release step ${at} left the wrong number of holders`).toHaveLength(1)
+    }
+    expect(interrupted, 'the takeover never landed inside the release').toBeGreaterThanOrEqual(2)
+  })
 })
 
 // Everything above either stubs the two install steps or asserts a REFUSAL.
@@ -1142,22 +1177,17 @@ describe('simultaneous stale-lock recovery still admits one holder', () => {
   // in-process "concurrent" caller serialises itself. Only real processes
   // interleave.
   //
-  // Driven through acquireLockFile rather than acquireRenewalLock so the
-  // staleness window is milliseconds. With the real one-minute window the race
-  // is a few microseconds wide and happens once per run, which a spawned
-  // process lands in only by luck -- the first draft of this test passed
-  // against the defect. Here every contender ABANDONS the lock periodically, so
-  // the pack goes through simultaneous stale recovery dozens of times per run.
-  const STALE_MS = 300
+  // staleMs is Infinity as for the file locks, so an exited holder is broken, a starved one never.
   const HOLD_MS = 10
-  const ROUNDS = 15
+  const ROUNDS = 5
+  const WAVES = 3
+  const SPIN_MS = 5_000
 
   const CHILD = `
-const [, , mod, startAt, id, lock, probe, staleMs, holdMs, rounds] = process.argv
+const [, , mod, startAt, id, lock, probe, holdMs, rounds, spinMs] = process.argv
 const { readFileSync, writeFileSync } = await import('node:fs')
 const { acquireLockFile } = await import(mod)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-const STALE = Number(staleMs), HOLD = Number(holdMs)
 let held = 0
 const overlaps = []
 // A common start, so the contenders are on the lock together rather than one
@@ -1169,27 +1199,21 @@ for (let i = 0; i < Number(rounds); i++) {
   // instead and they arrive one at a time, the first takes it cleanly and the
   // defect never gets its interleaving -- which is exactly how an earlier draft
   // of this test passed against the broken code.
-  let release = acquireLockFile(lock, Date.now(), STALE)
-  const until = Date.now() + STALE * 4
-  while (!release && Date.now() < until) release = acquireLockFile(lock, Date.now(), STALE)
-  if (!release) { await sleep(1); continue }
+  let release = acquireLockFile(lock, Date.now(), Infinity)
+  const until = Date.now() + Number(spinMs)
+  while (!release && Date.now() < until) release = acquireLockFile(lock, Date.now(), Infinity)
+  // Gave up, so a wedged lock costs one wait and the parent's positive control reports it.
+  if (!release) break
   // A mutual-exclusion probe rather than a count: stamp a shared file, hold,
   // and read it back. A second holder admitted at any point during the section
   // overwrites the stamp, and it does not matter which of the two notices.
-  // HOLD is far shorter than STALE, so a holder is never itself stale and a
-  // takeover during the section is always a defect rather than the contract.
   writeFileSync(probe, id)
-  await sleep(HOLD)
+  await sleep(Number(holdMs))
   const seen = readFileSync(probe, 'utf8')
   if (seen === id) held++
   else overlaps.push(id + ' saw ' + seen)
-  // Every fifth acquisition is ABANDONED rather than released: the process that
-  // died holding the lock. This is what puts every other contender into stale
-  // recovery on the same file at the same moment, which is the interleaving
-  // under test. Waited out, so this process is well clear of the section before
-  // anyone is entitled to break in.
-  if (i % 5 === 4) await sleep(STALE + 50)
-  else release()
+  // The last acquisition is ABANDONED: this process exits holding it, and every spinner breaks in.
+  if (i < Number(rounds) - 1) release()
 }
 process.stdout.write(JSON.stringify({ held, overlaps }))
 `
@@ -1218,21 +1242,23 @@ process.stdout.write(JSON.stringify({ held, overlaps }))
     const lock = join(home, '.insta', 'ssh', 'contended.lock')
     const probe = join(home, 'probe.txt')
     const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
-    const startAt = Date.now() + 1_000
-    const results = await Promise.all(ids.map((id) => run([
-      '--import', 'tsx', script, compute, String(startAt), id, lock, probe,
-      String(STALE_MS), String(HOLD_MS), String(ROUNDS),
-    ])))
-    for (const r of results) expect(r.code, `a contender failed: ${r.err}`).toBe(0)
+    const parsed: Array<{ held: number; overlaps: string[] }> = []
+    // In waves, as a process abandons once. Each wave also opens on the last wave's dead holder.
+    for (let wave = 0; wave < WAVES; wave++) {
+      const startAt = Date.now() + 1_000
+      const results = await Promise.all(ids.map((id) => run([
+        '--import', 'tsx', script, compute, String(startAt), `${id}${wave}`, lock, probe,
+        String(HOLD_MS), String(ROUNDS), String(SPIN_MS),
+      ])))
+      for (const r of results) expect(r.code, `a contender failed: ${r.err}`).toBe(0)
+      parsed.push(...results.map((r) => JSON.parse(r.out) as { held: number; overlaps: string[] }))
+    }
 
-    const parsed = results.map((r) => JSON.parse(r.out) as { held: number; overlaps: string[] })
     expect(parsed.flatMap((p) => p.overlaps),
       'two contenders were inside the lock at once').toEqual([])
-    // The positive control. A takeover that never happens satisfies the line
-    // above trivially, and would wedge the lock for good after one crash: every
-    // round following the first abandonment would just return undefined.
+    // The positive control. With no takeover, nothing gets in after wave one's first abandonment.
     expect(parsed.reduce((n, p) => n + p.held, 0),
-      'the abandoned lock was never broken at all').toBeGreaterThan(ids.length)
+      'the abandoned lock was never broken at all').toBeGreaterThan(ids.length * (ROUNDS - 1) + 1)
   }, 60_000)
 })
 

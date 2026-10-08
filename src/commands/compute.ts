@@ -1792,9 +1792,22 @@ export function acquireLockFile(path: string, now: number, staleMs: number): (()
   // ask whether the holder still exists.
   const token = `${process.pid}:${randomUUID()}`
   const release = () => {
+    // The claim a takeover of this token takes, so a release and a takeover never interleave.
+    const claim = takeoverClaim(path, token)
+    let claimed = false
+    try {
+      linkSync(path, claim)
+      claimed = true
+    } catch (e) {
+      // EEXIST is a takeover in progress, so the lock is no longer ours to remove.
+      if ((e as NodeJS.ErrnoException)?.code === 'EEXIST') return
+      // Any other error (gone, no hardlinks) fails every takeover too, so the check below is safe.
+    }
     try {
       if (readFileSync(path, 'utf8') === token) unlinkSync(path)
-    } catch { /* already gone, or taken over by someone else */ }
+    } catch { /* already gone, or taken over by someone else */ } finally {
+      if (claimed) try { unlinkSync(claim) } catch { /* the inode keeps its other name */ }
+    }
   }
   const take = (): (() => void) | undefined => {
     try {
@@ -1925,21 +1938,21 @@ function processAlive(pid: number): boolean {
  *  `path` keeps its inode throughout, so there is no moment at which the lock
  *  at `path` can have become somebody else's between the check and the act:
  *  the holder judged dead cannot release, every other breaker is behind the
- *  claim, and a release by anyone else checks for its own token first. Should
- *  the old holder's release ever run, it reads a foreign token and leaves the
- *  file alone.
+ *  claim, and a release by anyone else checks for its own token first.
+ *  The old holder's release takes this same claim, so it never lands inside a takeover.
  *
  *  Residual, and deliberately not "fixed": a breaker killed between the link
- *  and its write leaves the claim behind, and that one token can then no
- *  longer be broken (removing the claim by hand is the way out, and the busy
- *  message names the lock). Every scheme for reaping an abandoned claim needs
+ *  and its write, or a release killed before its unlink, leaves the claim
+ *  behind, and that one token can then no longer be broken or released
+ *  (removing the claim by hand is the way out, and the busy message names
+ *  the lock). Every scheme for reaping an abandoned claim needs
  *  to decide the claim is dead and then remove it -- the same check-then-act
  *  this function exists to eliminate, one level up. A claim left behind AFTER
  *  the write is inert: the lock now carries the breaker's token, and the next
  *  breaker keys its claim on that. A wedged lock is recoverable and says so;
  *  two writers in the same section silently lose the user's config. */
 function breakStaleLock(path: string, stale: string, mine: string): boolean {
-  const claim = `${path}.stale.${createHash('sha256').update(stale).digest('hex').slice(0, 32)}`
+  const claim = takeoverClaim(path, stale)
   try {
     linkSync(path, claim)
   } catch {
@@ -1964,6 +1977,11 @@ function breakStaleLock(path: string, stale: string, mine: string): boolean {
   } finally {
     try { unlinkSync(claim) } catch { /* the inode keeps its other name */ }
   }
+}
+
+/** The hardlink that arbitrates breaking or releasing the lock `token` names. */
+function takeoverClaim(path: string, token: string): string {
+  return `${path}.stale.${createHash('sha256').update(token).digest('hex').slice(0, 32)}`
 }
 
 /** Side-effect seams, following the `TrackDeps` convention used by telemetry.
