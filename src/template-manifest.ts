@@ -65,6 +65,8 @@ export type TemplateVar = {
 const CODE_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
 export const ENV_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/
 const GENERATOR_RE = /^secret:([1-9]\d{0,2})$/
+// The platform's HEALTHCHECK_RE (src/provisioning/templateManifest.ts), verbatim.
+const HEALTHCHECK_RE = /^\/(?!\/)[A-Za-z0-9\-._~!$&'()*+,;=:@%/?]*$/
 
 // The compute vocabulary every CLI has known. Any other type is the platform's to accept or refuse.
 const COMPUTE_TYPES = ['web', 'worker']
@@ -154,8 +156,13 @@ export function validateManifest(m: TemplateManifest): string[] {
       if (svc.healthcheck !== undefined) problems.push(`${where}.healthcheck: a worker has no HTTP endpoint to probe — its health is the machine's state; remove it (or declare type: web)`)
       if (svc.alwaysOn === false) problems.push(`${where}.alwaysOn: a worker cannot scale to zero — nothing is routed to it, so nothing would wake it; remove alwaysOn or set it true`)
     }
-    if (svc.type === 'web' && !svc.healthcheck) problems.push(`${where}: web services must declare a healthcheck path`)
-    if (svc.healthcheck && !String(svc.healthcheck).startsWith('/')) problems.push(`${where}: healthcheck must be an absolute path (start with /)`)
+    // Optional on a web service, and a given path must pass the platform's grammar.
+    if (svc.type !== 'worker' && svc.healthcheck !== undefined) {
+      const healthcheck = scalarString(svc.healthcheck)
+      if (healthcheck === null) problems.push(`${where}.healthcheck must be a string`)
+      else if (!healthcheck.startsWith('/')) problems.push(`${where}: healthcheck must be an absolute path (start with /)`)
+      else if (!HEALTHCHECK_RE.test(healthcheck)) problems.push(`${where}: healthcheck must be a single-slash absolute path on the service itself (no '//host', scheme, backslash or control characters), got: ${healthcheck}`)
+    }
     // Sizing is the platform's, capped for the org's plan. Same answers the
     // publish endpoint gives, said here so an author does not upload to find out. Read as unknown:
     // the type above admits only what is SUPPORTED, and the document is a cast over YAML.parse, so
