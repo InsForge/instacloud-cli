@@ -458,3 +458,123 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
   info('next: `insta postgres url` prints the postgres DSN; bind service credentials into compute with `insta secrets bind`; `insta secrets` refreshes user-defined secrets in .env')
   renderNextActions(dep.nextActions)
 }
+
+// ---- upgrade / rollback ----
+
+export type TemplateUpgradeOpts = { set?: string[]; branch?: string; yes?: boolean; json?: boolean }
+export type TemplateRollbackOpts = { branch?: string; yes?: boolean; json?: boolean }
+
+type PlanField = { field: string; label: string; deployed: string | null; live: string | null; next: string | null; drifted: boolean; verdict: string }
+type PlanService = { key: string; service_name: string | null; gone: boolean; added: boolean; fields: PlanField[]; missing_variables: string[] }
+type UpgradePlanBody = { from_version: string; to_version: string; to_digest: string; services: PlanService[]; removed: string[]; refusals: string[] }
+
+/** The review, as lines. Current is the LIVE value: what the upgrade will overwrite. */
+export function upgradePlanLines(plan: UpgradePlanBody): string[] {
+  if (plan.refusals.length) {
+    return ['This upgrade cannot run:', ...plan.refusals.map((r) => `  ${r}`)]
+  }
+  const lines = [`${plan.from_version} → ${plan.to_version}`]
+  for (const s of plan.services) {
+    const who = s.service_name ?? s.key
+    if (s.gone) { lines.push(`  ${who}  no longer exists, skipped`); continue }
+    if (s.added) { lines.push(`  ${who}  added by ${plan.to_version}`); continue }
+    for (const f of s.fields) {
+      const drift = f.drifted ? '  (you changed this, the upgrade will overwrite it)' : ''
+      lines.push(`  ${who}  ${f.label}  ${f.live ?? '(none)'} → ${f.next}${drift}`)
+    }
+    for (const name of s.missing_variables) {
+      lines.push(`  ${who}  ${name} is required by ${plan.to_version} and has no value, pass --set ${name}=...`)
+    }
+  }
+  for (const key of plan.removed) lines.push(`  ${key}  dropped by ${plan.to_version}, left running`)
+  return lines
+}
+
+/**
+ * A service name is what a person has; a deployment uuid is not. The services list already carries
+ * the attribution, so the lookup lives here rather than in the user's head.
+ */
+async function deploymentOfService(api: TemplateApi, projectId: string, branch: string, service: string) {
+  const body = await api.request('GET', `/projects/${projectId}/services?branch=${encodeURIComponent(branch)}`)
+  const row = (body.services ?? []).find((s: any) => s.name === service)
+  if (!row) throw new Error(`no service named ${service} on branch ${branch}`)
+  if (!row.template_deployment_id) throw new Error(`${service} was not deployed from a template, so there is nothing to upgrade`)
+  return { deploymentId: row.template_deployment_id as string }
+}
+
+export async function templateUpgrade(service: string, opts: TemplateUpgradeOpts = {}, deps: TemplateDeployDeps = {}): Promise<void> {
+  const given = parseSetFlags(opts.set ?? []) // a typo'd --set fails before any network access
+  const api = deps.api ?? (await ApiClient.load())
+  const p = deps.project ?? (await requireProject())
+  const branchName = opts.branch ?? p.branch
+  const ask = deps.ask ?? promptVariable
+
+  const target = await deploymentOfService(api, p.projectId, branchName, service)
+  // The poll and preview routes are keyed by deployment id, not project: name the project so agent
+  // mode signs with the project-bound session, exactly as templateDeploy does.
+  const { plan } = await api.request('GET', `/template-deployments/${target.deploymentId}/upgrade`, undefined, { projectId: p.projectId })
+  if (opts.json) {
+    printJson(plan)
+    if (plan.refusals.length) process.exitCode = 1
+    return
+  }
+
+  for (const line of upgradePlanLines(plan)) info(line)
+  // A refusal is not a prompt to confirm past: there is nothing to confirm.
+  if (plan.refusals.length) { process.exitCode = 1; return }
+
+  // Only what the new version ADDS is ever asked for: the platform recovers every value the
+  // instance already holds, so re-prompting would invite the user to overwrite a live credential.
+  const missing = plan.services.flatMap((s: PlanService) => s.missing_variables.map((name) => ({ name, required: true }) as TemplateVar))
+  const tty = !opts.yes && !!process.stdin.isTTY && !!process.stdout.isTTY
+  const variables = missing.length ? await resolveVariables(missing, given, { tty, ask }) : given
+
+  if (!opts.yes && tty) {
+    const go = await clack.confirm({ message: `Upgrade ${service} from ${plan.from_version} to ${plan.to_version}?` })
+    if (clack.isCancel(go)) throw new CliCancel()
+    if (!go) return
+  }
+
+  // The version and digest the user just read. A republish in between answers 409 rather than
+  // running something they never saw.
+  const res = await api.rawRequest('POST', `/projects/${p.projectId}/template-deployments/${target.deploymentId}/upgrade`, {
+    variables, expectedVersion: plan.to_version, expectedDigest: plan.to_digest,
+  })
+  if (handleApproval(res, opts.json)) return
+
+  const deploymentId = res.body.deploymentId ?? (res.body.deployment ?? res.body).id
+  info(`upgrading ${service} to ${plan.to_version} (${deploymentId})`)
+  const dep = await watchDeployment((id) => api.request('GET', `/template-deployments/${id}`, undefined, { projectId: p.projectId }), deploymentId, info, deps.wait)
+  info(`${service} is on ${plan.to_version}`)
+  info(`next: \`insta template rollback ${service}\` returns it to ${plan.from_version}`)
+  renderNextActions(dep.nextActions)
+}
+
+export async function templateRollback(service: string, opts: TemplateRollbackOpts = {}, deps: TemplateDeployDeps = {}): Promise<void> {
+  const quiet = !!opts.json
+  const out = quiet ? () => {} : info
+  const api = deps.api ?? (await ApiClient.load())
+  const p = deps.project ?? (await requireProject())
+  const branchName = opts.branch ?? p.branch
+  const target = await deploymentOfService(api, p.projectId, branchName, service)
+
+  // Said BEFORE the confirmation, not after the fact: these two are the whole reason someone
+  // regrets a rollback, and they are not recoverable by running it again.
+  out('Going back restores the image, the start command, the port and the recorded variables.')
+  out('It does not restore data the app migrated under the newer version, and a volume only grows.')
+  const tty = !opts.yes && !!process.stdin.isTTY && !!process.stdout.isTTY
+  if (!opts.yes && tty) {
+    const go = await clack.confirm({ message: `Return ${service} to the version it was upgraded from?` })
+    if (clack.isCancel(go)) throw new CliCancel()
+    if (!go) return
+  }
+
+  const res = await api.rawRequest('POST', `/projects/${p.projectId}/template-deployments/${target.deploymentId}/rollback`, {})
+  if (handleApproval(res, opts.json)) return
+  const deploymentId = res.body.deploymentId ?? (res.body.deployment ?? res.body).id
+  out(`rolling ${service} back (${deploymentId})`)
+  const dep = await watchDeployment((id) => api.request('GET', `/template-deployments/${id}`, undefined, { projectId: p.projectId }), deploymentId, out, deps.wait)
+  if (quiet) return printJson(dep)
+  info(`${service} is back on ${(dep.deployment ?? dep).template_version ?? 'its previous version'}`)
+  renderNextActions(dep.nextActions)
+}
