@@ -577,7 +577,7 @@ tpl.command('upgrade <service>').description('Move a service deployed from a tem
   .option('--branch <b>', 'branch the service is on (default: current)')
   .option('--set <NAME=value>', 'set a template variable the new version requires (repeatable)', (v: string, prev: string[]) => [...prev, v], [] as string[])
   .option('-y, --yes', 'do not ask for confirmation')
-  .option('--json', 'print the plan and exit without upgrading')
+  .option('--json', 'machine-readable output: alone it prints the plan and does not upgrade; with --yes it upgrades and prints the finished deployment')
   .action(guard((service, o) => template.templateUpgrade(service, o)))
 tpl.command('rollback <service>').description('Return a service to the template version it was upgraded from, one step. Restores the image, start command, port and recorded variables; does not restore data the app migrated, and a volume only grows')
   .option('--branch <b>', 'branch the service is on (default: current)')

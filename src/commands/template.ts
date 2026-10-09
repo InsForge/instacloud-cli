@@ -513,13 +513,15 @@ export async function templateUpgrade(service: string, opts: TemplateUpgradeOpts
   // The poll and preview routes are keyed by deployment id, not project: name the project so agent
   // mode signs with the project-bound session, exactly as templateDeploy does.
   const { plan } = await api.request('GET', `/template-deployments/${target.deploymentId}/upgrade`, undefined, { projectId: p.projectId })
-  if (opts.json) {
+  // --json alone is "tell me" (the plan, no upgrade); --json --yes is "do it and tell me".
+  const quiet = !!opts.json
+  if (opts.json && (!opts.yes || plan.refusals.length)) {
     printJson(plan)
     if (plan.refusals.length) process.exitCode = 1
     return
   }
 
-  for (const line of upgradePlanLines(plan)) info(line)
+  if (!quiet) for (const line of upgradePlanLines(plan)) info(line)
   // A refusal is not a prompt to confirm past: there is nothing to confirm.
   if (plan.refusals.length) { process.exitCode = 1; return }
 
@@ -543,8 +545,9 @@ export async function templateUpgrade(service: string, opts: TemplateUpgradeOpts
   if (handleApproval(res, opts.json)) return
 
   const deploymentId = res.body.deploymentId ?? (res.body.deployment ?? res.body).id
-  info(`upgrading ${service} to ${plan.to_version} (${deploymentId})`)
-  const dep = await watchDeployment((id) => api.request('GET', `/template-deployments/${id}`, undefined, { projectId: p.projectId }), deploymentId, info, deps.wait)
+  if (!quiet) info(`upgrading ${service} to ${plan.to_version} (${deploymentId})`)
+  const dep = await watchDeployment((id) => api.request('GET', `/template-deployments/${id}`, undefined, { projectId: p.projectId }), deploymentId, quiet ? () => {} : info, deps.wait)
+  if (quiet) return printJson(dep)
   info(`${service} is on ${plan.to_version}`)
   info(`next: \`insta template rollback ${service}\` returns it to ${plan.from_version}`)
   renderNextActions(dep.nextActions)
