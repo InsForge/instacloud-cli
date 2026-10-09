@@ -130,19 +130,27 @@ describe('deploy() validates --endpoint at command entry, for the directory (arc
   }
 
   function mockPlatform(rawRequest: ReturnType<typeof vi.fn>) {
-    vi.spyOn(ApiClient, 'load').mockResolvedValue({ rawRequest } as unknown as ApiClient)
-    vi.spyOn(apiModule, 'requireProject').mockResolvedValue({ projectId: 'p1', branch: 'main' } as Awaited<ReturnType<typeof apiModule.requireProject>>)
+    const load = vi.spyOn(ApiClient, 'load').mockResolvedValue({ rawRequest } as unknown as ApiClient)
+    const requireProject = vi.spyOn(apiModule, 'requireProject').mockResolvedValue({ projectId: 'p1', branch: 'main' } as Awaited<ReturnType<typeof apiModule.requireProject>>)
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    return { load, requireProject }
   }
 
-  it('an invalid --endpoint dies before any network call — no discovery, no pack, no upload', async () => {
+  // requireProject() resolves a project for an unlinked directory and can persist an automatic
+  // link as a side effect — so an invalid --endpoint must die before it (and ApiClient.load) ever
+  // run, not merely before prepareSource's own network calls. A mock that always resolves hides a
+  // regression here (it never touches the network either way), so the mocks themselves are
+  // asserted un-called, not just their downstream calls.
+  it('an invalid --endpoint dies before any network call, before ApiClient.load, and before requireProject can resolve/link a project', async () => {
     const { calls, rawRequest } = fakeApi()
-    mockPlatform(rawRequest)
+    const { load, requireProject } = mockPlatform(rawRequest)
 
     await expect(deploy(srcDir(), { port: '7000', endpoint: 'tpc' })).rejects.toThrow()
 
     expect(calls).toEqual([])
+    expect(load).not.toHaveBeenCalled()
+    expect(requireProject).not.toHaveBeenCalled()
   })
 
   it("a normalized endpoint (' TCP ', as parseEndpoint's own tests accept) reaches the archive body as 'tcp'", async () => {

@@ -170,6 +170,19 @@ export async function deploy(dir: string | undefined, opts: DeployOpts): Promise
   if (dir && opts.image) die('pick one: a source <dir> OR --image <url>, not both')
   if (!dir && !opts.image) die('usage: insta deploy <dir> | --image <url>  [--branch <b>] [--group <g>] [--port <n>]')
 
+  // Normalized here, once, so both lanes get the same validated value: the archive lane's body
+  // (deployArchive) otherwise silently drops anything that isn't exactly 'http'/'tcp' to
+  // undefined, which let a typo like --endpoint tpc build and deploy using the service's existing
+  // endpoint instead of failing locally. Checked before ApiClient.load()/requireProject(): those
+  // can resolve a project and persist an automatic link for an unlinked directory, so a typo must
+  // die before either runs, not after.
+  let endpoint: 'http' | 'tcp' | undefined
+  try {
+    endpoint = opts.endpoint === undefined ? undefined : parseEndpoint(opts.endpoint)
+  } catch (e) {
+    die((e as Error).message)
+  }
+
   const api = await ApiClient.load()
   const p = await requireProject()
   const branch = opts.branch ?? p.branch
@@ -180,16 +193,6 @@ export async function deploy(dir: string | undefined, opts: DeployOpts): Promise
     port = opts.port === undefined ? undefined : parsePort(opts.port, { allowZero: true })
   } catch (e) {
     die(`--${(e as Error).message}`)
-  }
-  // Normalized here, once, so both lanes get the same validated value: the archive lane's body
-  // (deployArchive) otherwise silently drops anything that isn't exactly 'http'/'tcp' to
-  // undefined, which let a typo like --endpoint tpc build and deploy using the service's existing
-  // endpoint instead of failing locally.
-  let endpoint: 'http' | 'tcp' | undefined
-  try {
-    endpoint = opts.endpoint === undefined ? undefined : parseEndpoint(opts.endpoint)
-  } catch (e) {
-    die((e as Error).message)
   }
   if (dir && port === undefined) {
     const dockerfile = join(resolve(process.cwd(), dir), 'Dockerfile')
