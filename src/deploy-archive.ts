@@ -17,7 +17,7 @@ export function archiveBuildSpec(hasDockerfile: boolean): ArchiveBuildSpec {
 export type ArchiveRef = { archiveSha256: string; build: ArchiveBuildSpec }
 
 type Api = Pick<ApiClient, 'rawRequest'>
-type Opts = { branch?: string; group?: string; json?: boolean; port?: string; websocket?: boolean; replaceSource?: boolean }
+type Opts = { branch?: string; group?: string; json?: boolean; port?: string; websocket?: boolean; endpoint?: string; replaceSource?: boolean }
 
 // Plain fetch, never the api client: the presigned URL carries its own signature and the platform
 // bearer must not be sent to a bucket.
@@ -89,7 +89,7 @@ const isAbort = (e: unknown): boolean => e instanceof Error && (e.name === 'Time
 
 // What the archive lane hands back: the deploy already happened. Same fields `/deploy` answers
 // with for an image body, so the command prints one shape whichever lane ran.
-export type DeployOutcome = { image: string; url: string; branch: string; group: string; machineId?: string }
+export type DeployOutcome = { image: string; url: string; endpointHost?: string; branch: string; group: string; machineId?: string }
 export type ArchiveDeployResult = DeployOutcome | { failed: string }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -119,6 +119,7 @@ export async function deployArchive(
     archive: ref,
     port: opts.port ? Number(opts.port) : undefined,
     websocket: typeof opts.websocket === 'boolean' ? opts.websocket : undefined,
+    endpoint: opts.endpoint === 'http' || opts.endpoint === 'tcp' ? opts.endpoint : undefined,
     replaceSource: opts.replaceSource === true ? true : undefined,
   })
   // An approval is a 202 too, told apart by its status word; anything else here is our operation.
@@ -163,7 +164,9 @@ export async function deployArchive(
       if (state === 'live') {
         const image = res.body?.imageRef
         const url = res.body?.url
-        if (typeof image !== 'string' || !image || typeof url !== 'string' || (!url && opts.port !== '0')) {
+        // An endpoint tcp service has no URL: its answer is the tcp host instead. A worker has neither.
+        const endpointHost = typeof res.body?.endpointHost === 'string' && res.body.endpointHost ? res.body.endpointHost as string : undefined
+        if (typeof image !== 'string' || !image || typeof url !== 'string' || (!url && opts.port !== '0' && !endpointHost)) {
           throw new Error('the deploy finished but the platform returned no image or URL for it — check `insta status`')
         }
         const optionalString = (field: string, v: unknown): string | undefined => {
@@ -172,7 +175,7 @@ export async function deployArchive(
           return v
         }
         return {
-          image, url,
+          image, url, ...(endpointHost ? { endpointHost } : {}),
           branch: optionalString('branch', res.body.branch) ?? branch,
           group: optionalString('group', res.body.group) ?? opts.group ?? '',
           machineId: optionalString('machineId', res.body.machineId),

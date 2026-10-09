@@ -6,9 +6,9 @@ import { info, die, printJson, handleApproval, renderNextActions, CliExit } from
 import { flyctlBuildAndPush, ensureFlyctl, defaultBuildRunner, stderrBuildRunner, type BuildRunner } from '../flyctl-build.js'
 import { packDirectory, windowsModeCaveat, type ArchiveLimits } from '../pack.js'
 import { deployArchive, uploadArchive, type DeployOutcome, type Uploader } from '../deploy-archive.js'
-import { parsePort } from './services.js'
+import { parseEndpoint, parsePort } from './services.js'
 
-type DeployOpts = { image?: string; branch?: string; group?: string; port?: string; websocket?: boolean; replaceSource?: boolean; json?: boolean }
+type DeployOpts = { image?: string; branch?: string; group?: string; port?: string; websocket?: boolean; endpoint?: string; replaceSource?: boolean; json?: boolean }
 
 // With --json, stdout must carry exactly one JSON document (the deploy result), so every progress
 // line moves to stderr.
@@ -23,8 +23,16 @@ export function deployRequestBody(source: { image: string }, branch: string, opt
     group: opts.group,
     port: opts.port ? Number(opts.port) : undefined,
     websocket: opts.websocket ? true : undefined,
+    endpoint: opts.endpoint !== undefined ? parseEndpoint(opts.endpoint) : undefined,
     replaceSource: opts.replaceSource ? true : undefined,
   }
+}
+
+// Where the deploy answers: the HTTPS URL, or for an endpoint tcp service its tcp address (the
+// platform reports no URL for one). Pure, so it's unit-tested.
+export function deployedTarget(r: { url?: string; endpointHost?: string | null }, port: string | undefined): string {
+  if (r.endpointHost) return `tcp://${r.endpointHost}:${port ?? '?'}`
+  return r.url || '(no URL: a worker)'
 }
 
 // What a source directory resolved to. flyctl and local-docker build an image locally and hand it
@@ -189,8 +197,8 @@ export async function deploy(dir: string | undefined, opts: DeployOpts): Promise
     // The archive lane's operation already deployed. One output shape whichever lane ran, minus
     // nextActions, which the operation read does not carry.
     const d = source.deployed
-    if (opts.json) return printJson({ image: d.image, url: d.url, branch: d.branch, group: d.group, machineId: d.machineId })
-    info(`deployed ${d.image} -> ${d.url} (branch ${d.branch}, group ${d.group})`)
+    if (opts.json) return printJson({ image: d.image, url: d.url, ...(d.endpointHost ? { endpointHost: d.endpointHost } : {}), branch: d.branch, group: d.group, machineId: d.machineId })
+    info(`deployed ${d.image} -> ${deployedTarget(d, effOpts.port)} (branch ${d.branch}, group ${d.group})`)
     return
   }
   const res = await api.rawRequest('POST', `/projects/${p.projectId}/deploy`, deployRequestBody(source, branch, effOpts))
@@ -198,7 +206,7 @@ export async function deploy(dir: string | undefined, opts: DeployOpts): Promise
   if (handleApproval(res, opts.json)) return
   const what = source.image
   if (opts.json) return printJson({ image: source.image, ...res.body })
-  info(`deployed ${what} -> ${res.body.url} (branch ${res.body.branch}, group ${res.body.group})`)
+  info(`deployed ${what} -> ${deployedTarget(res.body, effOpts.port)} (branch ${res.body.branch}, group ${res.body.group})`)
   renderNextActions(res.body.nextActions)
 }
 
