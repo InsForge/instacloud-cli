@@ -24,6 +24,8 @@ export type TemplateDraft = {
   readme: string | null; logoUrl: string | null; services: TemplateDraftService[]
   publishRequirements: TemplateRequirement[]; updatedAt: string
 }
+/** A row of the org's list (the platform's CommunityTemplateSummary), as the table reads it. */
+export type TemplateDraftSummary = Pick<TemplateDraft, 'code' | 'name' | 'status' | 'publishedVersion' | 'hasUnpublishedChanges' | 'takenDown'>
 type DraftAnswer = { template: TemplateDraft }
 /** What regenerate found added or removed in the project since the last build. */
 export type TemplateChanges = { addedServices: string[]; removedServices: string[]; addedVariables: string[]; removedVariables: string[] }
@@ -64,7 +66,7 @@ export function templateStatusWord(t: Pick<TemplateDraft, 'status' | 'hasUnpubli
 const headLine = (t: TemplateDraft): string => `${t.code}: ${t.name} (${templateStatusWord(t)})`
 
 /** One aligned row per template of the org, as `template list` prints the gallery. */
-export function draftListLines(templates: TemplateDraft[]): string[] {
+export function draftListLines(templates: TemplateDraftSummary[]): string[] {
   if (!templates.length) return ['no templates in this org yet, create one with: insta template create']
   const head = ['CODE', 'STATUS', 'VERSION', 'NAME']
   const rows = templates.map((t) => [t.code, templateStatusWord(t), t.publishedVersion ?? '-', t.name])
@@ -201,7 +203,7 @@ const orgFlag = (opts: { org?: string }): string => (opts.org ? ` --org ${opts.o
 export async function templateDrafts(opts: OrgOpts = {}, deps: TemplateAuthorDeps = {}): Promise<void> {
   const api = deps.api ?? (await ApiClient.load())
   const orgId = await resolveOrgId(opts, deps.project)
-  const { templates } = await api.request<{ templates: TemplateDraft[] }>('GET', `/orgs/${orgId}/templates`)
+  const { templates } = await api.request<{ templates: TemplateDraftSummary[] }>('GET', `/orgs/${orgId}/templates`)
   if (opts.json) return printJson(templates)
   for (const line of draftListLines(templates)) info(line)
 }

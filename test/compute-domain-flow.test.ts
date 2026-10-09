@@ -1,6 +1,6 @@
-// The COMMAND-level flow of the three domain verbs, through the injected API seam (r2d2 round 1
-// Suggestion — the pure renderers are covered in compute-domain-region.test.ts, this covers what
-// the commands actually send and print): the preflight service lookup, the explicit `group` on
+// The COMMAND-level flow of the three domain verbs, through the injected API seam (the pure
+// renderers are covered in compute-domain-region.test.ts; this covers what the commands actually
+// send and print): the preflight service lookup, the explicit `group` on
 // every call so the platform's `default` fallback is never relied on, --json passing the platform
 // body through untouched, and 409 → the release-then-rebind message.
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest'

@@ -1,6 +1,8 @@
 // Template authoring (spec 2026-10-06 §3): a real ApiClient over a fake fetch.
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Readable } from 'node:stream'
@@ -10,7 +12,7 @@ import type { ProjectConfig } from '../src/config.js'
 import {
   templateEditorUrl, templateStatusWord, draftListLines, requirementLines, readinessLines, regenerateChangeLines, draftLines,
   parsePatch, readAllStdin, templateDrafts, templateDraft, templateCreate, templateEdit, templateRegenerate, templatePublish, templateUnpublish,
-  templateDelete, BLANK_NOT_YET, type TemplateDraft,
+  templateDelete, BLANK_NOT_YET, type TemplateDraft, type TemplateDraftSummary,
 } from '../src/commands/template-author.js'
 
 const API = 'https://api.instacloud.com'
@@ -49,6 +51,14 @@ const view = (over: Partial<TemplateDraft> & Record<string, unknown> = {}): Temp
   report: { skipped: [], blocked: [], notices: [] }, updatedAt: UPDATED, takenDown: false, deployCount: 0, totalProjects: 0,
   ...over,
 } as TemplateDraft)
+
+// The platform's CommunityTemplateSummary, one row of the org list, every key present.
+const summary = (over: Partial<TemplateDraftSummary> & Record<string, unknown> = {}): TemplateDraftSummary => ({
+  id: '11111111-0000-4000-8000-000000000001', code: 'my-app', orgId: ORG, sourceProjectId: PROJECT, blank: false,
+  status: 'draft', publishedVersion: null, hasUnpublishedChanges: true, takenDown: false,
+  name: 'My App', tagline: null, category: null, logoUrl: null, updatedAt: UPDATED, deployCount: 0, totalProjects: 0,
+  ...over,
+} as TemplateDraftSummary)
 
 type Call = { method: string; path: string; body: unknown }
 type Answer = { status?: number; body: unknown }
@@ -102,8 +112,15 @@ describe('draft rendering', () => {
     expect(templateStatusWord(view({ status: 'published', hasUnpublishedChanges: true }))).toBe('published, with unpublished edits')
     expect(templateStatusWord(view({ status: 'published', takenDown: true }))).toBe('taken down')
   })
-  it('lists the org in aligned columns, and says so when there is nothing', () => {
-    expect(draftListLines([view(), view({ code: 'n8n-fork', name: 'n8n fork', status: 'published', publishedVersion: '1.0.2' })])).toEqual([
+  it("has the platform's 16 summary keys in the summary fixture, no more and no fewer", () => {
+    const KEYS = [
+      'id', 'code', 'orgId', 'sourceProjectId', 'blank', 'status', 'publishedVersion', 'hasUnpublishedChanges', 'takenDown',
+      'name', 'tagline', 'category', 'logoUrl', 'updatedAt', 'deployCount', 'totalProjects',
+    ]
+    expect(Object.keys(summary()).sort()).toEqual([...KEYS].sort())
+  })
+  it('lists the org in aligned columns from summary rows, and says so when there is nothing', () => {
+    expect(draftListLines([summary(), summary({ code: 'n8n-fork', name: 'n8n fork', status: 'published', publishedVersion: '1.0.2', hasUnpublishedChanges: false })])).toEqual([
       'CODE      STATUS     VERSION  NAME',
       'my-app    draft      -        My App',
       'n8n-fork  published  1.0.2    n8n fork',
@@ -157,7 +174,7 @@ describe('draft rendering', () => {
 describe('template drafts', () => {
   it("lists the linked project's org", async () => {
     const project = linked()
-    const { api, calls } = platform({ [`GET /orgs/${ORG}/templates`]: () => ({ body: { templates: [view()] } }) })
+    const { api, calls } = platform({ [`GET /orgs/${ORG}/templates`]: () => ({ body: { templates: [summary()] } }) })
     await templateDrafts({}, { api, project })
     expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([`GET /orgs/${ORG}/templates`])
     expect(printed()).toBe('CODE    STATUS  VERSION  NAME\nmy-app  draft   -        My App\n')
@@ -169,8 +186,8 @@ describe('template drafts', () => {
     expect(project).not.toHaveBeenCalled()
     expect(calls[0]!.path).toBe(`/orgs/${OTHER_ORG}/templates`)
   })
-  it('prints the platform list as served under --json', async () => {
-    const templates = [view()]
+  it('prints the platform list as served under --json, one summary per template', async () => {
+    const templates = [summary()]
     const { api } = platform({ [`GET /orgs/${ORG}/templates`]: () => ({ body: { templates } }) })
     await templateDrafts({ json: true }, { api, project: linked() })
     expect(JSON.parse(printed())).toEqual(templates)
@@ -600,4 +617,16 @@ describe('template delete', () => {
     expect(e).toBeInstanceOf(ApiError)
     expect(e.message).toBe('a published template cannot be deleted, unpublish it instead')
   })
+})
+
+describe('template drafts --help', () => {
+  const entry = fileURLToPath(new URL('../src/index.ts', import.meta.url))
+  it('says --json prints one summary per template and names the command that prints a draft in full', () => {
+    const r = spawnSync(process.execPath, ['--import', 'tsx', entry, 'template', 'drafts', '--help'], { encoding: 'utf8', timeout: 30_000 })
+    expect(r.status, r.stderr).toBe(0)
+    // Commander wraps help at 80 columns, so words are matched across line breaks.
+    const help = r.stdout.replace(/\s+/g, ' ')
+    expect(help).toContain('one summary per template')
+    expect(help).toContain('insta template draft <code> --json prints one draft in full')
+  }, 30_000)
 })

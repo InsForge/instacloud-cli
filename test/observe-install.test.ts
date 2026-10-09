@@ -1,7 +1,7 @@
 // The Claude Code hooks schema executes `command` as ONE shell string ($CLAUDE_PROJECT_DIR is an
-// env var the shell expands). The installer used to emit command:'node' + an args array with a
-// ${CLAUDE_PROJECT_DIR} template — nothing expands it, so node threw MODULE_NOT_FOUND after EVERY
-// tool call in every linked project. Found live (user report, 2026-07-12).
+// env var the shell expands). A command:'node' + args array carrying a ${CLAUDE_PROJECT_DIR}
+// template is expanded by nothing, so node would throw MODULE_NOT_FOUND after EVERY tool call in
+// every linked project.
 import { test, expect } from 'vitest'
 import { existsSync, mkdtempSync, readFileSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -19,9 +19,8 @@ const posixTest = process.platform === 'win32' ? test.skip : test
 
 // The install materializes ./.insta/observe (this CLI version's hook, regenerated on every link)
 // and the hook appends ./.insta/audit.jsonl (this machine's findings: partial fingerprints +
-// redacted context). Neither is project source; both used to be left for the user to discover in
-// `git status` (user report, 2026-09-04). ./.insta/project.json is the team binding and must NOT
-// be caught by these entries.
+// redacted context). Neither is project source, so both are gitignored. ./.insta/project.json is
+// the team binding and must NOT be caught by these entries.
 test('install gitignores the machine-local .insta state but not project.json, idempotently', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'obs-proj-'))
   writeFileSync(join(cwd, '.gitignore'), 'node_modules\n')
@@ -35,15 +34,14 @@ test('install gitignores the machine-local .insta state but not project.json, id
   expect(installObserve({ cwd, assetDir: fakeAssets() }).ignored).toEqual([]) // re-link adds nothing
 })
 
-// Codex has no $CLAUDE_PROJECT_DIR, so the installer used to bake the absolute project path into
-// .codex/hooks.json — a file teams commit — which shipped /Users/<author>/… to every clone and
-// failed there after every tool call. The replacement must ALSO survive two things a first cut
-// got wrong (review of #178): a monorepo where the insta project root is below the git root
-// (`git rev-parse --show-toplevel` finds the wrong dir → hook silently dead), and Windows, where
-// Codex hands `command` verbatim to cmd.exe unless a `commandWindows` override exists (POSIX
-// `[ ! -f … ]` → parse error after every tool call). So: one shell-neutral `node -e` that climbs
-// from the session cwd. These tests run the command through the platform shell (`shell: true` →
-// sh on POSIX, cmd.exe on Windows), so the Windows CI job exercises the real thing.
+// Codex has no $CLAUDE_PROJECT_DIR, and .codex/hooks.json is a file teams commit, so the command
+// must not bake in an absolute project path. It must also survive a monorepo where the insta
+// project root is below the git root (`git rev-parse --show-toplevel` finds the wrong dir → hook
+// silently dead), and Windows, where Codex hands `command` verbatim to cmd.exe unless a
+// `commandWindows` override exists (POSIX `[ ! -f … ]` → parse error after every tool call). So:
+// one shell-neutral `node -e` that climbs from the session cwd. These tests run the command
+// through the platform shell (`shell: true` → sh on POSIX, cmd.exe on Windows), so the Windows CI
+// job exercises the real thing.
 const codexCommand = (cwd: string): string =>
   JSON.parse(readFileSync(join(cwd, '.codex', 'hooks.json'), 'utf8')).hooks.PostToolUse.at(-1).hooks[0].command
 const runHook = (cmd: string, cwd: string, input = '{}') => spawnSync(cmd, { cwd, shell: true, input })
@@ -83,10 +81,10 @@ test('codex hook climbs to the insta root from a nested monorepo project and pas
 })
 
 // Finding the right hook.js is only half of it: the hook must also WRITE to that project root.
-// It used to record into `CLAUDE_PROJECT_DIR || event.cwd`, and Codex's event.cwd is the session
-// cwd — so a session started in apps/api/src/routes ran apps/api/.insta/observe/hook.js but left
-// an unignored apps/api/src/routes/.insta/audit.jsonl behind (review of #178, round 2). Now the
-// hook derives the root from its own entry path (<root>/.insta/observe/hook.js).
+// Codex's event.cwd is the session cwd, so a root taken from it for a session started in
+// apps/api/src/routes would leave an unignored apps/api/src/routes/.insta/audit.jsonl behind. The
+// hook derives the root from its own entry path (<root>/.insta/observe/hook.js); the env and the
+// event cwd are only fallbacks.
 test('projectRootFor: the materialized entry path wins; env / event cwd are only fallbacks', () => {
   const root = join(tmpdir(), 'proj')
   expect(projectRootFor(join(root, '.insta', 'observe', 'hook.js'), { CLAUDE_PROJECT_DIR: '/elsewhere' }, '/session'))
@@ -126,7 +124,7 @@ test('codex command from a nested session cwd records findings at the linked pro
 // hook writes to, from any subdirectory. The hook writes at the NEAREST materialized hook above
 // the session cwd, so that is the anchor; the link file is only where the next install will
 // land (fallback), then cwd. The fourth case — link file and hook at different depths — is the
-// one where precedence is observable and was wrong (post-merge review of #178).
+// one where precedence is observable.
 test('auditRoot: nearest materialized hook, else link file, else cwd — resolved from a subdirectory', async () => {
   const linked = realpathSync(mkdtempSync(join(tmpdir(), 'obs-linked-')))
   mkdirSync(join(linked, '.insta'), { recursive: true })
@@ -154,7 +152,7 @@ test('auditRoot: nearest materialized hook, else link file, else cwd — resolve
   expect(await auditRoot(mono)).toBe(mono) // above the hook, the link file still anchors
 })
 
-// And the installers no longer create that split in the first place: inside a linked project,
+// The installers do not create that split in the first place: inside a linked project,
 // install anchors at the link root (like writeProject), so a re-link or `observe install` from a
 // subdirectory refreshes the project's hook instead of minting a second one.
 test('installRoot: the linked project root from a subdirectory, else cwd', async () => {
