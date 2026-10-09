@@ -1114,4 +1114,19 @@ describe('deployment progress', () => {
     expect(serviceStateLines({ services: [{ name: 'app', state: 'created' }] })).toEqual(['  • app [created]'])
     expect(partialMessage({ services: [] })).toMatch(/0\/0 services healthy/)
   })
+
+  it('a skipped service says it was stepped over, not that it is still pending', () => {
+    // The platform leaves `state: pending` on a service the user deleted and marks it `skipped`.
+    // Under the plain marks that reads as "not reached yet" — a run still working on it.
+    const line = serviceStateLines({ services: [{ name: 'side', state: 'pending', skipped: true }] })
+    expect(line).toEqual(['  - side [skipped: it no longer exists, so the run stepped over it]'])
+    expect(line[0]).not.toContain('•')
+  })
+
+  it('does not count a skipped service against the healthy total', () => {
+    // Everything the run could reach came up: 1/1, not 1/2 — a deleted service is not a shortfall.
+    const dep = { services: [{ name: 'app', state: 'healthy' }, { name: 'side', state: 'pending', skipped: true }] }
+    expect(partialMessage(dep)).toMatch(/1\/1 services healthy/)
+    expect(partialMessage(dep)).toContain('side [skipped')
+  })
 })

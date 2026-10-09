@@ -176,6 +176,85 @@ describe('upgrade and rollback flows', () => {
     }
   })
 
+  it('a superseded deployment keeps the platform sentence naming the one to act on', async () => {
+    // The platform's message is the only place the successor is named, so it is printed as given
+    // rather than replaced by wording of ours; a bare `conflict (HTTP 409)` would strand the user.
+    const said = 'this deployment was already replaced by n8n@1.5.0 — act on that deployment instead'
+    const { api, posts } = fakeApi()
+    api.rawRequest = async () => { throw new ApiError(409, said, { error: said, code: 'template_superseded' }) }
+    await expect(templateUpgrade('n8n', { yes: true }, deps(api))).rejects.toThrow(/already replaced by n8n@1\.5\.0/)
+    await expect(templateUpgrade('n8n', { yes: true }, deps(api))).rejects.toThrow(/Nothing was changed/)
+    expect(posts).toEqual([])
+  })
+
+  it('the PREVIEW reads a superseded 409 too — it is a GET on another code path', async () => {
+    const said = 'this deployment was already replaced by n8n@1.5.0 — act on that deployment instead'
+    const { api, posts } = fakeApi()
+    const plainGet = api.request
+    api.request = async (m: string, path: string) => {
+      if (path.endsWith('/upgrade')) throw new ApiError(409, said, { error: said, code: 'template_superseded' })
+      return plainGet(m, path)
+    }
+    await expect(templateUpgrade('n8n', { yes: true }, deps(api))).rejects.toThrow(/already replaced by n8n@1\.5\.0 — act on that deployment instead\. Nothing was changed/)
+    expect(posts).toEqual([])
+  })
+
+  it('a republished older version refuses the rollback in the platform\'s own words', async () => {
+    const said = 'n8n@1.3.2 was republished with different content after this instance ran it, so the recorded manifest is not what it was running — deploy the version you want as a new copy instead'
+    const { api } = fakeApi()
+    api.rawRequest = async () => { throw new ApiError(409, said, { error: said, code: 'template_version_content_changed' }) }
+    await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(/republished with different content/)
+    await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(/Nothing was changed/)
+  })
+
+  it('rollback sends --set values and prompts from the platform\'s missing list on a terminal', async () => {
+    // A version that DROPPED a required variable deleted its value, and the older manifest still
+    // requires it: the 400 is the only place those names exist, since rollback prints no plan.
+    const { api, posts } = fakeApi()
+    let first = true
+    api.rawRequest = async (_m: string, path: string, body?: unknown) => {
+      // Snapshot: the command fills the same `variables` object on the retry, so holding the
+      // reference would make both entries read as the second one.
+      posts.push({ path, body: structuredClone(body) })
+      if (first) {
+        first = false
+        throw new ApiError(400, 'missing_variables', { error: 'missing_variables', missing: [{ name: 'ADMIN_TOKEN', key: 'ADMIN_TOKEN', description: 'admin API token' }] })
+      }
+      return { status: 202, body: { deploymentId: 'dep_9' } }
+    }
+    const inTty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY')
+    const outTty = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true })
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true })
+    try {
+      await templateRollback('n8n', { set: ['SMTP_HOST=mail.example.com'] }, { ...deps(api), ask: async () => 'tok' })
+    } finally {
+      for (const [s, d] of [[process.stdin, inTty], [process.stdout, outTty]] as const) {
+        if (d) Object.defineProperty(s, 'isTTY', d); else delete (s as any).isTTY
+      }
+    }
+    expect(posts).toHaveLength(2)
+    expect(posts[0].body).toEqual({ variables: { SMTP_HOST: 'mail.example.com' } })
+    expect(posts[1].body).toEqual({ variables: { SMTP_HOST: 'mail.example.com', ADMIN_TOKEN: 'tok' } })
+  })
+
+  it('rollback with no terminal prints the --set list instead of rolling back blind', async () => {
+    const { api, posts } = fakeApi()
+    api.rawRequest = async (_m: string, path: string, body?: unknown) => {
+      posts.push({ path, body })
+      throw new ApiError(400, 'missing_variables', { error: 'missing_variables', missing: [{ name: 'ADMIN_TOKEN', key: 'ADMIN_TOKEN', description: 'admin API token' }] })
+    }
+    await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(/--set NAME=value/)
+    await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(/ADMIN_TOKEN/)
+  })
+
+  it('a typo\'d --set on rollback fails before any network access', async () => {
+    const { api, posts, gets } = fakeApi()
+    await expect(templateRollback('n8n', { yes: true, set: ['lowercase=1'] }, deps(api))).rejects.toThrow(/--set expects NAME=value/)
+    expect(posts).toEqual([])
+    expect(gets).toEqual([])
+  })
+
   it('rollback without a terminal or --yes rolls back nothing and fails', async () => {
     const { api, posts } = fakeApi()
     await expect(templateRollback('n8n', {}, deps(api))).rejects.toThrow(/--yes/)

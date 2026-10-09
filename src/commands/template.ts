@@ -254,8 +254,12 @@ export function deploymentUrls(dep: any): string[] {
 }
 
 // One line per service with its terminal state — the anatomy of a partial/failed run.
+// `skipped` is the platform saying the user deleted that service and the run stepped over it. Its
+// `state` stays `pending`, which under the marks below would read as "not reached yet" — a run that
+// is still going — so it gets its own mark and names the reason instead.
 export function serviceStateLines(dep: any): string[] {
   return (dep?.services ?? []).map((s: any) => {
+    if (s?.skipped) return `  - ${s?.name ?? 'service'} [skipped: it no longer exists, so the run stepped over it]`
     const mark = s?.state === 'healthy' ? '✓' : s?.state === 'failed' ? '✗' : '•'
     return `  ${mark} ${s?.name ?? 'service'}${s?.url ? ` — ${s.url}` : ''}${s?.state && s.state !== 'healthy' ? ` [${s.state}]` : ''}`
   })
@@ -266,9 +270,13 @@ export function serviceStateLines(dep: any): string[] {
 // deploy, or clean up), not just that something went wrong.
 export function partialMessage(dep: any): string {
   const services: any[] = dep?.services ?? []
-  const healthy = services.filter((s) => s?.state === 'healthy').length
+  // A skipped service was never part of this run — the user had deleted it — so counting it in the
+  // denominator would report a run that did everything it could as having left something behind.
+  // It is still LISTED below, because "where did it go" is the question the count then raises.
+  const ran = services.filter((s) => !s?.skipped)
+  const healthy = ran.filter((s) => s?.state === 'healthy').length
   return [
-    `template deployment finished partial: ${healthy}/${services.length} services healthy`,
+    `template deployment finished partial: ${healthy}/${ran.length} services healthy`,
     ...serviceStateLines(dep),
     ...(dep?.error ? [`  ${dep.error}`] : []),
     ...(dep?.logsTail ? ['--- log tail ---', String(dep.logsTail).trimEnd()] : []),
@@ -462,7 +470,7 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
 // ---- upgrade / rollback ----
 
 export type TemplateUpgradeOpts = { set?: string[]; branch?: string; yes?: boolean; json?: boolean }
-export type TemplateRollbackOpts = { branch?: string; yes?: boolean; json?: boolean }
+export type TemplateRollbackOpts = { set?: string[]; branch?: string; yes?: boolean; json?: boolean }
 
 type PlanField = { field: string; label: string; deployed: string | null; live: string | null; next: string | null; drifted: boolean; verdict: string }
 type PlanService = { key: string; service_name: string | null; gone: boolean; added: boolean; fields: PlanField[]; missing_variables: string[] }
@@ -498,13 +506,35 @@ const ROLLBACK_409: Record<string, string> = {
   template_no_step_back: 'This service was never upgraded, so there is no earlier version to return to.',
   template_version_not_recorded: 'The earlier version of this template is no longer recorded, so it cannot be restored. Nothing was changed.',
 }
+
+/**
+ * Codes whose platform sentence names the deployment or the version to act on. Replacing it with
+ * wording of our own would drop the one name that makes it actionable, so the platform's sentence
+ * is printed as given and only the next step is appended.
+ */
+const KEEP_PLATFORM_SENTENCE: Record<string, string> = {
+  // "this deployment was already replaced by <code>@<version> — act on that deployment instead".
+  // Reachable here only for a service a NEWER version dropped: it keeps pointing at the deployment
+  // the instance has moved off, which is the one this CLI resolves from the service name.
+  template_superseded: 'Nothing was changed. This command addresses a service, so name one that the newer deployment carries.',
+  // "<code>@<version> was republished with different content after this instance ran it …".
+  template_version_content_changed: 'Nothing was changed.',
+}
+
+/** The sentence to raise for a coded 409, or undefined when this is not one we explain. */
+function coded409(e: unknown, advice: Record<string, string>): Error | undefined {
+  if (!(e instanceof ApiError) || e.status !== 409) return undefined
+  const code = typeof e.body?.code === 'string' ? e.body.code : ''
+  if (advice[code]) return new Error(advice[code])
+  const next = KEEP_PLATFORM_SENTENCE[code]
+  return next ? new Error(`${e.message}. ${next}`) : undefined
+}
+
 async function postWithAdvice(api: TemplateApi, path: string, body: unknown, advice: Record<string, string>) {
   try {
     return await api.rawRequest('POST', path, body)
   } catch (e) {
-    const said = e instanceof ApiError && e.status === 409 ? advice[e.body?.code] : undefined
-    if (said) throw new Error(said)
-    throw e
+    throw coded409(e, advice) ?? e
   }
 }
 
@@ -531,7 +561,14 @@ export async function templateUpgrade(service: string, opts: TemplateUpgradeOpts
   const target = await deploymentOfService(api, p.projectId, branchName, service, 'upgrade')
   // The poll and preview routes are keyed by deployment id, not project: name the project so agent
   // mode signs with the project-bound session, exactly as templateDeploy does.
-  const { plan } = await api.request('GET', `/template-deployments/${target.deploymentId}/upgrade`, undefined, { projectId: p.projectId })
+  // The preview is a GET and raises coded 409s of its own (template_superseded among them), so it
+  // gets the same reading as the POST rather than the raw "<sentence> (HTTP 409)" the guard prints.
+  let plan
+  try {
+    ;({ plan } = await api.request('GET', `/template-deployments/${target.deploymentId}/upgrade`, undefined, { projectId: p.projectId }))
+  } catch (e) {
+    throw coded409(e, UPGRADE_409) ?? e
+  }
   // --json alone is "tell me" (the plan, no upgrade); --json --yes is "do it and tell me".
   const quiet = !!opts.json
   if (opts.json && (!opts.yes || plan.refusals.length)) {
@@ -573,6 +610,7 @@ export async function templateUpgrade(service: string, opts: TemplateUpgradeOpts
 }
 
 export async function templateRollback(service: string, opts: TemplateRollbackOpts = {}, deps: TemplateDeployDeps = {}): Promise<void> {
+  const given = parseSetFlags(opts.set ?? []) // a typo'd --set fails before any network access
   const quiet = !!opts.json
   const out = quiet ? () => {} : info
   // Destructive, and its two warnings are load-bearing: a machine-readable run must say --yes out
@@ -583,12 +621,14 @@ export async function templateRollback(service: string, opts: TemplateRollbackOp
   const api = deps.api ?? (await ApiClient.load())
   const p = deps.project ?? (await requireProject())
   const branchName = opts.branch ?? p.branch
+  const ask = deps.ask ?? promptVariable
   const target = await deploymentOfService(api, p.projectId, branchName, service, 'roll back')
 
   // Said BEFORE the confirmation, not after the fact: rollback prints no plan, so these lines are
   // the whole disclosure, and what they warn of is not recoverable by running the command again.
   out('Going back restores every setting that version declares: the image, the start command, the port, always-on, public access, the volume mount path and the recorded variables.')
   out('A setting the older version does not declare keeps its current value.')
+  out('Public access on a storage bucket reaches that bucket on every branch that has a copy, not only this one.')
   out('It does not restore data the app migrated under the newer version, and a volume only grows.')
   if (tty) {
     const go = await clack.confirm({ message: `Return ${service} to the version it was upgraded from?` })
@@ -596,7 +636,24 @@ export async function templateRollback(service: string, opts: TemplateRollbackOp
     if (!go) return
   }
 
-  const res = await postWithAdvice(api, `/projects/${p.projectId}/template-deployments/${target.deploymentId}/rollback`, {}, ROLLBACK_409)
+  // The platform recovers every value the services still hold, so a rollback normally sends
+  // nothing. What it cannot recover is a variable the NEWER version stopped declaring: the upgrade
+  // deleted that value and the older manifest still requires it. Rollback prints no plan, so the
+  // platform's 400 naming them is the only place those names exist — prompt from it and retry
+  // once, exactly as templateDeploy does with its own missing_variables.
+  const rollbackPath = `/projects/${p.projectId}/template-deployments/${target.deploymentId}/rollback`
+  const variables: Record<string, string> = { ...given }
+  let res
+  try {
+    res = await postWithAdvice(api, rollbackPath, { variables }, ROLLBACK_409)
+  } catch (e) {
+    const missing = e instanceof ApiError ? missingVariablesFrom(e.body) : null
+    if (!missing?.length) throw e
+    // No TTY (or --yes) fails here with the `--set NAME=value` list, the same rule the deploy and
+    // upgrade paths follow — nothing has been rolled back at this point.
+    Object.assign(variables, await resolveVariables(missing, {}, { tty, ask }))
+    res = await postWithAdvice(api, rollbackPath, { variables }, ROLLBACK_409)
+  }
   if (handleApproval(res, opts.json)) return
   const deploymentId = res.body.deploymentId ?? (res.body.deployment ?? res.body).id
   out(`rolling ${service} back (${deploymentId})`)
