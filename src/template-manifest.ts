@@ -118,7 +118,7 @@ function asVarSpec(v: VarSpec | string | null | undefined): VarSpec {
   return v ?? {}
 }
 
-// The platform parser's `source` rules, every problem at once. Unknown keys are its call.
+// Mirrors parseTemplateSource in the platform's src/provisioning/templateManifest.ts, all at once.
 function sourceProblems(where: string, raw: unknown): string[] {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [`${where}.source must be a map`]
   const s = raw as Record<string, unknown>

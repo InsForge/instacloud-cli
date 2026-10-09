@@ -169,6 +169,17 @@ describe('draft rendering', () => {
     ])
     expect(draftLines(t, null)).not.toContainEqual(expect.stringMatching(/^editor:/))
   })
+  it('says a service builds from its GitHub repo, with the branch and root directory when it has them', () => {
+    const t = view({ services: [
+      { name: 'web', type: 'web', image: null, source: { owner: 'acme', repo: 'shop', branch: 'release', rootDir: 'apps/web' }, port: 3000, healthcheck: '/', volume: false, mountPath: null, removed: false, variables: [] },
+      { name: 'jobs', type: 'worker', image: null, source: { owner: 'acme', repo: 'jobs' }, port: null, volume: false, mountPath: null, removed: false, variables: [] },
+    ] })
+    expect(draftLines(t, null).slice(2, 5)).toEqual([
+      'services (2):',
+      '  web (web, port 3000, health check /, builds from acme/shop@release (apps/web/))',
+      '  jobs (worker, builds from acme/jobs (default branch))',
+    ])
+  })
 })
 
 describe('template drafts', () => {

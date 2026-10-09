@@ -102,6 +102,7 @@ describe('validateManifest', () => {
     expect(validateManifest({ code: 'x', version: '1', services: { jobs: { type: 'worker', source: { owner: 'acme', repo: 'jobs' } } } })).toEqual([])
     expect(validateManifest(svc({ image: 'a:1', source: { owner: 'acme', repo: 'shop' } }))).toEqual(['services.web: image, build and source are mutually exclusive'])
     expect(validateManifest(svc({ source: 'acme/shop' }))).toEqual(['services.web.source must be a map'])
+    expect(validateManifest(svc({ source: null }))).toEqual(['services.web.source must be a map'])
     // An unknown key is the platform's call, as an unknown service key is.
     expect(src({ commit: 'abc' })).toEqual([])
     for (const owner of ['', '-acme', 'a'.repeat(40), 'ac_me', 42]) expect(src({ owner }), String(owner)).toEqual(['services.web.source.owner must be a GitHub user or organization name'])
@@ -1165,6 +1166,23 @@ describe('templateDeploy', () => {
       .rejects.toThrow(NOT_LINKED)
     expect(authorize).toHaveBeenCalledOnce()
     expect(posts).toHaveLength(2)
+  })
+
+  it('answers a missing-variables refusal once: a second one is the error, not another prompt', async () => {
+    const tty = { in: process.stdin.isTTY, out: process.stdout.isTTY }
+    process.stdin.isTTY = true
+    process.stdout.isTTY = true
+    try {
+      const missing = () => new ApiError(400, 'missing_variables', { error: 'missing_variables', missing: [{ name: 'API_KEY', key: 'API_KEY' }] })
+      const { api, posts } = githubPlatform([missing(), missing()], [])
+      const ask = vi.fn(async () => 'k-1')
+      await expect(templateDeploy('shop', {}, { api, project: PROJECT, wait: NO_WAIT, ask, authorize: noAuthorize, open: () => true })).rejects.toThrow('missing_variables')
+      expect(ask).toHaveBeenCalledOnce()
+      expect(posts).toHaveLength(2)
+    } finally {
+      process.stdin.isTTY = tty.in
+      process.stdout.isTTY = tty.out
+    }
   })
 
   it('answers a missing-variables refusal that comes after the GitHub one too', async () => {

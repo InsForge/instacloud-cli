@@ -17,6 +17,8 @@ export type TemplateDraftVariable = {
 export type TemplateDraftService = {
   name: string; type: string; image: string | null; port: number | null; healthcheck?: string | null; volume: boolean; mountPath: string | null
   public?: boolean; pgVersion?: number; removed: boolean; variables: TemplateDraftVariable[]
+  // A service built from GitHub has image null and this instead.
+  source?: { owner: string; repo: string; branch?: string; rootDir?: string; buildCommand?: string }
 }
 export type TemplateDraft = {
   code: string; orgId: string; name: string; status: string; publishedVersion: string | null
@@ -105,6 +107,7 @@ function serviceText(s: TemplateDraftService): string {
     // Only a web service has one, and a platform that does not serve the field says nothing.
     s.type === 'web' && s.healthcheck !== undefined ? (s.healthcheck ? `health check ${s.healthcheck}` : 'no health check') : undefined,
     s.image ? `image ${s.image}` : undefined,
+    s.source ? `builds from ${s.source.owner}/${s.source.repo}${s.source.branch ? `@${s.source.branch}` : ' (default branch)'}${s.source.rootDir ? ` (${s.source.rootDir}/)` : ''}` : undefined,
     // A null mount path on a volume is the default /data.
     s.volume ? `volume at ${s.mountPath ?? '/data'}` : undefined,
     s.removed ? 'removed' : undefined,

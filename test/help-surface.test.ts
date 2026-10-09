@@ -220,6 +220,6 @@ describe('template GitHub sources in help', () => {
     const help = helpOf('template', 'edit')
     expect(help).toContain('{"name": "web", "add": {"type": "compute", "source": {"owner": "acme", "repo": "shop", "branch": "main"}, "port": 3000}}')
     expect(help).toContain('{"name": "web", "settings": {"source": {"owner": "acme", "repo": "shop", "branch": "release"}}}')
-    expect(help).toContain('switching between image and source takes a new service')
+    expect(help).toContain('A service keeps its kind. To switch between image and source, take the old one out ("delete": true for a service you added, "removed": true for one from the project) and add a new one under another name.')
   }, 30_000)
 })
