@@ -503,7 +503,6 @@ const UPGRADE_409: Record<string, string> = {
   template_version_changed: 'The template was republished since the plan was shown. Nothing was changed. Run the command again to review the new version.',
 }
 const ROLLBACK_409: Record<string, string> = {
-  template_no_step_back: 'This service was never upgraded, so there is no earlier version to return to.',
   template_version_not_recorded: 'The earlier version of this template is no longer recorded, so it cannot be restored. Nothing was changed.',
 }
 
@@ -519,6 +518,10 @@ const KEEP_PLATFORM_SENTENCE: Record<string, string> = {
   template_superseded: 'Nothing was changed. This command addresses a service, so name one that the newer deployment carries.',
   // "<code>@<version> was republished with different content after this instance ran it …".
   template_version_content_changed: 'Nothing was changed.',
+  // Two causes now, and the second one names the version: "this instance was already rolled back
+  // to <version> … upgrade it to move forward", beside the original "was not upgraded from
+  // anything". Our own wording could only say one of them, and said the wrong one for a rollback.
+  template_no_step_back: 'Nothing was changed.',
 }
 
 /** The sentence to raise for a coded 409, or undefined when this is not one we explain. */

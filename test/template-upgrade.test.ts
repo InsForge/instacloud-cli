@@ -168,11 +168,25 @@ describe('upgrade and rollback flows', () => {
     await expect(templateUpgrade('n8n', { yes: true }, deps(api))).rejects.toThrow(/republished since the plan was shown/)
   })
 
-  it('rollback explains the two 409s a user will hit', async () => {
-    for (const [code, re] of [['template_no_step_back', /never upgraded/], ['template_version_not_recorded', /no longer recorded/]] as const) {
+  it('rollback explains the 409s a user will hit', async () => {
+    const { api } = fakeApi()
+    api.rawRequest = async () => { throw new ApiError(409, 'x', { code: 'template_version_not_recorded' }) }
+    await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(/no longer recorded/)
+  })
+
+  // template_no_step_back has two causes and only the platform can tell them apart: never upgraded,
+  // or already rolled back — the second names the version to upgrade back to. Replacing the sentence
+  // printed one cause for both, and the wrong one after a rollback.
+  it('rollback keeps the platform sentence for whichever no-step-back cause it was', async () => {
+    for (const msg of [
+      'this instance was not upgraded from anything, so there is no version to return to',
+      'this instance was already rolled back to 1.6.0, so there is no older version to return to — upgrade it to move forward',
+    ]) {
       const { api } = fakeApi()
-      api.rawRequest = async () => { throw new ApiError(409, 'x', { code }) }
-      await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(re)
+      api.rawRequest = async () => { throw new ApiError(409, msg, { code: 'template_no_step_back' }) }
+      await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(
+        new RegExp(`${msg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\. Nothing was changed\\.`),
+      )
     }
   })
 
