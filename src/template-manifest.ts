@@ -174,7 +174,6 @@ export function validateManifest(m: TemplateManifest): string[] {
     if (authored.spec !== undefined) {
       problems.push(`${where}: compute size is the platform's to choose — remove spec`)
     }
-    // Validate runtime fields: command and mountPath
     if (svc.command !== undefined && (typeof svc.command !== 'string' || !svc.command.trim())) {
       problems.push(`${where}.command must be a non-empty string`)
     }

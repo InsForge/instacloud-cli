@@ -384,8 +384,6 @@ export async function autoupdate(mode?: string): Promise<void> {
   info(`autoupdate: ${enabled ? 'on' : 'off'} (default on while the CLI is pre-1.0 — \`insta config autoupdate off\` to disable)`)
 }
 
-// Called once at CLI start-up. Never blocks: reads the cache synchronously, prints at most one
-// stderr line, and (when due) spawns detached children for the registry check / quiet upgrade.
 /** Commands that must never nudge about an update or spawn a background one.
  *
  *  `upgrade`/`autoupdate` are the update machinery itself. Every `__` command
@@ -406,6 +404,8 @@ export function skipsUpdateCheck(cmd: string | undefined, sub?: string | undefin
   return cmd === 'upgrade' || cmd === 'autoupdate' || !!cmd?.startsWith('__')
 }
 
+// Called once at CLI start-up. Never blocks: reads the cache synchronously, prints at most one
+// stderr line, and (when due) spawns detached children for the registry check / quiet upgrade.
 export function maybeUpdate(current: string, argv: string[]): void {
   if (skipsUpdateCheck(argv[2], argv[3])) return
   const channel = detectChannel()

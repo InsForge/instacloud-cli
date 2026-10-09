@@ -36,8 +36,8 @@ describe('parseMemoryMb', () => {
   })
 })
 
-// Review round 2: both jwfing and cubic independently flagged the bare Number() on --cpu (NaN
-// serializes to null on the wire) and the unvalidated db strings. These pin the new seams.
+// A bare Number() on --cpu lets NaN serialize to null on the wire, and the db strings need the
+// same local validation. These pin the parsing seams.
 import { parseCpu, fmtMb } from '../src/commands/compute.js'
 import { fetchDbInstance } from '../src/commands/postgres.js'
 import { ApiError } from '../src/api.js'
@@ -71,7 +71,7 @@ describe('parseDbCpu / parseDbMemory (provider quantity strings)', () => {
 describe('fmtMib (display must not claim a ceiling the API did not set)', () => {
   it('collapses whole and half GiB', () => {
     expect(fmtMib(2048)).toBe('2 GiB')
-    expect(fmtMib(1536)).toBe('1.5 GiB') // the review example: was shown as "2 GiB"
+    expect(fmtMib(1536)).toBe('1.5 GiB') // never rounded up to "2 GiB"
   })
   it('keeps everything else exact in MiB', () => {
     expect(fmtMib(1300)).toBe('1300 MiB')
@@ -79,12 +79,10 @@ describe('fmtMib (display must not claim a ceiling the API did not set)', () => 
   })
 })
 
-// The round-3 Critical: rawRequest THROWS on >=400, so the no-instance soft-path must live in a
-// catch — status-branching on its return value was unreachable dead code and the read crashed with
-// a raw ApiError. These drive the seam with a stub client, which is exactly the test that would
-// have caught it (the 502 branch was never taken by any test). That soft path is the legacy Neon
-// path: Neon is no longer used by any environment, so these stay as retained coverage for code
-// that is not live.
+// rawRequest THROWS on >=400 (api.ts), so the no-instance soft path must live in a catch, not in
+// status branching on its return value. These drive the seam with a stub client so the 502 branch
+// is actually taken. That soft path is the legacy Neon path: Neon is no longer used by any
+// environment, so these stay as retained coverage for code that is not live.
 describe('fetchDbInstance (the read seam)', () => {
   const stub = (fn: () => Promise<any>) => ({ rawRequest: fn }) as any
 
@@ -122,8 +120,7 @@ describe('fmtMb (compute display)', () => {
   })
 })
 
-// Case-exactness (round-3 suggestion): k8s quantities are case-sensitive, so local validation
-// must reject what the server would.
+// k8s quantities are case-sensitive, so local validation must reject what the server would.
 describe('parseDbMemory case-exactness', () => {
   it('rejects lowercase unit variants the backend refuses', () => {
     for (const raw of ['4gi', '4GI', '8m', '2048mi']) {
