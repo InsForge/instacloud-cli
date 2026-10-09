@@ -1,12 +1,17 @@
 // --endpoint tcp: a compute service reached as raw TCP on its port at its own IPv6 address. The
 // platform owns which ports are allowed; the CLI only spells the flag, sends it, and shows where
 // such a service answers (it has no URL).
-import { describe, it, expect, afterEach } from 'vitest'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { parseEndpoint, servicesAdd, servicesAddRequestBody, serviceListLine, serviceAddedLine, tcpAddress } from '../src/commands/services.js'
-import { deployRequestBody, deployedTarget } from '../src/commands/deploy.js'
+import { deployRequestBody, deployedTarget, deploy } from '../src/commands/deploy.js'
 import { deployArchive } from '../src/deploy-archive.js'
+import * as apiModule from '../src/api.js'
+import { ApiClient } from '../src/api.js'
 
-afterEach(() => { process.exitCode = undefined })
+afterEach(() => { vi.restoreAllMocks(); process.exitCode = undefined })
 
 const HOST = 'prod-main-game-aa6a3.ip.us-east-1.compute.instacloud.tech'
 
@@ -93,5 +98,60 @@ describe('archive deploy of a tcp service', () => {
   it('still refuses an empty URL with no tcp host', async () => {
     const { api: a } = api({ url: '' })
     await expect(deployArchive(a, 'p1', ref, 'main', { port: '7000' }, Date.now, noWait)).rejects.toThrow(/no image or URL/)
+  })
+})
+
+// The archive body's own `=== 'http' || === 'tcp'` check silently drops anything else to
+// undefined, which let `insta deploy . --endpoint tpc` sail through using the service's existing
+// endpoint instead of failing locally. deploy() must validate and normalize --endpoint itself,
+// before prepareSource's discovery/build/upload network calls, not leave it to that check.
+describe('deploy() validates --endpoint at command entry, for the directory (archive) lane', () => {
+  function srcDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'insta-endpoint-'))
+    writeFileSync(join(dir, 'app.js'), 'console.log(1)\n')
+    return dir
+  }
+
+  // A minimal archive-lane fake: discovery names the lane, the object is already uploaded, and
+  // the deploy operation is live on the first poll — the shape prepareSource needs to resolve
+  // without ever reaching the real network.
+  function fakeApi() {
+    const calls: Array<{ method: string; path: string; body?: unknown }> = []
+    const rawRequest = vi.fn(async (method: string, path: string, body?: unknown) => {
+      calls.push({ method, path, body })
+      if (path.includes('/source-build')) return { status: 200, body: { lane: 'archive', limits: { maxArchiveBytes: 1e6, maxExtractedBytes: 1e6, maxFiles: 100 } } }
+      if (path.includes('/builds/archive/')) return { status: 200, body: { state: 'unsupported', buildState: 'succeeded', steps: [], entries: [] } }
+      if (path.includes('/build-uploads/')) return { status: 200, body: { state: 'valid' } }
+      if (path.includes('/archive-deploys/')) return { status: 200, body: { state: 'live', imageRef: 'img@sha256:aa', url: '', endpointHost: HOST, branch: 'main', group: 'api' } }
+      if (path.includes('/archive-deploys')) return { status: 202, body: { operationId: 'op_1' } }
+      throw new Error(`unexpected call: ${method} ${path}`)
+    })
+    return { calls, rawRequest }
+  }
+
+  function mockPlatform(rawRequest: ReturnType<typeof vi.fn>) {
+    vi.spyOn(ApiClient, 'load').mockResolvedValue({ rawRequest } as unknown as ApiClient)
+    vi.spyOn(apiModule, 'requireProject').mockResolvedValue({ projectId: 'p1', branch: 'main' } as Awaited<ReturnType<typeof apiModule.requireProject>>)
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  }
+
+  it('an invalid --endpoint dies before any network call — no discovery, no pack, no upload', async () => {
+    const { calls, rawRequest } = fakeApi()
+    mockPlatform(rawRequest)
+
+    await expect(deploy(srcDir(), { port: '7000', endpoint: 'tpc' })).rejects.toThrow()
+
+    expect(calls).toEqual([])
+  })
+
+  it("a normalized endpoint (' TCP ', as parseEndpoint's own tests accept) reaches the archive body as 'tcp'", async () => {
+    const { calls, rawRequest } = fakeApi()
+    mockPlatform(rawRequest)
+
+    await deploy(srcDir(), { port: '7000', endpoint: ' TCP ' })
+
+    const started = calls.find((c) => c.method === 'POST' && c.path === '/projects/p1/archive-deploys')
+    expect(started?.body).toMatchObject({ endpoint: 'tcp', port: 7000 })
   })
 })

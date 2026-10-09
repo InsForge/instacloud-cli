@@ -181,6 +181,16 @@ export async function deploy(dir: string | undefined, opts: DeployOpts): Promise
   } catch (e) {
     die(`--${(e as Error).message}`)
   }
+  // Normalized here, once, so both lanes get the same validated value: the archive lane's body
+  // (deployArchive) otherwise silently drops anything that isn't exactly 'http'/'tcp' to
+  // undefined, which let a typo like --endpoint tpc build and deploy using the service's existing
+  // endpoint instead of failing locally.
+  let endpoint: 'http' | 'tcp' | undefined
+  try {
+    endpoint = opts.endpoint === undefined ? undefined : parseEndpoint(opts.endpoint)
+  } catch (e) {
+    die((e as Error).message)
+  }
   if (dir && port === undefined) {
     const dockerfile = join(resolve(process.cwd(), dir), 'Dockerfile')
     const exposed = existsSync(dockerfile) ? dockerfileExposedPort(readFileSync(dockerfile, 'utf8')) : undefined
@@ -190,7 +200,7 @@ export async function deploy(dir: string | undefined, opts: DeployOpts): Promise
     }
   }
 
-  const effOpts = { ...opts, port: port?.toString() }
+  const effOpts = { ...opts, port: port?.toString(), endpoint }
   const source = dir ? await prepareSource(api, p.projectId, dir, branch, effOpts) : { image: opts.image! }
   if (!source) return // an approval is pending; the user approves and re-runs
   if ('deployed' in source) {
