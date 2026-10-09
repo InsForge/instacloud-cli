@@ -512,11 +512,12 @@ async function postWithAdvice(api: TemplateApi, path: string, body: unknown, adv
  * A service name is what a person has; a deployment uuid is not. The services list already carries
  * the attribution, so the lookup lives here rather than in the user's head.
  */
-async function deploymentOfService(api: TemplateApi, projectId: string, branch: string, service: string) {
+async function deploymentOfService(api: TemplateApi, projectId: string, branch: string, service: string, verb: 'upgrade' | 'roll back') {
   const body = await api.request('GET', `/projects/${projectId}/services?branch=${encodeURIComponent(branch)}`)
   const row = (body.services ?? []).find((s: any) => s.name === service)
   if (!row) throw new Error(`no service named ${service} on branch ${branch}`)
-  if (!row.template_deployment_id) throw new Error(`${service} was not deployed from a template, so there is nothing to upgrade`)
+  // Named by the caller: the same sentence under `rollback` would send the user to upgrade instead.
+  if (!row.template_deployment_id) throw new Error(`${service} was not deployed from a template, so there is nothing to ${verb}`)
   return { deploymentId: row.template_deployment_id as string }
 }
 
@@ -527,7 +528,7 @@ export async function templateUpgrade(service: string, opts: TemplateUpgradeOpts
   const branchName = opts.branch ?? p.branch
   const ask = deps.ask ?? promptVariable
 
-  const target = await deploymentOfService(api, p.projectId, branchName, service)
+  const target = await deploymentOfService(api, p.projectId, branchName, service, 'upgrade')
   // The poll and preview routes are keyed by deployment id, not project: name the project so agent
   // mode signs with the project-bound session, exactly as templateDeploy does.
   const { plan } = await api.request('GET', `/template-deployments/${target.deploymentId}/upgrade`, undefined, { projectId: p.projectId })
@@ -582,11 +583,12 @@ export async function templateRollback(service: string, opts: TemplateRollbackOp
   const api = deps.api ?? (await ApiClient.load())
   const p = deps.project ?? (await requireProject())
   const branchName = opts.branch ?? p.branch
-  const target = await deploymentOfService(api, p.projectId, branchName, service)
+  const target = await deploymentOfService(api, p.projectId, branchName, service, 'roll back')
 
-  // Said BEFORE the confirmation, not after the fact: these two are the whole reason someone
-  // regrets a rollback, and they are not recoverable by running it again.
-  out('Going back restores the image, the start command, the port and the recorded variables.')
+  // Said BEFORE the confirmation, not after the fact: rollback prints no plan, so these lines are
+  // the whole disclosure, and what they warn of is not recoverable by running the command again.
+  out('Going back restores every setting that version declares: the image, the start command, the port, always-on, public access, the volume mount path and the recorded variables.')
+  out('A setting the older version does not declare keeps its current value.')
   out('It does not restore data the app migrated under the newer version, and a volume only grows.')
   if (tty) {
     const go = await clack.confirm({ message: `Return ${service} to the version it was upgraded from?` })

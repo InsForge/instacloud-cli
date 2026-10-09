@@ -109,7 +109,7 @@ describe('upgrade and rollback flows', () => {
     expect(JSON.parse(stdout.join('')).status).toBe('succeeded')
   })
 
-  it('rollback says both warnings before it asks to confirm', async () => {
+  it('rollback names every setting it writes, and both warnings, before it asks to confirm', async () => {
     const { api, posts } = fakeApi()
     const order: string[] = []
     vi.mocked(clack.confirm).mockImplementationOnce((async () => { order.push(`confirm after: ${stdout.join('')}`); return true }) as any)
@@ -125,16 +125,26 @@ describe('upgrade and rollback flows', () => {
       }
     }
     expect(order).toHaveLength(1)
-    expect(order[0]).toContain('restores the image, the start command, the port and the recorded variables')
+    // Rollback prints NO plan, so this text is the user's only notice of what it rewrites. It
+    // runs the same planner as the upgrade, so always-on, public access and the mount path are
+    // written too whenever the older manifest declares them.
+    expect(order[0]).toContain('the image, the start command, the port')
+    expect(order[0]).toContain('always-on')
+    expect(order[0]).toContain('public access')
+    expect(order[0]).toContain('the volume mount path')
+    expect(order[0]).toContain('the recorded variables')
+    expect(order[0]).toContain('does not declare keeps its current value')
     expect(order[0]).toContain('does not restore data the app migrated')
     expect(order[0]).toContain('a volume only grows')
     expect(posts[0].path).toBe('/projects/proj_1/template-deployments/dep_9/rollback')
   })
 
-  it('a service not deployed from a template says so, with no POST', async () => {
+  it('a service not deployed from a template says so, naming the command that was run, with no POST', async () => {
     const { api, posts } = fakeApi({ services: [{ name: 'n8n', template_deployment_id: null }] })
-    await expect(templateUpgrade('n8n', { yes: true }, deps(api))).rejects.toThrow(/was not deployed from a template/)
-    await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(/was not deployed from a template/)
+    // One lookup serves both verbs, so the sentence has to follow the verb: telling someone who
+    // ran `rollback` that there is nothing to UPGRADE sends them to the wrong command.
+    await expect(templateUpgrade('n8n', { yes: true }, deps(api))).rejects.toThrow(/was not deployed from a template, so there is nothing to upgrade/)
+    await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(/was not deployed from a template, so there is nothing to roll back/)
     expect(posts).toEqual([])
   })
 
