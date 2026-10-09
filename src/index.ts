@@ -582,7 +582,7 @@ tpl.command('upgrade <service>').description('Move a service deployed from a tem
 tpl.command('rollback <service>').description('Return a service to the template version it was upgraded from, one step. Restores the image, start command, port and recorded variables; does not restore data the app migrated, and a volume only grows')
   .option('--branch <b>', 'branch the service is on (default: current)')
   .option('-y, --yes', 'do not ask for confirmation')
-  .option('--json', 'print the finished deployment as JSON and suppress progress lines')
+  .option('--json', 'print the finished deployment as JSON and suppress progress lines; requires --yes')
   .action(guard((service, o) => template.templateRollback(service, o)))
 // Authoring: the org's community templates, the same drafts the console editor changes.
 tpl.command('create').description("Create a community template draft from the linked project (or --project), or an empty one with --blank. Prints its code, status and the console editor link")

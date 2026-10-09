@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, afterEach, afterAll } from 'vitest'
 import * as clack from '@clack/prompts'
+import { ApiError } from '../src/api.js'
 import { upgradePlanLines, templateUpgrade, templateRollback } from '../src/commands/template.js'
 
 vi.mock('@clack/prompts', async (orig) => ({ ...(await orig<typeof import('@clack/prompts')>()), confirm: vi.fn(async () => true) }))
@@ -135,5 +136,33 @@ describe('upgrade and rollback flows', () => {
     await expect(templateUpgrade('n8n', { yes: true }, deps(api))).rejects.toThrow(/was not deployed from a template/)
     await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(/was not deployed from a template/)
     expect(posts).toEqual([])
+  })
+
+  it('rollback --json without --yes rolls back nothing and fails', async () => {
+    const { api, posts } = fakeApi()
+    await expect(templateRollback('n8n', { json: true }, deps(api))).rejects.toThrow(/--yes/)
+    expect(posts).toEqual([])
+    expect(stdout.join('')).toBe('')
+  })
+
+  it('rollback --json --yes emits exactly one JSON document and no progress lines', async () => {
+    const { api, posts } = fakeApi()
+    await templateRollback('n8n', { json: true, yes: true }, deps(api))
+    expect(posts).toHaveLength(1)
+    expect(JSON.parse(stdout.join('')).status).toBe('succeeded')
+  })
+
+  it('a stale pin says the template was republished', async () => {
+    const { api } = fakeApi()
+    api.rawRequest = async () => { throw new ApiError(409, 'changed', { code: 'template_version_changed' }) }
+    await expect(templateUpgrade('n8n', { yes: true }, deps(api))).rejects.toThrow(/republished since the plan was shown/)
+  })
+
+  it('rollback explains the two 409s a user will hit', async () => {
+    for (const [code, re] of [['template_no_step_back', /never upgraded/], ['template_version_not_recorded', /no longer recorded/]] as const) {
+      const { api } = fakeApi()
+      api.rawRequest = async () => { throw new ApiError(409, 'x', { code }) }
+      await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(re)
+    }
   })
 })

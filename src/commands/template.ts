@@ -490,6 +490,24 @@ export function upgradePlanLines(plan: UpgradePlanBody): string[] {
   return lines
 }
 
+// The 409 codes a user will actually hit, in a sentence that says what to do next.
+const UPGRADE_409: Record<string, string> = {
+  template_version_changed: 'The template was republished since the plan was shown. Nothing was changed. Run the command again to review the new version.',
+}
+const ROLLBACK_409: Record<string, string> = {
+  template_no_step_back: 'This service was never upgraded, so there is no earlier version to return to.',
+  template_version_not_recorded: 'The earlier version of this template is no longer recorded, so it cannot be restored. Nothing was changed.',
+}
+async function postWithAdvice(api: TemplateApi, path: string, body: unknown, advice: Record<string, string>) {
+  try {
+    return await api.rawRequest('POST', path, body)
+  } catch (e) {
+    const said = e instanceof ApiError && e.status === 409 ? advice[e.body?.code] : undefined
+    if (said) throw new Error(said)
+    throw e
+  }
+}
+
 /**
  * A service name is what a person has; a deployment uuid is not. The services list already carries
  * the attribution, so the lookup lives here rather than in the user's head.
@@ -539,9 +557,9 @@ export async function templateUpgrade(service: string, opts: TemplateUpgradeOpts
 
   // The version and digest the user just read. A republish in between answers 409 rather than
   // running something they never saw.
-  const res = await api.rawRequest('POST', `/projects/${p.projectId}/template-deployments/${target.deploymentId}/upgrade`, {
+  const res = await postWithAdvice(api, `/projects/${p.projectId}/template-deployments/${target.deploymentId}/upgrade`, {
     variables, expectedVersion: plan.to_version, expectedDigest: plan.to_digest,
-  })
+  }, UPGRADE_409)
   if (handleApproval(res, opts.json)) return
 
   const deploymentId = res.body.deploymentId ?? (res.body.deployment ?? res.body).id
@@ -556,6 +574,9 @@ export async function templateUpgrade(service: string, opts: TemplateUpgradeOpts
 export async function templateRollback(service: string, opts: TemplateRollbackOpts = {}, deps: TemplateDeployDeps = {}): Promise<void> {
   const quiet = !!opts.json
   const out = quiet ? () => {} : info
+  // Destructive, and its two warnings are load-bearing: a machine-readable run must say --yes out
+  // loud rather than roll back unseen through a pipe.
+  if (opts.json && !opts.yes) throw new Error('rollback --json needs --yes: it does not restore data the app migrated, so it will not run without being told to')
   const api = deps.api ?? (await ApiClient.load())
   const p = deps.project ?? (await requireProject())
   const branchName = opts.branch ?? p.branch
@@ -565,14 +586,14 @@ export async function templateRollback(service: string, opts: TemplateRollbackOp
   // regrets a rollback, and they are not recoverable by running it again.
   out('Going back restores the image, the start command, the port and the recorded variables.')
   out('It does not restore data the app migrated under the newer version, and a volume only grows.')
-  const tty = !opts.yes && !!process.stdin.isTTY && !!process.stdout.isTTY
+  const tty = !opts.json && !opts.yes && !!process.stdin.isTTY && !!process.stdout.isTTY
   if (!opts.yes && tty) {
     const go = await clack.confirm({ message: `Return ${service} to the version it was upgraded from?` })
     if (clack.isCancel(go)) throw new CliCancel()
     if (!go) return
   }
 
-  const res = await api.rawRequest('POST', `/projects/${p.projectId}/template-deployments/${target.deploymentId}/rollback`, {})
+  const res = await postWithAdvice(api, `/projects/${p.projectId}/template-deployments/${target.deploymentId}/rollback`, {}, ROLLBACK_409)
   if (handleApproval(res, opts.json)) return
   const deploymentId = res.body.deploymentId ?? (res.body.deployment ?? res.body).id
   out(`rolling ${service} back (${deploymentId})`)
