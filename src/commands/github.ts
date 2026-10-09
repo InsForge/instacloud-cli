@@ -89,6 +89,8 @@ export function repoLine(serviceName: string, s: SourceView): string {
 }
 
 type RepoRow = { id: number; owner: string; repo: string; installationId?: number }
+// What these helpers need of a client: ApiClient, or template deploy's injectable TemplateApi.
+export type GitHubApi = Pick<ApiClient, 'request'>
 type GitHubView = { linked: boolean; repos: RepoRow[]; installations: { installationId: number; accountLogin: string; accountType: string }[] }
 type GitHubDeviceStart = { state: string; verificationUri: string; userCode: string; interval?: number; expiresAt: string }
 type GitHubDevicePoll = { pending: boolean; slowDownBy?: number; repos?: RepoRow[] }
@@ -100,7 +102,7 @@ const pollDelay = (s: number) => Math.min(Math.max(s, 1), 60)
 
 // GitHub shows the person a code to type; the platform holds the device code and finishes the exchange,
 // so nothing secret passes through the CLI.
-export async function authorizeTerminal(api: ApiClient, wait: (s: number) => Promise<void> = sleepSeconds, open: typeof openUrl = openUrl): Promise<RepoRow[]> {
+export async function authorizeTerminal(api: GitHubApi, wait: (s: number) => Promise<void> = sleepSeconds, open: typeof openUrl = openUrl): Promise<RepoRow[]> {
   const start = await api.request<GitHubDeviceStart>('POST', '/me/github/device', {})
   const deadline = Date.parse(start.expiresAt)
   // A NaN deadline makes every comparison false, which reads as an instant expiry — or, inverted, as a
@@ -143,7 +145,7 @@ export function canAuthorizeHere(opts: { json?: boolean } = {}): boolean {
   return !!agentMode() || !!process.stderr.isTTY
 }
 
-export async function findCallerRepo(api: ApiClient, ref: RepoRef, authorize: typeof authorizeTerminal = authorizeTerminal, canAuthorize = canAuthorizeHere(), wait: (s: number) => Promise<void> = sleepSeconds, open: typeof openUrl = openUrl): Promise<{ installationId: number; repoId: number }> {
+export async function findCallerRepo(api: GitHubApi, ref: RepoRef, authorize: typeof authorizeTerminal = authorizeTerminal, canAuthorize = canAuthorizeHere(), wait: (s: number) => Promise<void> = sleepSeconds, open: typeof openUrl = openUrl): Promise<{ installationId: number; repoId: number }> {
   let mine = await api.request<GitHubView>('GET', '/me/github/repos')
   if (!mine.linked && !canAuthorize) {
     throw new Error('this GitHub account is not authorized for InstaCloud yet, and nothing here can read the code GitHub shows — run `insta compute connect-repo` from a terminal, connect the repository from the console, or pass --public for a public repository')

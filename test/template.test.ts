@@ -8,7 +8,7 @@ import {
 } from '../src/template-manifest.js'
 import {
   templateListLines, templateInfoLines, normalizeInfoServices, normalizeInfoVariables,
-  parseSetFlags, resolveVariables, missingVariablesFrom, looksLikePath, deployMode, templateDeploy, publicBucketLines,
+  parseSetFlags, resolveVariables, missingVariablesFrom, unreachableReposFrom, looksLikePath, deployMode, templateDeploy, publicBucketLines,
   stepIndexFor, deploymentUrls, serviceStateLines, partialMessage, watchDeployment, DEPLOY_STEPS,
 } from '../src/commands/template.js'
 import { ApiError } from '../src/api.js'
@@ -626,6 +626,27 @@ describe('missingVariablesFrom', () => {
   })
 })
 
+describe('unreachableReposFrom', () => {
+  it('reads the repos of both access codes, each repo once, case-insensitively', () => {
+    const repos = [
+      { service: 'web', owner: 'acme', repo: 'shop', branch: 'main' },
+      { service: 'jobs', owner: 'Acme', repo: 'Shop', branch: 'dev' },
+      { service: 'api', owner: 'acme', repo: 'api', branch: 'main' },
+    ]
+    for (const code of ['github_not_linked', 'github_repo_unreachable']) {
+      expect(unreachableReposFrom({ error: 'x', code, repos }), code).toEqual([{ owner: 'acme', repo: 'shop' }, { owner: 'acme', repo: 'api' }])
+    }
+  })
+  it('drops an entry without a string owner and repo', () => {
+    expect(unreachableReposFrom({ code: 'github_not_linked', repos: [{ owner: 'acme' }, null, 'acme/shop', { owner: 'acme', repo: 7 }] })).toEqual([])
+    expect(unreachableReposFrom({ code: 'github_not_linked' })).toEqual([])
+  })
+  it('leaves every other error alone, the publish refusal included', () => {
+    const others = [{ error: 'missing_variables', missing: [] }, { code: 'template_source_unreachable', repos: [{ owner: 'acme', repo: 'shop' }] }, { error: 'github_not_linked' }, undefined, null]
+    for (const body of others) expect(unreachableReposFrom(body)).toBeNull()
+  })
+})
+
 describe('looksLikePath', () => {
   it('reads ./dir, absolute and nested paths as paths, bare codes as codes', () => {
     expect(looksLikePath('./tpl')).toBe(true)
@@ -1039,6 +1060,123 @@ describe('templateDeploy', () => {
       expect(posts).toHaveLength(2)
       expect(posts[0]).toMatchObject({ region: 'eu-central' })
       expect(posts[1]).toMatchObject({ region: 'eu-central', variables: { API_KEY: 'k-1' } })
+    } finally {
+      process.stdin.isTTY = tty.in
+      process.stdout.isTTY = tty.out
+    }
+  })
+
+  // Spec 2026-10-08 template GitHub sources: the platform names the repos, the CLI links GitHub.
+  const SHOP = { service: 'web', owner: 'acme', repo: 'shop', branch: 'main' }
+  const NOT_LINKED = 'this template builds from GitHub repositories only a linked GitHub account can read (acme/shop@main): connect GitHub from your profile in the InstaCloud console, or run insta template deploy in a terminal, then deploy again'
+  const UNREACHABLE = "your linked GitHub accounts cannot read acme/shop@main: ask the template's author for access, or install the InstaCloud GitHub App on that repository, then deploy again"
+  const refused = (code: string, message: string, repos: unknown[] = [SHOP]) => new ApiError(400, message, { error: message, code, repos })
+  const SHOP_ROW = { id: 42, owner: 'acme', repo: 'shop', installationId: 7 }
+  const noAuthorize = async () => { throw new Error('must not authorize') }
+  // Refuses the first POSTs with `refusals`, then accepts, and answers /me/github/repos in turn.
+  function githubPlatform(refusals: Error[], repoAnswers: unknown[]) {
+    const calls: string[] = []
+    const posts: any[] = []
+    const api = {
+      request: async (method: string, path: string) => {
+        calls.push(`${method} ${path}`)
+        if (path.startsWith('/templates/')) return { template: { code: 'shop', variables: { required: [], optional: [] } } }
+        if (path.startsWith('/template-deployments/')) return { status: 'succeeded', services: [] }
+        if (path === '/me/github/setup') return { installUrl: 'https://github.com/apps/instacloud/installations/new?state=nonce' }
+        if (path === '/me/github/repos') {
+          const answer = repoAnswers.shift()
+          if (!answer) throw new Error('unexpected repos read')
+          return answer
+        }
+        throw new Error(`unexpected ${method} ${path}`)
+      },
+      rawRequest: async (method: string, path: string, body?: unknown) => {
+        calls.push(`${method} ${path}`)
+        posts.push(body)
+        const refusal = refusals.shift()
+        if (refusal) throw refusal
+        return { status: 202, body: { deploymentId: 'dep_1' } }
+      },
+    }
+    return { api, calls, posts }
+  }
+  // canAuthorizeHere reads the stderr terminal (github-connect.test.ts sets it the same way).
+  async function withStderrTTY<T>(value: boolean, run: () => Promise<T>): Promise<T> {
+    const was = process.stderr.isTTY
+    Object.defineProperty(process.stderr, 'isTTY', { value, configurable: true })
+    try { return await run() } finally { Object.defineProperty(process.stderr, 'isTTY', { value: was, configurable: true }) }
+  }
+  const DEPLOYED = ['POST /projects/proj_1/template-deployments', 'GET /template-deployments/dep_1']
+
+  it('links GitHub with the device flow on a terminal, then deploys again with the same body', async () => {
+    const { api, calls, posts } = githubPlatform([refused('github_not_linked', NOT_LINKED)], [{ linked: false, repos: [], installations: [] }])
+    const authorize = vi.fn(async () => [SHOP_ROW])
+    const opened: string[] = []
+    await withStderrTTY(true, () => templateDeploy('shop', {}, { api, project: PROJECT, wait: NO_WAIT, authorize, open: (u: string) => { opened.push(u); return true } }))
+    expect(authorize).toHaveBeenCalledOnce()
+    expect(calls).toEqual(['GET /templates/shop', 'POST /projects/proj_1/template-deployments', 'GET /me/github/repos', ...DEPLOYED])
+    expect(posts).toHaveLength(2)
+    expect(posts[1]).toEqual(posts[0])
+    expect(opened).toEqual([])
+    expect(stderr.join('')).toContain(NOT_LINKED)
+    expect(stdout.join('')).toContain('template shop deployed to branch main')
+  })
+
+  it('opens the App install for a repo the linked account cannot reach, waits for it, then deploys again', async () => {
+    const linked = { linked: true, repos: [], installations: [] }
+    const { api, calls, posts } = githubPlatform([refused('github_repo_unreachable', UNREACHABLE)], [linked, { linked: true, repos: [SHOP_ROW], installations: [] }])
+    const opened: string[] = []
+    await withStderrTTY(true, () => templateDeploy('shop', {}, { api, project: PROJECT, wait: NO_WAIT, authorize: noAuthorize, open: (u: string) => { opened.push(u); return true } }))
+    expect(opened).toEqual(['https://github.com/apps/instacloud/installations/new?state=cli'])
+    expect(calls).toEqual(['GET /templates/shop', 'POST /projects/proj_1/template-deployments', 'GET /me/github/repos', 'POST /me/github/setup', 'GET /me/github/repos', ...DEPLOYED])
+    expect(posts).toHaveLength(2)
+    expect(stderr.join('')).toContain(UNREACHABLE)
+    expect(stderr.join('')).toContain('install the InstaCloud GitHub App on acme and grant access to acme/shop')
+  })
+
+  it('asks GitHub once per repo, however many services build from it', async () => {
+    const both = [SHOP, { ...SHOP, service: 'jobs', branch: 'dev' }, { service: 'api', owner: 'acme', repo: 'api', branch: 'main' }]
+    const listed = { linked: true, repos: [SHOP_ROW, { id: 43, owner: 'acme', repo: 'api', installationId: 7 }], installations: [] }
+    const { api, calls, posts } = githubPlatform([refused('github_repo_unreachable', UNREACHABLE, both)], [listed, listed])
+    await withStderrTTY(true, () => templateDeploy('shop', {}, { api, project: PROJECT, wait: NO_WAIT, authorize: noAuthorize, open: () => true }))
+    expect(calls.filter((c) => c === 'GET /me/github/repos')).toHaveLength(2)
+    expect(posts).toHaveLength(2)
+  })
+
+  it('--json prints the platform message and stops, with no GitHub call', async () => {
+    const { api, calls } = githubPlatform([refused('github_not_linked', NOT_LINKED)], [])
+    await expect(withStderrTTY(true, () => templateDeploy('shop', { json: true }, { api, project: PROJECT, wait: NO_WAIT, authorize: noAuthorize, open: () => true })))
+      .rejects.toThrow(NOT_LINKED)
+    expect(calls).toEqual(['GET /templates/shop', 'POST /projects/proj_1/template-deployments'])
+    expect(stdout.join('')).toBe('')
+  })
+
+  it('with no terminal it stops the same way', async () => {
+    const { api, calls } = githubPlatform([refused('github_repo_unreachable', UNREACHABLE)], [])
+    await expect(withStderrTTY(false, () => templateDeploy('shop', {}, { api, project: PROJECT, wait: NO_WAIT, authorize: noAuthorize, open: () => true })))
+      .rejects.toThrow(UNREACHABLE)
+    expect(calls).toEqual(['GET /templates/shop', 'POST /projects/proj_1/template-deployments'])
+  })
+
+  it('retries once: a second refusal after linking is the error', async () => {
+    const { api, posts } = githubPlatform([refused('github_not_linked', NOT_LINKED), refused('github_not_linked', NOT_LINKED)], [{ linked: false, repos: [], installations: [] }])
+    const authorize = vi.fn(async () => [SHOP_ROW])
+    await expect(withStderrTTY(true, () => templateDeploy('shop', {}, { api, project: PROJECT, wait: NO_WAIT, authorize, open: () => true })))
+      .rejects.toThrow(NOT_LINKED)
+    expect(authorize).toHaveBeenCalledOnce()
+    expect(posts).toHaveLength(2)
+  })
+
+  it('answers a missing-variables refusal that comes after the GitHub one too', async () => {
+    const tty = { in: process.stdin.isTTY, out: process.stdout.isTTY }
+    process.stdin.isTTY = true
+    process.stdout.isTTY = true
+    try {
+      const missing = new ApiError(400, 'missing_variables', { error: 'missing_variables', missing: [{ name: 'API_KEY', key: 'API_KEY' }] })
+      const { api, posts } = githubPlatform([refused('github_not_linked', NOT_LINKED), missing], [{ linked: false, repos: [], installations: [] }])
+      await withStderrTTY(true, () => templateDeploy('shop', {}, { api, project: PROJECT, wait: NO_WAIT, ask: async () => 'k-1', authorize: async () => [SHOP_ROW], open: () => true }))
+      expect(posts).toHaveLength(3)
+      expect(posts[2]).toMatchObject({ templateCode: 'shop', variables: { API_KEY: 'k-1' } })
     } finally {
       process.stdin.isTTY = tty.in
       process.stdout.isTTY = tty.out

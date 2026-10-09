@@ -572,6 +572,7 @@ tpl.command('deploy <code-or-dir-or-url>').description('Deploy a template onto a
   .option('--set <NAME=value>', 'set a template variable (repeatable)', (v: string, prev: string[]) => [...prev, v], [] as string[])
   .option('-y, --yes', 'non-interactive: missing required variables fail with a --set list instead of prompting')
   .option('--json')
+  .addHelpText('after', "\nA service with source builds from a GitHub repo when the template deploys. A public repo needs nothing more. A private one needs your GitHub account linked and able to read it: on a terminal or with --agent, this command links GitHub, opens the GitHub App install for a repo it cannot reach yet, waits for access and deploys again. With --json, or outside a terminal without --agent, it prints the platform's message and exits non-zero.")
   .action(guard((target, o) => template.templateDeploy(target, o)))
 // Authoring: the org's community templates, the same drafts the console editor changes.
 tpl.command('create').description("Create a community template draft from the linked project (or --project), or an empty one with --blank. Prints its code, status and the console editor link")
@@ -591,6 +592,7 @@ tpl.command('draft <code>').description('Show one community template draft: its 
 tpl.command('edit <code>').description("Change a draft with the console editor's PATCH body as JSON. Without expectedUpdatedAt in it, the draft's current one is used")
   .requiredOption('--patch <file>', 'JSON file holding the PATCH body, or - to read it from stdin')
   .option('--org <id>', "target org (default: linked project's org)").option('--json')
+  .addHelpText('after', '\nA service built from a GitHub repo is added with the services entry {"name": "web", "add": {"type": "compute", "source": {"owner": "acme", "repo": "shop", "branch": "main"}, "port": 3000}}, and "port": null makes it a worker. {"name": "web", "settings": {"source": {"owner": "acme", "repo": "shop", "branch": "release"}}} changes its branch, rootDir or buildCommand and replaces the whole source. A service keeps its kind, so switching between image and source takes a new service. A private repo deploys only for someone whose linked GitHub account can read it.')
   .action(guard((code, o) => templateAuthor.templateEdit(code, o)))
 tpl.command('regenerate <code>').description('Rebuild a draft from its project as the project is now, keeping your edits. A blocked item is fixed in the project, then regenerated')
   .option('--org <id>', "target org (default: linked project's org)").option('--json')
