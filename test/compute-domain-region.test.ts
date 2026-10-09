@@ -85,7 +85,7 @@ describe('domainGuidanceLines (after attach: what to do next, from the platform 
 
   // The printed follow-up must reach the same service on the same branch: without --group it dies
   // on the very ambiguity error this feature raises, and without --branch it checks the linked
-  // branch instead (cubic P2).
+  // branch instead.
   it('the follow-up check command carries the resolved group and the invoked branch', () => {
     expect(domainGuidanceLines(bound, { group: 'api' }).at(-1)).toBe('then: insta domain check app.customer.com --group api')
     expect(domainGuidanceLines(bound, { group: 'api', branch: 'preview' }).at(-1))
@@ -179,7 +179,7 @@ describe('domainStatusLines (check: every stage + where it routes)', () => {
 
   // A PLANE answer always carries `ssl`, so a plane answer with no `origin` is a daemon too old to
   // say where the hostname lands: routing is UNCONFIRMED and must not be reported as serving —
-  // "the plane said active" is not evidence that traffic reaches this region (r2d2 round 1 Critical).
+  // "the plane said active" is not evidence that traffic reaches this region.
   it('failure shape 3 — a plane daemon reports no routing target: UNCONFIRMED, never serving', () => {
     const { origin: _o, edgeOrigin: _e, originOk: _k, ...noReport } = active
     const lines = domainStatusLines(noReport as DomainView)
@@ -215,7 +215,7 @@ describe('domainStatusLines (check: every stage + where it routes)', () => {
   })
 
   // An error STATE with no reason attached is still an error state — a row that says `error` has
-  // not been observed serving, and printing a URL beside it is the blackhole lie (cubic P2).
+  // not been observed serving, and printing a URL beside it is the blackhole lie.
   it('error state with NO reason: still blocked, and the missing reason is said out loud', () => {
     const lines = domainStatusLines({ ...active, status: 'error' })
     expect(lines).toContain('  error       error       (the plane reported an error state with no reason)')
@@ -223,7 +223,7 @@ describe('domainStatusLines (check: every stage + where it routes)', () => {
   })
 
   // configured: true alongside an outstanding record blocker means the verdict and the record set
-  // disagree — report the disagreement rather than papering over it with a URL (cubic P1).
+  // disagree — report the disagreement rather than papering over it with a URL.
   it('configured but a record is still missing: the disagreement wins, not the verdict', () => {
     const lines = domainStatusLines({ ...active, dns: active.dns.map((d) => (d.type === 'TXT' ? { ...d, status: 'missing' } : d)) })
     expect(lines.at(-1)).toBe('  serving     not yet     (add the ownership TXT)')
@@ -231,7 +231,7 @@ describe('domainStatusLines (check: every stage + where it routes)', () => {
   })
 
   // An unchecked TXT (no per-record status on a not-yet-configured answer) blocks too: "we have not
-  // looked" is not "it is there" (cubic P3 — this branch was previously untested).
+  // looked" is not "it is there".
   it('ownership unchecked: rendered as unchecked AND counted as a blocker', () => {
     const noStatus = { ...bound, dns: bound.dns.map(({ status: _s, ...d }) => d) }
     const lines = domainStatusLines(noStatus)
@@ -240,7 +240,7 @@ describe('domainStatusLines (check: every stage + where it routes)', () => {
   })
 
   // No records at all: the stages are still drawn. An omitted stage reads as "not required", when
-  // the truth is the platform told us nothing to publish (cubic P2).
+  // the truth is the platform told us nothing to publish.
   it('no records from the platform: ownership and cname stages are still drawn, as unknown blockers', () => {
     const lines = domainStatusLines({ ...bound, dns: [] })
     expect(lines[1]).toBe('  ownership   unknown     the platform returned no ownership TXT for this domain — nothing to publish yet; ask an operator')
@@ -248,10 +248,10 @@ describe('domainStatusLines (check: every stage + where it routes)', () => {
     expect(lines.at(-1)).toContain('no ownership TXT from the platform')
   })
 
-  // The PARTIAL case (r2d2 round 2 Critical): records came back, but not the routing one. Keying
-  // the "no routing record" stage on an entirely empty set let a payload carrying only the
-  // ownership TXT skip the stage and add no blocker — so a configured answer with a live cert and
-  // a confirmed origin printed a URL for a hostname with nothing pointing at us.
+  // The PARTIAL case: records came back, but not the routing one. Keying the "no routing record"
+  // stage on an entirely empty set would let a payload carrying only the ownership TXT skip the
+  // stage and add no blocker — a configured answer with a live cert and a confirmed origin would
+  // print a URL for a hostname with nothing pointing at us.
   it('records present but NO routing record: the stage is still drawn, blocks, and never says serving', () => {
     const txtOnly: DomainView = {
       ...bound, configured: true, status: 'active', ssl: 'active',
@@ -279,9 +279,9 @@ describe('domainStatusLines (check: every stage + where it routes)', () => {
     expect(lines.join('\n')).not.toContain('add CNAME customer.com')
   })
 
-  // r2d2 round 3 Critical: the blocker rule reached only the ownership TXT and the FIRST routing
-  // record. Every other record rendered from `configured` alone and blocked nothing, so a payload
-  // whose SECOND apex record was bad still ended in `serving https://…`.
+  // The blocker rule must reach every routing record, not just the ownership TXT and the FIRST
+  // one: a record rendered from `configured` alone blocks nothing, so a payload whose SECOND apex
+  // record is bad would still end in `serving https://…`.
   it('apex A/AAAA pair with the AAAA missing: both routing records are judged, and it does not serve', () => {
     const apex: DomainView = {
       // Fly-shaped (an apex is Fly's A/AAAA path): no ownership TXT, no plane ssl/origin fields.

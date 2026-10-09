@@ -195,6 +195,29 @@ export function applyServiceLines(services: ApplyServiceOutcome[]): string[] {
   })
 }
 
+// POST one entry to /apply and settle what `secrets set` and `secrets unset` share: the approval
+// gate, the exit code, and the --json document. Returns null when the caller has nothing left to
+// print — the platform gated the write, or --json already carried the outcome.
+async function applyEntry(
+  d: SecretsDeps,
+  name: string,
+  branch: string | undefined,
+  entry: { kind: 'set' | 'delete' },
+  opts: { service?: string; json?: boolean },
+): Promise<{ verdict: ApplyVerdict; services: ApplyServiceOutcome[] } | null> {
+  const res = await d.api.rawRequest('POST', `/projects/${d.projectId}/apply`, { branch: branch ?? d.linkedBranch, entries: [entry] })
+  if (handleApproval(res, opts.json)) return null
+  const entries: ApplyEntryOutcome[] = res.body.entries ?? []
+  const services: ApplyServiceOutcome[] = res.body.services ?? []
+  const verdict = applyVerdict(entries, services)
+  process.exitCode = applyExitCode(verdict)
+  if (opts.json) {
+    printJson({ ok: verdict === 'ok', verdict, name, branch: branch ?? null, service: opts.service ?? null, entries, services })
+    return null
+  }
+  return { verdict, services }
+}
+
 // Set a user secret. Project-wide by default; --branch scopes it to one branch. --service binds
 // it to a branch service instead, which implies the current branch (binding requires one). Value
 // comes from the argument, or stdin when omitted (keeps secret values out of shell history).
@@ -214,13 +237,9 @@ export async function secretsSet(
   const branch = opts.service ? (opts.branch ?? d.linkedBranch) : opts.branch
   // The batch always deploys on ONE branch, so the top level falls back to the linked one even when the entry itself is project-wide.
   const entry = { kind: 'set' as const, name, value: v, ...(branch ? { branch } : {}), ...(opts.service ? { service: opts.service } : {}) }
-  const res = await d.api.rawRequest('POST', `/projects/${d.projectId}/apply`, { branch: branch ?? d.linkedBranch, entries: [entry] })
-  if (handleApproval(res, opts.json)) return
-  const entries: ApplyEntryOutcome[] = res.body.entries ?? []
-  const services: ApplyServiceOutcome[] = res.body.services ?? []
-  const verdict = applyVerdict(entries, services)
-  process.exitCode = applyExitCode(verdict)
-  if (opts.json) return printJson({ ok: verdict === 'ok', verdict, name, branch: branch ?? null, service: opts.service ?? null, entries, services })
+  const outcome = await applyEntry(d, name, branch, entry, opts)
+  if (!outcome) return
+  const { verdict, services } = outcome
   info(`set ${name}${opts.service ? ` → ${opts.service}` : ''} (${branch ? `branch ${branch}` : 'project-wide'})`)
   for (const line of applyServiceLines(services)) info(line)
   // Verdict note on stderr, after the per-service lines: not success, and not the same failure either.
@@ -241,15 +260,11 @@ export async function secretsUnset(
   // pair without one) — so --service defaults to the linked branch, exactly as `secrets set` does.
   const branch = opts.service ? (opts.branch ?? d.linkedBranch) : opts.branch
   const entry = { kind: 'delete' as const, name, ...(branch ? { branch } : {}), ...(opts.service ? { service: opts.service } : {}) }
-  const res = await d.api.rawRequest('POST', `/projects/${d.projectId}/apply`, { branch: branch ?? d.linkedBranch, entries: [entry] })
-  if (handleApproval(res, opts.json)) return
-  const entries: ApplyEntryOutcome[] = res.body.entries ?? []
-  const services: ApplyServiceOutcome[] = res.body.services ?? []
-  const verdict = applyVerdict(entries, services)
-  process.exitCode = applyExitCode(verdict)
   // The EFFECTIVE branch, not the flag: with --service and no --branch the scope that was deleted
   // is the linked branch's, and the output has to say which scope it actually touched.
-  if (opts.json) return printJson({ ok: verdict === 'ok', verdict, name, branch: branch ?? null, service: opts.service ?? null, entries, services })
+  const outcome = await applyEntry(d, name, branch, entry, opts)
+  if (!outcome) return
+  const { verdict, services } = outcome
   const scope = opts.service ? `${opts.service}, branch ${branch}` : branch ? `branch ${branch}` : 'project-wide'
   info(`unset ${name} (${scope})`)
   for (const line of applyServiceLines(services)) info(line)

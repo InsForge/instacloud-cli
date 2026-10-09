@@ -16,7 +16,7 @@
 //      forward because it can (see buildRequest).
 import { randomUUID } from 'node:crypto'
 import { ApiClient, ApiError, requireProject } from '../api.js'
-import { die, handleApproval, info, printJson, refuse } from '../util.js'
+import { die, handleApproval, info, isWebUrl, printJson, refuse } from '../util.js'
 import { q, resolveSoleService } from './services.js'
 
 // ---- wire shapes (the fields this module reads; the platform sends more) ----
@@ -321,7 +321,7 @@ export function assertTargetFlags(o: TargetOpts, partial = false): void {
   if (o.url && o.service) throw new Error('--url and --service name two different targets — pass one')
   if (o.path !== undefined && !o.service) throw new Error('--path applies to --service (an external target carries its path in the --url)')
   if (!partial && !o.url && !o.service) throw new Error('name a target: --url <https://…> or --service <name> [--path /api/cron]')
-  if (o.url !== undefined && !/^https?:\/\//i.test(o.url)) throw new Error(`--url must be an absolute http(s) URL, got: ${o.url}`)
+  if (o.url !== undefined && !isWebUrl(o.url)) throw new Error(`--url must be an absolute http(s) URL, got: ${o.url}`)
   if (o.path !== undefined && !o.path.startsWith('/')) throw new Error(`--path must start with /, got: ${o.path}`)
 }
 
