@@ -576,7 +576,9 @@ export async function templateRollback(service: string, opts: TemplateRollbackOp
   const out = quiet ? () => {} : info
   // Destructive, and its two warnings are load-bearing: a machine-readable run must say --yes out
   // loud rather than roll back unseen through a pipe.
-  if (opts.json && !opts.yes) throw new Error('rollback --json needs --yes: it does not restore data the app migrated, so it will not run without being told to')
+  // Same rule as `template publish`: ask on a terminal, anywhere else (a pipe, --json) say --yes.
+  const tty = !opts.json && !opts.yes && !!process.stdin.isTTY && !!process.stdout.isTTY
+  if (!opts.yes && !tty) throw new Error('rollback needs --yes without a terminal to confirm on: it does not restore data the app migrated, so nothing was rolled back')
   const api = deps.api ?? (await ApiClient.load())
   const p = deps.project ?? (await requireProject())
   const branchName = opts.branch ?? p.branch
@@ -586,8 +588,7 @@ export async function templateRollback(service: string, opts: TemplateRollbackOp
   // regrets a rollback, and they are not recoverable by running it again.
   out('Going back restores the image, the start command, the port and the recorded variables.')
   out('It does not restore data the app migrated under the newer version, and a volume only grows.')
-  const tty = !opts.json && !opts.yes && !!process.stdin.isTTY && !!process.stdout.isTTY
-  if (!opts.yes && tty) {
+  if (tty) {
     const go = await clack.confirm({ message: `Return ${service} to the version it was upgraded from?` })
     if (clack.isCancel(go)) throw new CliCancel()
     if (!go) return

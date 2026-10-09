@@ -165,4 +165,10 @@ describe('upgrade and rollback flows', () => {
       await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(re)
     }
   })
+
+  it('rollback without a terminal or --yes rolls back nothing and fails', async () => {
+    const { api, posts } = fakeApi()
+    await expect(templateRollback('n8n', {}, deps(api))).rejects.toThrow(/--yes/)
+    expect(posts).toEqual([])
+  })
 })
