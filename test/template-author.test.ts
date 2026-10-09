@@ -180,6 +180,14 @@ describe('draft rendering', () => {
       '  jobs (worker, builds from acme/jobs (default branch))',
     ])
   })
+  it('prints no control character of a stored source: ESC and C1 CSI are dropped from every field', () => {
+    const t = view({ services: [
+      { name: 'web', type: 'web', image: null, source: { owner: 'ac\u001b[31mme', repo: 'sh\u009bop', branch: 'main\u001b[31m', rootDir: 'apps\u009b31m/web' }, port: 3000, healthcheck: '/', volume: false, mountPath: null, removed: false, variables: [] },
+    ] })
+    const out = draftLines(t, null).join('\n')
+    expect(out).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/)
+    expect(out).toContain('builds from ac[31mme/shop@main[31m (apps31m/web/)')
+  })
 })
 
 describe('template drafts', () => {

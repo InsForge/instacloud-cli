@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { agentMode } from '../agent.js'
 import { ApiClient, ApiError, requireProject } from '../api.js'
-import type { ProjectConfig } from '../config.js'
+import { safeText, type ProjectConfig } from '../config.js'
 import { info, printJson, refuse } from '../util.js'
 import { resolveOrgId } from './billing.js'
 import { confirmOnTerminal } from './postgres.js'
@@ -107,7 +107,8 @@ function serviceText(s: TemplateDraftService): string {
     // Only a web service has one, and a platform that does not serve the field says nothing.
     s.type === 'web' && s.healthcheck !== undefined ? (s.healthcheck ? `health check ${s.healthcheck}` : 'no health check') : undefined,
     s.image ? `image ${s.image}` : undefined,
-    s.source ? `builds from ${s.source.owner}/${s.source.repo}${s.source.branch ? `@${s.source.branch}` : ' (default branch)'}${s.source.rootDir ? ` (${s.source.rootDir}/)` : ''}` : undefined,
+    // A stored draft's text, so stripped of control characters before it reaches a terminal.
+    s.source ? `builds from ${safeText(s.source.owner)}/${safeText(s.source.repo)}${s.source.branch ? `@${safeText(s.source.branch)}` : ' (default branch)'}${s.source.rootDir ? ` (${safeText(s.source.rootDir)}/)` : ''}` : undefined,
     // A null mount path on a volume is the default /data.
     s.volume ? `volume at ${s.mountPath ?? '/data'}` : undefined,
     s.removed ? 'removed' : undefined,

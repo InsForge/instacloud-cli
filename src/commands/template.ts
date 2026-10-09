@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import * as clack from '@clack/prompts'
 import { ApiClient, ApiError, requireProject } from '../api.js'
-import type { ProjectConfig } from '../config.js'
+import { safeText, type ProjectConfig } from '../config.js'
 import { info, printJson, handleApproval, renderNextActions, CliCancel } from '../util.js'
 import { MANIFEST_FILE, collectManifestVariables, loadTemplateManifest, type TemplateManifest, type TemplateVar } from '../template-manifest.js'
 import { parseGitHubTemplateUrl, fetchGitHubTemplate, type GitHubTarget, type GitHubSource, type FetchedTemplate } from '../github-source.js'
@@ -201,8 +201,11 @@ export function unreachableReposFrom(body: any): RepoRef[] | null {
   const byName = new Map<string, RepoRef>()
   for (const r of Array.isArray(body.repos) ? body.repos : []) {
     if (typeof r?.owner !== 'string' || typeof r?.repo !== 'string') continue
-    const key = `${r.owner}/${r.repo}`.toLowerCase()
-    if (!byName.has(key)) byName.set(key, { owner: r.owner, repo: r.repo })
+    // Platform text that findCallerRepo prints and throws, so control characters go here.
+    const owner = safeText(r.owner)
+    const repo = safeText(r.repo)
+    const key = `${owner}/${repo}`.toLowerCase()
+    if (!byName.has(key)) byName.set(key, { owner, repo })
   }
   return [...byName.values()]
 }
@@ -463,7 +466,7 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
       const repos = askedGitHub || !canAuthorize ? null : unreachableReposFrom(e.body)
       if (!repos?.length) throw e
       askedGitHub = true
-      process.stderr.write(`${e.message}\n`)
+      process.stderr.write(`${safeText(e.message)}\n`)
       for (const ref of repos) await findCallerRepo(api, ref, deps.authorize ?? authorizeTerminal, true, deps.wait, deps.open)
     }
   }

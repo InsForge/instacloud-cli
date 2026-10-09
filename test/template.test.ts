@@ -112,6 +112,27 @@ describe('validateManifest', () => {
     for (const buildCommand of ['x'.repeat(1001), false]) expect(src({ buildCommand }), String(buildCommand).slice(0, 8)).toEqual(['services.web.source.buildCommand must be a command of at most 1000 characters'])
   })
 
+  // Exclusion counts the keys present, the required sentence counts the usable ones. Same rule as the platform.
+  it('refuses an empty image or build beside another way as mutually exclusive', () => {
+    const svc = (extra: Record<string, unknown>) =>
+      ({ code: 'x', version: '1', services: { web: { type: 'web', port: 3000, ...extra } } }) as unknown as TemplateManifest
+    const exclusive = ['services.web: image, build and source are mutually exclusive']
+    const src = { owner: 'acme', repo: 'shop' }
+    expect(validateManifest(svc({ image: '', source: src }))).toEqual(exclusive)
+    expect(validateManifest(svc({ build: '', source: src }))).toEqual(exclusive)
+    expect(validateManifest(svc({ image: '', build: 'b' }))).toEqual(exclusive)
+    expect(validateManifest(svc({ image: 'a:1', build: '' }))).toEqual(exclusive)
+  })
+  it('keeps the required sentence for an empty image or build on its own', () => {
+    const svc = (extra: Record<string, unknown>) =>
+      ({ code: 'x', version: '1', services: { web: { type: 'web', port: 3000, ...extra } } }) as unknown as TemplateManifest
+    const required = ['services.web: one of image, build or source is required']
+    expect(validateManifest(svc({ image: '' }))).toEqual(required)
+    expect(validateManifest(svc({ build: '' }))).toEqual(required)
+    // Nothing usable, so the required check fails first and exclusion is never asked.
+    expect(validateManifest(svc({ image: '', build: '' }))).toEqual(required)
+  })
+
   // The platform accepts a managed postgres (provisioning/templateManifest.ts). This validator
   // used to reject it, so a template pairing an app with a database could not be deployed from a
   // local directory or a GitHub URL at all, though the registry lane took it happily.
@@ -641,6 +662,10 @@ describe('unreachableReposFrom', () => {
   it('drops an entry without a string owner and repo', () => {
     expect(unreachableReposFrom({ code: 'github_not_linked', repos: [{ owner: 'acme' }, null, 'acme/shop', { owner: 'acme', repo: 7 }] })).toEqual([])
     expect(unreachableReposFrom({ code: 'github_not_linked' })).toEqual([])
+  })
+  it('drops control characters from a repo name, as the CLI prints it later', () => {
+    const repos = [{ owner: 'ac\u001b[31mme', repo: 'sh\u009bop' }, { owner: 'acme', repo: 'api' }, { owner: 'ac\u001bme', repo: 'a\u009bpi' }]
+    expect(unreachableReposFrom({ code: 'github_not_linked', repos })).toEqual([{ owner: 'ac[31mme', repo: 'shop' }, { owner: 'acme', repo: 'api' }])
   })
   it('leaves every other error alone, the publish refusal included', () => {
     const others = [{ error: 'missing_variables', missing: [] }, { code: 'template_source_unreachable', repos: [{ owner: 'acme', repo: 'shop' }] }, { error: 'github_not_linked' }, undefined, null]
@@ -1199,6 +1224,37 @@ describe('templateDeploy', () => {
       process.stdin.isTTY = tty.in
       process.stdout.isTTY = tty.out
     }
+  })
+
+  it('answers a missing-variables refusal first and a GitHub refusal second, once each', async () => {
+    const tty = { in: process.stdin.isTTY, out: process.stdout.isTTY }
+    process.stdin.isTTY = true
+    process.stdout.isTTY = true
+    try {
+      const missing = new ApiError(400, 'missing_variables', { error: 'missing_variables', missing: [{ name: 'API_KEY', key: 'API_KEY' }] })
+      const { api, calls, posts } = githubPlatform([missing, refused('github_not_linked', NOT_LINKED)], [{ linked: false, repos: [], installations: [] }])
+      const ask = vi.fn(async () => 'k-1')
+      const authorize = vi.fn(async () => [SHOP_ROW])
+      await withStderrTTY(true, () => templateDeploy('shop', {}, { api, project: PROJECT, wait: NO_WAIT, ask, authorize, open: () => true }))
+      expect(ask).toHaveBeenCalledOnce()
+      expect(authorize).toHaveBeenCalledOnce()
+      expect(calls).toEqual(['GET /templates/shop', 'POST /projects/proj_1/template-deployments', 'POST /projects/proj_1/template-deployments', 'GET /me/github/repos', ...DEPLOYED])
+      expect(posts).toHaveLength(3)
+      expect(posts[1]).toMatchObject({ variables: { API_KEY: 'k-1' } })
+      expect(posts[2]).toEqual(posts[1])
+      expect(stdout.join('')).toContain('template shop deployed to branch main')
+    } finally {
+      process.stdin.isTTY = tty.in
+      process.stdout.isTTY = tty.out
+    }
+  })
+
+  it("prints the platform's message without control characters before it links GitHub", async () => {
+    const dirty = `${NOT_LINKED}\u001b]0;pwned\u0007 \u009b31m`
+    const { api } = githubPlatform([refused('github_not_linked', dirty)], [{ linked: false, repos: [], installations: [] }])
+    await withStderrTTY(true, () => templateDeploy('shop', {}, { api, project: PROJECT, wait: NO_WAIT, authorize: async () => [SHOP_ROW], open: () => true }))
+    expect(stderr.join('')).toContain(`${NOT_LINKED}]0;pwned 31m\n`)
+    expect(stderr.join('')).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/)
   })
 })
 

@@ -163,10 +163,10 @@ export function validateManifest(m: TemplateManifest): string[] {
     const type = typeof svc.type === 'string' ? svc.type : undefined
     // Every other type, and every field and env on it, is the platform's to judge. It answers 400 with its own list.
     if (!type || !COMPUTE_TYPES.includes(type)) continue
-    // Present, not truthy: a malformed source is reported by sourceProblems, never read as absent.
-    const ways = [!!svc.image, !!svc.build, svc.source !== undefined].filter(Boolean).length
-    if (ways > 1) problems.push(`${where}: image, build and source are mutually exclusive`)
-    if (ways === 0) problems.push(`${where}: one of image, build or source is required`)
+    // The platform's order: required check first, then exclusion by keys present.
+    const present = [svc.image, svc.build, svc.source].filter((v) => v !== undefined).length
+    if (!svc.image && !svc.build && svc.source === undefined) problems.push(`${where}: one of image, build or source is required`)
+    else if (present > 1) problems.push(`${where}: image, build and source are mutually exclusive`)
     if (svc.source !== undefined) problems.push(...sourceProblems(where, svc.source))
     // A parsed YAML document holds whatever the author typed, so both scalars are type-checked the
     // platform's way BEFORE any rule reads them as strings.
