@@ -22,12 +22,16 @@ export type ManifestEnv = {
   optional?: Record<string, VarSpec | string>
 }
 
+// The platform API's SourceInput names. The start command stays in the service's `command`.
+export type ManifestSource = { owner?: string; repo?: string; branch?: string; rootDir?: string; buildCommand?: string }
+
 export type ManifestService = {
   type?: string // web and worker are judged here, every other type (postgres, redis, mysql, mongodb, storage) is the platform's call
   pgVersion?: number // postgres only, a Postgres major the platform offers, checked by the platform
   public?: boolean // storage only, anonymous public-read, checked by the platform
   image?: string
   build?: string
+  source?: ManifestSource // a GitHub repo the platform builds at deploy, instead of image or build
   port?: number
   healthcheck?: string
   volume?: boolean // needs a /data disk; the platform owns the size
@@ -67,6 +71,9 @@ export const ENV_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/
 const GENERATOR_RE = /^secret:([1-9]\d{0,2})$/
 // The platform's HEALTHCHECK_RE (src/provisioning/templateManifest.ts), verbatim.
 const HEALTHCHECK_RE = /^\/(?!\/)[A-Za-z0-9\-._~!$&'()*+,;=:@%/?]*$/
+// GitHub's grammars for a source's owner and repo, as the platform parser has them.
+const GITHUB_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/
+const GITHUB_REPO_RE = /^[A-Za-z0-9._-]{1,100}$/
 
 // The compute vocabulary every CLI has known. Any other type is the platform's to accept or refuse.
 const COMPUTE_TYPES = ['web', 'worker']
@@ -111,6 +118,27 @@ function asVarSpec(v: VarSpec | string | null | undefined): VarSpec {
   return v ?? {}
 }
 
+// The platform parser's `source` rules, every problem at once. Unknown keys are its call.
+function sourceProblems(where: string, raw: unknown): string[] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [`${where}.source must be a map`]
+  const s = raw as Record<string, unknown>
+  const problems: string[] = []
+  if (typeof s.owner !== 'string' || !GITHUB_OWNER_RE.test(s.owner)) problems.push(`${where}.source.owner must be a GitHub user or organization name`)
+  if (typeof s.repo !== 'string' || !GITHUB_REPO_RE.test(s.repo) || s.repo === '.' || s.repo === '..') problems.push(`${where}.source.repo must be a GitHub repository name`)
+  if (s.branch !== undefined) {
+    const b = typeof s.branch === 'string' ? s.branch.trim() : ''
+    if (!b || b.length > 255 || /\s/.test(b) || b.includes('..') || b.startsWith('/') || b.endsWith('/')) problems.push(`${where}.source.branch must be a branch name`)
+  }
+  if (s.rootDir !== undefined) {
+    const d = typeof s.rootDir === 'string' ? s.rootDir.trim() : null
+    if (d === null || d.startsWith('/') || d.split('/').includes('..')) problems.push(`${where}.source.rootDir must be a relative path inside the repository`)
+  }
+  if (s.buildCommand !== undefined && (typeof s.buildCommand !== 'string' || s.buildCommand.trim().length > 1000)) {
+    problems.push(`${where}.source.buildCommand must be a command of at most 1000 characters`)
+  }
+  return problems
+}
+
 /** All local validation problems, empty when the manifest is deployable. */
 export function validateManifest(m: TemplateManifest): string[] {
   const problems: string[] = []
@@ -135,8 +163,11 @@ export function validateManifest(m: TemplateManifest): string[] {
     const type = typeof svc.type === 'string' ? svc.type : undefined
     // Every other type, and every field and env on it, is the platform's to judge. It answers 400 with its own list.
     if (!type || !COMPUTE_TYPES.includes(type)) continue
-    if (svc.image && svc.build) problems.push(`${where}: image and build are mutually exclusive`)
-    if (!svc.image && !svc.build) problems.push(`${where}: one of image or build is required`)
+    // Present, not truthy: a malformed source is reported by sourceProblems, never read as absent.
+    const ways = [!!svc.image, !!svc.build, svc.source !== undefined].filter(Boolean).length
+    if (ways > 1) problems.push(`${where}: image, build and source are mutually exclusive`)
+    if (ways === 0) problems.push(`${where}: one of image, build or source is required`)
+    if (svc.source !== undefined) problems.push(...sourceProblems(where, svc.source))
     // A parsed YAML document holds whatever the author typed, so both scalars are type-checked the
     // platform's way BEFORE any rule reads them as strings.
     const image = svc.image !== undefined ? scalarString(svc.image) : undefined

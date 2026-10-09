@@ -84,12 +84,31 @@ describe('validateManifest', () => {
     const m = { ...MANIFEST, services: { app: { type: 'worker', image: 'nginx:latest' } } }
     expect(validateManifest(m).join('\n')).toMatch(/not a pin/)
   })
-  // The CLI judges only the compute vocabulary, web and worker. image XOR build is its rule.
-  it('requires exactly one of image/build on a web or worker service', () => {
+  // The CLI judges only web and worker. Exactly one of image, build or source is its rule.
+  it('requires exactly one of image, build or source on a web or worker service', () => {
     const m: TemplateManifest = { code: 'x', version: '1', services: { a: { type: 'web', image: 'a:1', build: 'b', healthcheck: '/' }, b: { type: 'worker' } } }
     const problems = validateManifest(m)
-    expect(problems).toContain('services.a: image and build are mutually exclusive')
-    expect(problems).toContain('services.b: one of image or build is required')
+    expect(problems).toContain('services.a: image, build and source are mutually exclusive')
+    expect(problems).toContain('services.b: one of image, build or source is required')
+  })
+  // Spec 2026-10-08 template GitHub sources: the platform parser's rules, said before the upload.
+  it('takes source as the third way, with the platform field rules', () => {
+    const svc = (extra: Record<string, unknown>) =>
+      ({ code: 'x', version: '1', services: { web: { type: 'web', port: 3000, ...extra } } }) as unknown as TemplateManifest
+    const src = (s: Record<string, unknown>) => validateManifest(svc({ source: { owner: 'acme', repo: 'shop', ...s } }))
+    expect(src({})).toEqual([])
+    expect(src({ branch: 'release/2', rootDir: './apps/web', buildCommand: 'pnpm build' })).toEqual([])
+    expect(src({ rootDir: '.', buildCommand: '' })).toEqual([])
+    expect(validateManifest({ code: 'x', version: '1', services: { jobs: { type: 'worker', source: { owner: 'acme', repo: 'jobs' } } } })).toEqual([])
+    expect(validateManifest(svc({ image: 'a:1', source: { owner: 'acme', repo: 'shop' } }))).toEqual(['services.web: image, build and source are mutually exclusive'])
+    expect(validateManifest(svc({ source: 'acme/shop' }))).toEqual(['services.web.source must be a map'])
+    // An unknown key is the platform's call, as an unknown service key is.
+    expect(src({ commit: 'abc' })).toEqual([])
+    for (const owner of ['', '-acme', 'a'.repeat(40), 'ac_me', 42]) expect(src({ owner }), String(owner)).toEqual(['services.web.source.owner must be a GitHub user or organization name'])
+    for (const repo of ['', '.', '..', 'a b', 'a/b', 'r'.repeat(101)]) expect(src({ repo }), repo).toEqual(['services.web.source.repo must be a GitHub repository name'])
+    for (const branch of ['', 'a b', 'a..b', '/main', 'main/', 'b'.repeat(256), 7]) expect(src({ branch }), String(branch)).toEqual(['services.web.source.branch must be a branch name'])
+    for (const rootDir of ['/apps/web', '../web', 'apps/../../web', 3]) expect(src({ rootDir }), String(rootDir)).toEqual(['services.web.source.rootDir must be a relative path inside the repository'])
+    for (const buildCommand of ['x'.repeat(1001), false]) expect(src({ buildCommand }), String(buildCommand).slice(0, 8)).toEqual(['services.web.source.buildCommand must be a command of at most 1000 characters'])
   })
 
   // The platform accepts a managed postgres (provisioning/templateManifest.ts). This validator
