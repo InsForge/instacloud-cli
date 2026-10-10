@@ -114,7 +114,22 @@ function defaultDatabasePort(type: string): number {
 
 // ---- commands ----
 
-export type ServicesAddOpts = { branch?: string; public?: boolean; image?: string; port?: string; region?: string; alwaysOn?: boolean; volume?: string; mountPath?: string; pgVersion?: string; json?: boolean }
+export type ServicesAddOpts = { branch?: string; public?: boolean; image?: string; port?: string; endpoint?: string; region?: string; alwaysOn?: boolean; volume?: string; mountPath?: string; pgVersion?: string; json?: boolean }
+
+// How a compute service is reached: http (the default HTTPS domain) or tcp (raw TCP on its port at
+// its own IPv6 address). Checked locally so a typo fails before any network call; which ports tcp
+// accepts is the platform's answer, not repeated here.
+export function parseEndpoint(raw: string): 'http' | 'tcp' {
+  const v = raw.trim().toLowerCase()
+  if (v !== 'http' && v !== 'tcp') throw new Error(`--endpoint must be http or tcp, got: ${raw}`)
+  return v
+}
+
+// Where a tcp service is dialed. The host is set once a deploy has confirmed it; before that the
+// row only knows its port.
+export function tcpAddress(s: { endpoint_host?: string | null; port?: number | null }): string {
+  return s.endpoint_host ? `tcp://${s.endpoint_host}:${s.port}` : `tcp/${s.port ?? '?'} (address after the first deploy)`
+}
 
 // Map service-add options to the platform POST body. Pure, so it's unit-tested without a network
 // mock (mirrors deployRequestBody in deploy.ts). Validation (which options are valid for which
@@ -123,6 +138,7 @@ export function servicesAddRequestBody(type: string, name: string, branch: strin
   return {
     type, name, ...(branch ? { branch } : {}), public: !!opts.public,
     ...(opts.image ? { image: opts.image } : {}), ...(opts.port !== undefined ? { port: parsePort(opts.port, { allowZero: type === 'compute' }) } : {}),
+    ...(opts.endpoint !== undefined ? { endpoint: parseEndpoint(opts.endpoint) } : {}),
     ...(opts.region ? { region: opts.region } : {}),
     // Sent whenever the flag was given, false included: the birth default is platform config
     // (INSTA_COMPUTE_ALWAYS_ON_DEFAULT, scale-to-zero unless set), so an explicit --no-always-on
@@ -142,6 +158,10 @@ export async function servicesAdd(type: string, name: string, opts: ServicesAddO
   if (opts.port !== undefined) {
     if (type !== 'compute') throw new Error('--port is only valid for compute services')
     parsePort(opts.port, { allowZero: true })
+  }
+  if (opts.endpoint !== undefined) {
+    if (type !== 'compute') throw new Error('--endpoint is only valid for compute services')
+    parseEndpoint(opts.endpoint)
   }
   // Presence, not truthiness: `--no-always-on` is an explicit false and is just as compute-only.
   if (opts.alwaysOn !== undefined && type !== 'compute') throw new Error(alwaysOnTypeError(type))
@@ -176,13 +196,14 @@ export async function servicesAdd(type: string, name: string, opts: ServicesAddO
 
 // The `services add` success line. Pure, so the badge's placement is unit-tested: a template string
 // nothing asserts on silently loses a segment.
-export function serviceAddedLine(type: string, name: string, branch: string | undefined, svc: { id: string; type: string; public?: boolean; image?: string; port?: number; volume_gib?: number | null; volume_mount_path?: string | null; region?: string; domain?: string; pg_version?: number | null }): string {
+export function serviceAddedLine(type: string, name: string, branch: string | undefined, svc: { id: string; type: string; public?: boolean; image?: string; port?: number; volume_gib?: number | null; volume_mount_path?: string | null; region?: string; domain?: string; pg_version?: number | null; endpoint?: string | null; endpoint_host?: string | null }): string {
   const access = svc.type === 'storage' ? `  [${svc.public ? 'public' : 'private'}]` : ''
   const img = svc.image ? `  running ${svc.image}${svc.port ? `:${svc.port}` : ''}` : ''
   const vol = svc.volume_gib ? `  vol ${svc.volume_gib}Gi at ${svc.volume_mount_path ?? "/data"}` : ''
   // The major belongs next to the connect hint: it decides which psql/pg_dump to reach for.
   const pg = svc.type === 'postgres' ? pgBadge(svc.pg_version) : ''
-  return `added ${type} service ${name} on ${branch ?? 'default'} (${svc.id})${access}${svc.region ? `  ${svc.region}` : ''}${img}${vol}${pg}${svc.domain ? ` — ${svc.domain}` : ''}`
+  const where = svc.endpoint === 'tcp' ? ` — ${tcpAddress(svc)}` : svc.domain ? ` — ${svc.domain}` : ''
+  return `added ${type} service ${name} on ${branch ?? 'default'} (${svc.id})${access}${svc.region ? `  ${svc.region}` : ''}${img}${vol}${pg}${where}`
 }
 
 // `  pg <major>` for a postgres row, or '' when the platform sent nothing usable. The field arrives
@@ -194,7 +215,7 @@ export function pgBadge(v: unknown): string {
 
 // Render one `services list` row. Pure, so it's unit-tested without a network mock (mirrors
 // billingLines in billing.ts). Compute rows show the running image when the platform reports one.
-export function serviceListLine(s: { type: string; name: string; status: string; id: string; domain?: string; machine_count?: number; public?: boolean; image?: string; port?: number; volume_gib?: number | null; volume_mount_path?: string | null; pg_version?: number | null }): string {
+export function serviceListLine(s: { type: string; name: string; status: string; id: string; domain?: string; machine_count?: number; public?: boolean; image?: string; port?: number; volume_gib?: number | null; volume_mount_path?: string | null; pg_version?: number | null; endpoint?: string | null; endpoint_host?: string | null }): string {
   const extra = s.type === 'compute'
     ? `  x${s.machine_count}${s.volume_gib ? `  vol ${s.volume_gib}Gi at ${s.volume_mount_path ?? '/data'}` : ''}${s.image ? `  running ${s.image}${s.port ? `:${s.port}` : ''}` : ''}`
     : ['redis', 'mysql', 'mongodb'].includes(s.type) ? `  tcp/${s.port ?? defaultDatabasePort(s.type)}${s.volume_gib ? `  vol ${s.volume_gib}Gi` : ''}`
@@ -202,7 +223,9 @@ export function serviceListLine(s: { type: string; name: string; status: string;
         // Postgres major, so the reader picks matching pg_dump/psql BEFORE connecting (a newer client
         // dumps statements an older server cannot restore). Older platforms send no pg_version.
         : s.type === 'postgres' ? pgBadge(s.pg_version) : ''
-  return `${s.type}/${s.name}  [${s.status}]${extra}${s.domain ? `  ${s.domain}` : ''}  ${s.id}`
+  // A tcp compute service has no HTTP domain; its address is the tcp one.
+  const where = s.type === 'compute' && s.endpoint === 'tcp' ? `  ${tcpAddress(s)}` : s.domain ? `  ${s.domain}` : ''
+  return `${s.type}/${s.name}  [${s.status}]${extra}${where}  ${s.id}`
 }
 
 export async function servicesList(opts: { json?: boolean; branch?: string }): Promise<void> {
