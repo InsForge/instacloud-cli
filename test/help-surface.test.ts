@@ -202,3 +202,24 @@ describe('--api-url placement', () => {
     expect(`${r.stderr}${r.stdout}`, path.join(' ')).not.toContain('unknown option')
   }, 30_000)
 })
+
+// Spec 2026-10-08 template GitHub sources: the help is where a person and an agent learn `source`.
+describe('template GitHub sources in help', () => {
+  const helpOf = (...path: string[]) => {
+    const r = run([...path, '--help'])
+    expect(r.status, path.join(' ')).toBe(0)
+    return r.stdout.replace(/\s+/g, ' ')
+  }
+  it('template deploy says a source service builds from GitHub and what happens for a private repo', () => {
+    const help = helpOf('template', 'deploy')
+    expect(help).toContain('A service with source builds from a GitHub repo when the template deploys.')
+    expect(help).toContain('this command links GitHub, opens the GitHub App install for a repo it cannot reach yet, waits for access and deploys again')
+    expect(help).toContain("With --json, or outside a terminal without --agent, it prints the platform's message and exits non-zero.")
+  }, 30_000)
+  it('template edit shows how to add a service built from GitHub and change its source', () => {
+    const help = helpOf('template', 'edit')
+    expect(help).toContain('{"name": "web", "add": {"type": "compute", "source": {"owner": "acme", "repo": "shop", "branch": "main"}, "port": 3000}}')
+    expect(help).toContain('{"name": "web", "settings": {"source": {"owner": "acme", "repo": "shop", "branch": "release"}}}')
+    expect(help).toContain('A service keeps its kind. To switch between image and source, take the old one out ("delete": true for a service you added, "removed": true for one from the project) and add a new one under another name.')
+  }, 30_000)
+})

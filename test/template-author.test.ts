@@ -169,6 +169,25 @@ describe('draft rendering', () => {
     ])
     expect(draftLines(t, null)).not.toContainEqual(expect.stringMatching(/^editor:/))
   })
+  it('says a service builds from its GitHub repo, with the branch and root directory when it has them', () => {
+    const t = view({ services: [
+      { name: 'web', type: 'web', image: null, source: { owner: 'acme', repo: 'shop', branch: 'release', rootDir: 'apps/web' }, port: 3000, healthcheck: '/', volume: false, mountPath: null, removed: false, variables: [] },
+      { name: 'jobs', type: 'worker', image: null, source: { owner: 'acme', repo: 'jobs' }, port: null, volume: false, mountPath: null, removed: false, variables: [] },
+    ] })
+    expect(draftLines(t, null).slice(2, 5)).toEqual([
+      'services (2):',
+      '  web (web, port 3000, health check /, builds from acme/shop@release (apps/web/))',
+      '  jobs (worker, builds from acme/jobs (default branch))',
+    ])
+  })
+  it('prints no control character of a stored source: ESC and C1 CSI are dropped from every field', () => {
+    const t = view({ services: [
+      { name: 'web', type: 'web', image: null, source: { owner: 'ac\u001b[31mme', repo: 'sh\u009bop', branch: 'main\u001b[31m', rootDir: 'apps\u009b31m/web' }, port: 3000, healthcheck: '/', volume: false, mountPath: null, removed: false, variables: [] },
+    ] })
+    const out = draftLines(t, null).join('\n')
+    expect(out).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/)
+    expect(out).toContain('builds from ac[31mme/shop@main[31m (apps31m/web/)')
+  })
 })
 
 describe('template drafts', () => {

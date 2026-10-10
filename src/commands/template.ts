@@ -8,10 +8,11 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import * as clack from '@clack/prompts'
 import { ApiClient, ApiError, requireProject } from '../api.js'
-import type { ProjectConfig } from '../config.js'
+import { safeText, type ProjectConfig } from '../config.js'
 import { info, printJson, handleApproval, renderNextActions, CliCancel } from '../util.js'
 import { MANIFEST_FILE, collectManifestVariables, loadTemplateManifest, type TemplateManifest, type TemplateVar } from '../template-manifest.js'
 import { parseGitHubTemplateUrl, fetchGitHubTemplate, type GitHubTarget, type GitHubSource, type FetchedTemplate } from '../github-source.js'
+import { authorizeTerminal, canAuthorizeHere, findCallerRepo, type RepoRef } from './github.js'
 
 // ---- pure, unit-tested helpers ----
 
@@ -194,6 +195,21 @@ export function missingVariablesFrom(body: any): TemplateVar[] | null {
   return list.map((v: any) => ({ name: String(v.name ?? v.key ?? v), required: true, description: v.description }))
 }
 
+// The platform's GitHub access refusal, each repo once. null = some other error, not ours to read.
+export function unreachableReposFrom(body: any): RepoRef[] | null {
+  if (body?.code !== 'github_not_linked' && body?.code !== 'github_repo_unreachable') return null
+  const byName = new Map<string, RepoRef>()
+  for (const r of Array.isArray(body.repos) ? body.repos : []) {
+    if (typeof r?.owner !== 'string' || typeof r?.repo !== 'string') continue
+    // Platform text that findCallerRepo prints and throws, so control characters go here.
+    const owner = safeText(r.owner)
+    const repo = safeText(r.repo)
+    const key = `${owner}/${repo}`.toLowerCase()
+    if (!byName.has(key)) byName.set(key, { owner, repo })
+  }
+  return [...byName.values()]
+}
+
 // A deploy target that reads as a filesystem path must resolve as one — a typo'd directory should
 // not fall through to a registry lookup that 404s with a confusing "no such template".
 export function looksLikePath(target: string): boolean {
@@ -354,7 +370,8 @@ export type TemplateDeployOpts = { branch?: string; set?: string[]; yes?: boolea
 
 // What the deploy path needs of the API client — ApiClient satisfies it.
 export type TemplateApi = {
-  request: (method: string, path: string, body?: unknown, opts?: { projectId?: string }) => Promise<any>
+  // signal: findCallerRepo bounds each access poll by the time it has left.
+  request: (method: string, path: string, body?: unknown, opts?: { projectId?: string; signal?: AbortSignal }) => Promise<any>
   rawRequest: (method: string, path: string, body?: unknown) => Promise<{ status: number; body: any }>
 }
 
@@ -367,6 +384,8 @@ export type TemplateDeployDeps = {
   ask?: (v: TemplateVar) => Promise<string>
   wait?: (s: number) => Promise<void>
   fetchGitHub?: (t: GitHubTarget) => Promise<FetchedTemplate>
+  authorize?: typeof authorizeTerminal
+  open?: (url: string) => boolean
 }
 
 export async function templateDeploy(target: string, opts: TemplateDeployOpts = {}, deps: TemplateDeployDeps = {}): Promise<void> {
@@ -426,16 +445,30 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
     variables,
     ...(opts.region !== undefined ? { region: opts.region } : {}),
   }
-  let res
-  try {
-    res = await api.rawRequest('POST', `/projects/${p.projectId}/template-deployments`, body)
-  } catch (e) {
-    // The platform's own variable check is the authority; when it names what is missing in a
-    // machine-readable way, prompt from that and retry once instead of parroting an opaque 4xx.
-    const missing = e instanceof ApiError ? missingVariablesFrom(e.body) : null
-    if (!missing?.length) throw e
-    Object.assign(variables, await resolveVariables(missing, {}, { tty, ask }))
-    res = await api.rawRequest('POST', `/projects/${p.projectId}/template-deployments`, { ...body, variables })
+  // Each refusal the CLI can answer is answered once, in whichever order the platform raises them.
+  const canAuthorize = canAuthorizeHere(opts)
+  let askedVariables = false
+  let askedGitHub = false
+  let res: { status: number; body: any } | undefined
+  while (!res) {
+    try {
+      res = await api.rawRequest('POST', `/projects/${p.projectId}/template-deployments`, { ...body, variables })
+    } catch (e) {
+      if (!(e instanceof ApiError)) throw e
+      // The platform's own variable check is the authority: prompt from its list and retry.
+      const missing = askedVariables ? null : missingVariablesFrom(e.body)
+      if (missing?.length) {
+        askedVariables = true
+        Object.assign(variables, await resolveVariables(missing, {}, { tty, ask }))
+        continue
+      }
+      // A repo the deployer cannot read yet: link GitHub and wait for access here, then retry.
+      const repos = askedGitHub || !canAuthorize ? null : unreachableReposFrom(e.body)
+      if (!repos?.length) throw e
+      askedGitHub = true
+      process.stderr.write(`${safeText(e.message)}\n`)
+      for (const ref of repos) await findCallerRepo(api, ref, deps.authorize ?? authorizeTerminal, true, deps.wait, deps.open)
+    }
   }
   // handleApproval owns the whole 202 contract (hint on stderr, raw envelope on stdout under
   // --json, exit code 2) — pass the flag through as every other gated command does.
