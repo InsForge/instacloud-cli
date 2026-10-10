@@ -562,6 +562,13 @@ describe('parseSetFlags', () => {
     expect(() => parseSetFlags(['1A=2'])).toThrow(/--set expects NAME=value/)
     expect(() => parseSetFlags(['lower=2'])).toThrow(/--set expects NAME=value/)
   })
+  it('never echoes the value of a rejected pair, which is where a credential sits', () => {
+    const msg = (pair: string) => { try { parseSetFlags([pair]); return '' } catch (e) { return (e as Error).message } }
+    expect(msg('admin_token=hunter2-live-key')).toContain('admin_token')
+    expect(msg('admin_token=hunter2-live-key')).not.toContain('hunter2-live-key')
+    // A pair with no `=` is not split at all, so the whole token may itself be the value.
+    expect(msg('hunter2-live-key')).not.toContain('hunter2-live-key')
+  })
 })
 
 describe('resolveVariables', () => {

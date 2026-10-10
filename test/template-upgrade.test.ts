@@ -44,6 +44,22 @@ describe('upgradePlanLines', () => {
     p.services[0].missing_variables = ['N8N_ENCRYPTION_KEY']
     expect(upgradePlanLines(p).join('\n')).toContain('N8N_ENCRYPTION_KEY')
   })
+
+  it('an added service says it is created and lists its rows and required variables', () => {
+    const p = plan({ services: [{
+      key: 'cache', service_id: null, service_name: null, gone: false, added: true,
+      missing_variables: ['REDIS_PASSWORD'],
+      fields: [{ field: 'image', label: 'Image', deployed: null, live: null, next: 'redis:7', drifted: false, verdict: 'applied' }],
+    }] })
+    const out = upgradePlanLines(p).join('\n')
+    expect(out).toContain('cache  added by 1.4.0, created by this upgrade')
+    expect(out).toContain('cache  Image  (none) → redis:7')
+    expect(out).toContain('cache  REDIS_PASSWORD is required by 1.4.0')
+  })
+
+  it('a service the new version drops is named, and said to be left running', () => {
+    expect(upgradePlanLines(plan({ removed: ['worker'] })).join('\n')).toContain('worker  dropped by 1.4.0, left running')
+  })
 })
 
 const PROJECT = { projectId: 'proj_1', orgId: 'org_1', branch: 'main' }
@@ -262,9 +278,14 @@ describe('upgrade and rollback flows', () => {
     await expect(templateRollback('n8n', { yes: true }, deps(api))).rejects.toThrow(/ADMIN_TOKEN/)
   })
 
-  it('a typo\'d --set on rollback fails before any network access', async () => {
+  it('a typo\'d --set on rollback fails before any network access, and never prints the value', async () => {
     const { api, posts, gets } = fakeApi()
-    await expect(templateRollback('n8n', { yes: true, set: ['lowercase=1'] }, deps(api))).rejects.toThrow(/--set expects NAME=value/)
+    const err: Error = await templateRollback('n8n', { yes: true, set: ['admin_token=hunter2-live-key'] }, deps(api)).then(
+      () => { throw new Error('expected a rejection') }, (e) => e)
+    expect(err.message).toContain('--set expects NAME=value')
+    expect(err.message).toContain('admin_token')
+    // These commands take secrets through --set, and this message reaches stderr and CI logs.
+    expect(err.message).not.toContain('hunter2-live-key')
     expect(posts).toEqual([])
     expect(gets).toEqual([])
   })

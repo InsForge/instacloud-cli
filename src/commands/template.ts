@@ -142,10 +142,17 @@ export function parseSetFlags(pairs: string[]): Record<string, string> {
   const values: Record<string, string> = {}
   for (const pair of pairs) {
     const m = /^([A-Z][A-Z0-9_]{0,63})=([\s\S]*)$/.exec(pair)
-    if (!m) throw new Error(`--set expects NAME=value (NAME matching ^[A-Z][A-Z0-9_]{0,63}$), got: ${pair}`)
+    if (!m) throw new Error(`--set expects NAME=value (NAME matching ^[A-Z][A-Z0-9_]{0,63}$), got: ${redactSetPair(pair)}`)
     values[m[1]!] = m[2]!
   }
   return values
+}
+
+// --set carries secrets and this error reaches stderr and CI logs, so only the name is ever shown.
+function redactSetPair(pair: string): string {
+  const eq = pair.indexOf('=')
+  // Nothing of a pair with no `=`: it was never split, so the whole token may be the value itself.
+  return eq >= 0 ? `${pair.slice(0, eq)}=<value hidden>` : '<value hidden: no NAME= in front of it>'
 }
 
 export function missingVariablesMessage(missing: TemplateVar[]): string {
@@ -485,7 +492,8 @@ export function upgradePlanLines(plan: UpgradePlanBody): string[] {
   for (const s of plan.services) {
     const who = s.service_name ?? s.key
     if (s.gone) { lines.push(`  ${who}  no longer exists, skipped`); continue }
-    if (s.added) { lines.push(`  ${who}  added by ${plan.to_version}`); continue }
+    // Created, not reconciled: there is no live value to compare, so its rows follow below as they come.
+    if (s.added) lines.push(`  ${who}  added by ${plan.to_version}, created by this upgrade`)
     for (const f of s.fields) {
       const drift = f.drifted ? '  (you changed this, the upgrade will overwrite it)' : ''
       lines.push(`  ${who}  ${f.label}  ${f.live ?? '(none)'} → ${f.next}${drift}`)
