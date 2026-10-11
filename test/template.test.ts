@@ -562,6 +562,13 @@ describe('parseSetFlags', () => {
     expect(() => parseSetFlags(['1A=2'])).toThrow(/--set expects NAME=value/)
     expect(() => parseSetFlags(['lower=2'])).toThrow(/--set expects NAME=value/)
   })
+  it('never echoes the value of a rejected pair, which is where a credential sits', () => {
+    const msg = (pair: string) => { try { parseSetFlags([pair]); return '' } catch (e) { return (e as Error).message } }
+    expect(msg('admin_token=hunter2-live-key')).toContain('admin_token')
+    expect(msg('admin_token=hunter2-live-key')).not.toContain('hunter2-live-key')
+    // A pair with no `=` is not split at all, so the whole token may itself be the value.
+    expect(msg('hunter2-live-key')).not.toContain('hunter2-live-key')
+  })
 })
 
 describe('resolveVariables', () => {
@@ -1113,5 +1120,20 @@ describe('deployment progress', () => {
   it('marks non-terminal service states neutrally', () => {
     expect(serviceStateLines({ services: [{ name: 'app', state: 'created' }] })).toEqual(['  • app [created]'])
     expect(partialMessage({ services: [] })).toMatch(/0\/0 services healthy/)
+  })
+
+  it('a skipped service says it was stepped over, not that it is still pending', () => {
+    // The platform leaves `state: pending` on a service the user deleted and marks it `skipped`.
+    // Under the plain marks that reads as "not reached yet" — a run still working on it.
+    const line = serviceStateLines({ services: [{ name: 'side', state: 'pending', skipped: true }] })
+    expect(line).toEqual(['  - side [skipped: it no longer exists, so the run stepped over it]'])
+    expect(line[0]).not.toContain('•')
+  })
+
+  it('does not count a skipped service against the healthy total', () => {
+    // Everything the run could reach came up: 1/1, not 1/2 — a deleted service is not a shortfall.
+    const dep = { services: [{ name: 'app', state: 'healthy' }, { name: 'side', state: 'pending', skipped: true }] }
+    expect(partialMessage(dep)).toMatch(/1\/1 services healthy/)
+    expect(partialMessage(dep)).toContain('side [skipped')
   })
 })

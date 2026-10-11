@@ -133,9 +133,9 @@ describe('group shapes', () => {
     expect(r.stdout).toContain('--json')
   }, 30_000)
   // Authoring follows browsing and deploying: the console editor's drafts, one verb each.
-  it('template keeps list, info and deploy, then the authoring verbs', () => {
+  it('template keeps list, info, deploy, upgrade and rollback, then the authoring verbs', () => {
     const help = run(['template', '--help']).stdout
-    expect(commandNames(help)).toEqual(['list', 'info', 'deploy', 'create', 'drafts', 'draft', 'edit', 'regenerate', 'publish', 'unpublish', 'delete'])
+    expect(commandNames(help)).toEqual(['list', 'info', 'deploy', 'upgrade', 'rollback', 'create', 'drafts', 'draft', 'edit', 'regenerate', 'publish', 'unpublish', 'delete'])
     expect(help.replace(/\s+/g, ' ')).toContain("and author your org's community templates")
     const create = run(['template', 'create', '--help']).stdout
     for (const flag of ['--project <id>', '--blank', '--name <name>', '--org <id>', '--json']) expect(create, flag).toContain(flag)
