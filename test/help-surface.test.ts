@@ -110,14 +110,14 @@ describe('group shapes', () => {
   it('each managed database has the same verbs', () => {
     for (const type of ['redis', 'mysql', 'mongodb']) {
       const names = commandNames(run([type, '--help']).stdout)
-      expect(names, type).toEqual(['query', 'status', 'limits', 'volume', 'always-on', 'metrics', 'logs'])
+      expect(names, type).toEqual(['query', 'status', 'limits', 'volume', 'public-access', 'always-on', 'metrics', 'logs'])
     }
     expect(run(['mongodb', 'query', '--help']).stdout).toContain('--database')
     expect(run(['redis', 'query', '--help']).stdout).not.toContain('--database')
   }, 30_000)
   it('compute has scale, logs, metrics and no domain verbs; domain has attach, check, detach', () => {
     const compute = commandNames(run(['compute', '--help']).stdout)
-    expect(compute).toEqual(expect.arrayContaining(['scale', 'logs', 'metrics', 'limits', 'volume', 'always-on', 'exec', 'ssh']))
+    expect(compute).toEqual(expect.arrayContaining(['scale', 'logs', 'metrics', 'limits', 'volume', 'public-access', 'always-on', 'exec', 'ssh']))
     expect(compute).not.toEqual(expect.arrayContaining(['set-domain']))
     const domain = commandNames(run(['domain', '--help']).stdout)
     expect(domain).toEqual(expect.arrayContaining(['attach', 'check', 'detach', 'records']))

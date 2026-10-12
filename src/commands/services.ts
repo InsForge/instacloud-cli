@@ -215,7 +215,7 @@ export function pgBadge(v: unknown): string {
 
 // Render one `services list` row. Pure, so it's unit-tested without a network mock (mirrors
 // billingLines in billing.ts). Compute rows show the running image when the platform reports one.
-export function serviceListLine(s: { type: string; name: string; status: string; id: string; domain?: string; machine_count?: number; public?: boolean; image?: string; port?: number; volume_gib?: number | null; volume_mount_path?: string | null; pg_version?: number | null; endpoint?: string | null; endpoint_host?: string | null }): string {
+export function serviceListLine(s: { type: string; name: string; status: string; id: string; domain?: string; machine_count?: number; public?: boolean; image?: string; port?: number; volume_gib?: number | null; volume_mount_path?: string | null; pg_version?: number | null; endpoint?: string | null; endpoint_host?: string | null; private_host?: string | null }): string {
   const extra = s.type === 'compute'
     ? `  x${s.machine_count}${s.volume_gib ? `  vol ${s.volume_gib}Gi at ${s.volume_mount_path ?? '/data'}` : ''}${s.image ? `  running ${s.image}${s.port ? `:${s.port}` : ''}` : ''}`
     : ['redis', 'mysql', 'mongodb'].includes(s.type) ? `  tcp/${s.port ?? defaultDatabasePort(s.type)}${s.volume_gib ? `  vol ${s.volume_gib}Gi` : ''}`
@@ -225,7 +225,11 @@ export function serviceListLine(s: { type: string; name: string; status: string;
         : s.type === 'postgres' ? pgBadge(s.pg_version) : ''
   // A tcp compute service has no HTTP domain; its address is the tcp one.
   const where = s.type === 'compute' && s.endpoint === 'tcp' ? `  ${tcpAddress(s)}` : s.domain ? `  ${s.domain}` : ''
-  return `${s.type}/${s.name}  [${s.status}]${extra}${where}  ${s.id}`
+  // The private address the platform reports (never composed here), and a closed compute service
+  // says so beside the URL it no longer serves.
+  const closed = s.type === 'compute' && s.public === false ? '  public off' : ''
+  const priv = s.private_host ? `  private ${s.private_host}${s.port ? `:${s.port}` : ''}` : ''
+  return `${s.type}/${s.name}  [${s.status}]${extra}${where}${closed}${priv}  ${s.id}`
 }
 
 export async function servicesList(opts: { json?: boolean; branch?: string }): Promise<void> {
