@@ -41,7 +41,7 @@ describe('parseMemoryMb', () => {
 import { parseCpu, fmtMb } from '../src/commands/compute.js'
 import { fetchDbInstance } from '../src/commands/postgres.js'
 import { ApiError } from '../src/api.js'
-import { parseDbCpu, parseDbMemory, fmtMib, alwaysOnArgs, alwaysOnLine, alwaysOnSetLine, limitsSetLine, settleScaleToZero, restartLine } from '../src/commands/postgres.js'
+import { parseDbCpu, parseDbMemory, fmtMib, alwaysOnArgs, alwaysOnLine, alwaysOnSetLine, settleScaleToZero, restartLine, limitsSetLine } from '../src/commands/postgres.js'
 
 describe('parseCpu (compute --cpu override)', () => {
   it('accepts exactly the provider grid the help text advertises', () => {
@@ -144,18 +144,6 @@ describe('postgres always-on arguments', () => {
   })
 })
 
-describe('postgres limits set confirmation', () => {
-  it('reports the applied ceiling from a synchronous answer', () => {
-    expect(limitsSetLine('db', undefined, { memory: '2Gi' }, 200, { cpuMilli: 2000, memoryMib: 2048 })).toBe('postgres db: ceiling set to 2 vCPU / 2 GiB')
-  })
-  it('does not echo the pre-patch row of a queued resize as the new ceiling', () => {
-    expect(limitsSetLine('db', 'feat', { memory: '2Gi' }, 202, { cpuMilli: 4000, memoryMib: 4096, pending: true }))
-      .toBe('postgres db: ceiling 2Gi requested — the database has not applied it yet; confirm with `insta postgres limits db --branch feat`')
-    expect(limitsSetLine(undefined, undefined, { cpu: '2', memory: '2Gi' }, 200, { cpuMilli: 4000, memoryMib: 4096, pending: true }))
-      .toMatch(/ceiling 2 vCPU \/ 2Gi requested .*`insta postgres limits`$/)
-  })
-})
-
 describe('postgres always-on set confirmation', () => {
   it('confirms only when the reported value matches the request, and otherwise points at the read-back for that branch', () => {
     expect(alwaysOnSetLine('db', undefined, 'on', false)).toMatch(/always-on ENABLED/)
@@ -173,6 +161,26 @@ describe('postgres always-on set confirmation', () => {
     let calls = 0
     expect(await settleScaleToZero({}, false, async () => { calls++; return {} }, wait)).toEqual({})
     expect(calls).toBe(0)
+  })
+})
+
+// insta-db answers a resize with 202 and the row from before the patch: echoing its cpuMilli/memoryMib
+// reported the OLD ceiling as the new one (instacloud-cli#369).
+describe('postgres limits set confirmation', () => {
+  it('on 202 prints the requested values as not applied yet, never the pre-change row', () => {
+    const line = limitsSetLine('db', undefined, { memory: '2Gi' }, { status: 202, body: { cpuMilli: 4000, memoryMib: 4096, pending: true } })
+    expect(line).toBe('postgres db: ceiling 2Gi requested, not applied yet — confirm with `insta postgres limits db`')
+    expect(line).not.toContain('4 GiB')
+  })
+  it('treats pending: true as not applied even without a 202, and names the branch in the read-back', () => {
+    expect(limitsSetLine(undefined, 'feat', { cpu: '2', memory: '4Gi' }, { status: 200, body: { cpuMilli: 1000, memoryMib: 1024, pending: true } }))
+      .toBe('postgres default: ceiling 2 vCPU / 4Gi requested, not applied yet — confirm with `insta postgres limits --branch feat`')
+  })
+  it('confirms from the reported row when the change was applied', () => {
+    expect(limitsSetLine('db', undefined, { memory: '2Gi' }, { status: 200, body: { cpuMilli: 2000, memoryMib: 2048 } }))
+      .toBe('postgres db: ceiling set to 2 vCPU / 2 GiB')
+    expect(limitsSetLine('db', undefined, { cpu: '2500m' }, { status: 200, body: {} }))
+      .toBe('postgres db: ceiling set to 2500m / unchanged')
   })
 })
 
