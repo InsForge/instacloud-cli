@@ -17,9 +17,9 @@ export function alwaysOnLine(group: string, scaleToZero: unknown): string {
   return `postgres ${group}: always-on ${scaleToZero === false ? 'on — instance stays warm' : scaleToZero === true ? 'off — scales to zero when idle' : 'unknown — the provider did not report it'}`
 }
 
-// Show or set a postgres service's idle mode: scale-to-zero (the default: instance suspends when
-// idle, cold-starts on the next connection) or always-on (instance stays warm; idle RAM bills at
-// actual usage). Reads GET /database/instance, sets PATCH /database/settings {scaleToZero} —
+// Show or set a postgres service's idle mode: always-on (the default for new databases: instance
+// stays warm; idle RAM bills at actual usage) or scale-to-zero (instance suspends when idle,
+// cold-starts on the next connection). Reads GET /database/instance, sets PATCH /database/settings {scaleToZero} —
 // insta-db-backed postgres only.
 export async function dbAlwaysOn(first: string | undefined, second: string | undefined, opts: Opts): Promise<void> {
   const { mode, service } = alwaysOnArgs(first, second)
@@ -70,7 +70,7 @@ export async function settleScaleToZero(
 export function alwaysOnSetLine(service: string | undefined, branch: string | undefined, mode: 'on' | 'off', scaleToZero: unknown): string {
   const group = service ?? 'default'
   if (scaleToZero !== (mode === 'off')) return `postgres ${group}: always-on ${mode} requested — the database has not applied it yet; confirm with \`insta postgres always-on${service ? ` ${service}` : ''}${branch ? ` --branch ${branch}` : ''}\``
-  return `postgres ${group}: always-on ${mode === 'on' ? 'ENABLED — instance stays warm (no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle (default; first connection after idle cold-starts)'}`
+  return `postgres ${group}: always-on ${mode === 'on' ? 'ENABLED — instance stays warm (default; no cold starts; idle RAM bills at actual usage)' : 'disabled — scales to zero when idle (first connection after idle cold-starts)'}`
 }
 
 // Validated pass-throughs for the provider's quantity strings. The insta-db resize API takes
@@ -162,9 +162,20 @@ export async function dbLimits(service: string | undefined, opts: Opts & { cpu?:
   }
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
-  const cpu = typeof res.body?.cpuMilli === 'number' ? `${res.body.cpuMilli / 1000} vCPU` : (opts.cpu ?? 'unchanged')
-  const mem = typeof res.body?.memoryMib === 'number' ? fmtMib(res.body.memoryMib) : (opts.memory ?? 'unchanged')
-  info(`postgres ${service ?? 'default'}: ceiling set to ${cpu} / ${mem}`)
+  info(limitsSetLine(service, opts.branch, opts, res.status, res.body))
+}
+
+// A queued resize (202, or `pending` from the adapter) carries the instance row from BEFORE the
+// patch, so its numbers are the old ceiling: name what was requested and point at the read-back.
+export function limitsSetLine(service: string | undefined, branch: string | undefined, req: { cpu?: string; memory?: string }, status: number, body: any): string {
+  const group = service ?? 'default'
+  if (status === 202 || body?.pending === true) {
+    const asked = [req.cpu ? `${req.cpu} vCPU` : null, req.memory ?? null].filter(Boolean).join(' / ')
+    return `postgres ${group}: ceiling ${asked} requested — the database has not applied it yet; confirm with \`insta postgres limits${service ? ` ${service}` : ''}${branch ? ` --branch ${branch}` : ''}\``
+  }
+  const cpu = typeof body?.cpuMilli === 'number' ? `${body.cpuMilli / 1000} vCPU` : (req.cpu ?? 'unchanged')
+  const mem = typeof body?.memoryMib === 'number' ? fmtMib(body.memoryMib) : (req.memory ?? 'unchanged')
+  return `postgres ${group}: ceiling set to ${cpu} / ${mem}`
 }
 
 // Bytes → human units, one decimal above KiB. Local because the metrics payload is the only

@@ -41,7 +41,7 @@ describe('parseMemoryMb', () => {
 import { parseCpu, fmtMb } from '../src/commands/compute.js'
 import { fetchDbInstance } from '../src/commands/postgres.js'
 import { ApiError } from '../src/api.js'
-import { parseDbCpu, parseDbMemory, fmtMib, alwaysOnArgs, alwaysOnLine, alwaysOnSetLine, settleScaleToZero, restartLine } from '../src/commands/postgres.js'
+import { parseDbCpu, parseDbMemory, fmtMib, alwaysOnArgs, alwaysOnLine, alwaysOnSetLine, limitsSetLine, settleScaleToZero, restartLine } from '../src/commands/postgres.js'
 
 describe('parseCpu (compute --cpu override)', () => {
   it('accepts exactly the provider grid the help text advertises', () => {
@@ -141,6 +141,18 @@ describe('postgres always-on arguments', () => {
     expect(alwaysOnLine('main-db', false)).toBe('postgres main-db: always-on on — instance stays warm')
     expect(alwaysOnLine('main-db', true)).toBe('postgres main-db: always-on off — scales to zero when idle')
     expect(alwaysOnLine('main-db', undefined)).toMatch(/unknown/)
+  })
+})
+
+describe('postgres limits set confirmation', () => {
+  it('reports the applied ceiling from a synchronous answer', () => {
+    expect(limitsSetLine('db', undefined, { memory: '2Gi' }, 200, { cpuMilli: 2000, memoryMib: 2048 })).toBe('postgres db: ceiling set to 2 vCPU / 2 GiB')
+  })
+  it('does not echo the pre-patch row of a queued resize as the new ceiling', () => {
+    expect(limitsSetLine('db', 'feat', { memory: '2Gi' }, 202, { cpuMilli: 4000, memoryMib: 4096, pending: true }))
+      .toBe('postgres db: ceiling 2Gi requested — the database has not applied it yet; confirm with `insta postgres limits db --branch feat`')
+    expect(limitsSetLine(undefined, undefined, { cpu: '2', memory: '2Gi' }, 200, { cpuMilli: 4000, memoryMib: 4096, pending: true }))
+      .toMatch(/ceiling 2 vCPU \/ 2Gi requested .*`insta postgres limits`$/)
   })
 })
 
