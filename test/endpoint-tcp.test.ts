@@ -19,8 +19,8 @@ describe('parseEndpoint', () => {
   it.each([['http', 'http'], ['tcp', 'tcp'], [' TCP ', 'tcp']])('%j is %s', (raw, want) => {
     expect(parseEndpoint(raw)).toBe(want)
   })
-  it.each(['udp', 'v6', '', 'https'])('%j is refused', (raw) => {
-    expect(() => parseEndpoint(raw)).toThrow(/--endpoint must be http or tcp/)
+  it.each(['sctp', 'v6', '', 'https'])('%j is refused', (raw) => {
+    expect(() => parseEndpoint(raw)).toThrow(/--endpoint must be http, tcp, udp or tcp\+udp/)
   })
 })
 
@@ -34,7 +34,7 @@ describe('service add --endpoint', () => {
   // fail differently.
   it.each([
     ['on a managed database', 'redis', { endpoint: 'tcp' }, '--endpoint is only valid for compute services'],
-    ['with a typo', 'compute', { endpoint: 'tpc' }, '--endpoint must be http or tcp, got: tpc'],
+    ['with a typo', 'compute', { endpoint: 'tpc' }, '--endpoint must be http, tcp, udp or tcp+udp, got: tpc'],
   ])('%s fails locally', async (_label, type, opts, error) => {
     await expect(servicesAdd(type, 'x', opts)).rejects.toThrow(error)
   })
@@ -66,15 +66,15 @@ describe('deploy --endpoint', () => {
   it('rides the deploy body only when given', () => {
     expect(deployRequestBody({ image: 'img' }, 'main', { port: '7000', endpoint: 'tcp' })).toMatchObject({ endpoint: 'tcp', port: 7000 })
     expect(deployRequestBody({ image: 'img' }, 'main', { port: '7000' }).endpoint).toBeUndefined()
-    expect(() => deployRequestBody({ image: 'img' }, 'main', { endpoint: 'udp' })).toThrow(/--endpoint must be http or tcp/)
+    expect(() => deployRequestBody({ image: 'img' }, 'main', { endpoint: 'sctp' })).toThrow(/--endpoint must be http, tcp, udp or tcp\+udp/)
   })
 
-  it.each<[string, { url?: string; endpointHost?: string | null }, string | undefined, string]>([
-    ['a tcp deploy', { url: '', endpointHost: HOST }, '7000', `tcp://${HOST}:7000`],
-    ['an http deploy', { url: 'https://app.example' }, '7000', 'https://app.example'],
-    ['a worker', { url: '' }, '0', '(no URL: a worker)'],
-  ])('reports %s', (_label, r, port, want) => {
-    expect(deployedTarget(r, port)).toBe(want)
+  it.each<[string, { url?: string; endpointHost?: string | null }, string | undefined, 'tcp' | undefined, string]>([
+    ['a tcp deploy', { url: '', endpointHost: HOST }, '7000', 'tcp', `tcp://${HOST}:7000`],
+    ['an http deploy', { url: 'https://app.example' }, '7000', undefined, 'https://app.example'],
+    ['a worker', { url: '' }, '0', undefined, '(no URL: a worker)'],
+  ])('reports %s', (_label, r, port, endpoint, want) => {
+    expect(deployedTarget(r, port, endpoint)).toBe(want)
   })
 })
 

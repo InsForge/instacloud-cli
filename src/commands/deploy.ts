@@ -6,7 +6,7 @@ import { info, die, printJson, handleApproval, renderNextActions, CliExit } from
 import { flyctlBuildAndPush, ensureFlyctl, defaultBuildRunner, stderrBuildRunner, type BuildRunner } from '../flyctl-build.js'
 import { packDirectory, windowsModeCaveat, type ArchiveLimits } from '../pack.js'
 import { deployArchive, uploadArchive, type DeployOutcome, type Uploader } from '../deploy-archive.js'
-import { parseEndpoint, parsePort } from './services.js'
+import { parseEndpoint, parsePort, type Endpoint } from './services.js'
 
 type DeployOpts = { image?: string; branch?: string; group?: string; port?: string; websocket?: boolean; endpoint?: string; replaceSource?: boolean; json?: boolean }
 
@@ -28,10 +28,16 @@ export function deployRequestBody(source: { image: string }, branch: string, opt
   }
 }
 
-// Where the deploy answers: the HTTPS URL, or for an endpoint tcp service its tcp address (the
-// platform reports no URL for one). Pure, so it's unit-tested.
-export function deployedTarget(r: { url?: string; endpointHost?: string | null }, port: string | undefined): string {
-  if (r.endpointHost) return `tcp://${r.endpointHost}:${port ?? '?'}`
+// Where the deploy answers: the HTTPS URL, or for a v6-lane service (tcp, udp, tcp+udp) its
+// address, one scheme per protocol (the platform reports no URL for one). The deploy result names
+// the host but not the protocol, so the scheme comes from --endpoint; without the flag the service
+// kept whichever v6 endpoint it had, and the address is printed without a scheme rather than
+// guessing tcp for what may be a udp service. Pure, so it's unit-tested.
+export function deployedTarget(r: { url?: string; endpointHost?: string | null }, port: string | undefined, endpoint?: Endpoint): string {
+  if (r.endpointHost) {
+    if (endpoint === undefined || endpoint === 'http') return `${r.endpointHost}:${port ?? '?'} (endpoint unchanged; \`insta service list\` shows its protocol)`
+    return (endpoint === 'tcp+udp' ? ['tcp', 'udp'] : [endpoint]).map((pr) => `${pr}://${r.endpointHost}:${port ?? '?'}`).join(', ')
+  }
   return r.url || '(no URL: a worker)'
 }
 
@@ -171,12 +177,12 @@ export async function deploy(dir: string | undefined, opts: DeployOpts): Promise
   if (!dir && !opts.image) die('usage: insta deploy <dir> | --image <url>  [--branch <b>] [--group <g>] [--port <n>]')
 
   // Normalized here, once, so both lanes get the same validated value: the archive lane's body
-  // (deployArchive) otherwise silently drops anything that isn't exactly 'http'/'tcp' to
+  // (deployArchive) otherwise silently drops anything that isn't exactly one of the endpoints to
   // undefined, which let a typo like --endpoint tpc build and deploy using the service's existing
   // endpoint instead of failing locally. Checked before ApiClient.load()/requireProject(): those
   // can resolve a project and persist an automatic link for an unlinked directory, so a typo must
   // die before either runs, not after.
-  let endpoint: 'http' | 'tcp' | undefined
+  let endpoint: Endpoint | undefined
   try {
     endpoint = opts.endpoint === undefined ? undefined : parseEndpoint(opts.endpoint)
   } catch (e) {
@@ -211,7 +217,7 @@ export async function deploy(dir: string | undefined, opts: DeployOpts): Promise
     // nextActions, which the operation read does not carry.
     const d = source.deployed
     if (opts.json) return printJson({ image: d.image, url: d.url, ...(d.endpointHost ? { endpointHost: d.endpointHost } : {}), branch: d.branch, group: d.group, machineId: d.machineId })
-    info(`deployed ${d.image} -> ${deployedTarget(d, effOpts.port)} (branch ${d.branch}, group ${d.group})`)
+    info(`deployed ${d.image} -> ${deployedTarget(d, effOpts.port, endpoint)} (branch ${d.branch}, group ${d.group})`)
     return
   }
   const res = await api.rawRequest('POST', `/projects/${p.projectId}/deploy`, deployRequestBody(source, branch, effOpts))
@@ -219,7 +225,7 @@ export async function deploy(dir: string | undefined, opts: DeployOpts): Promise
   if (handleApproval(res, opts.json)) return
   const what = source.image
   if (opts.json) return printJson({ image: source.image, ...res.body })
-  info(`deployed ${what} -> ${deployedTarget(res.body, effOpts.port)} (branch ${res.body.branch}, group ${res.body.group})`)
+  info(`deployed ${what} -> ${deployedTarget(res.body, effOpts.port, endpoint)} (branch ${res.body.branch}, group ${res.body.group})`)
   renderNextActions(res.body.nextActions)
 }
 

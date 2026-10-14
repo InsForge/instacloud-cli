@@ -116,19 +116,36 @@ function defaultDatabasePort(type: string): number {
 
 export type ServicesAddOpts = { branch?: string; public?: boolean; image?: string; port?: string; endpoint?: string; region?: string; alwaysOn?: boolean; volume?: string; mountPath?: string; pgVersion?: string; json?: boolean }
 
-// How a compute service is reached: http (the default HTTPS domain) or tcp (raw TCP on its port at
-// its own IPv6 address). Checked locally so a typo fails before any network call; which ports tcp
-// accepts is the platform's answer, not repeated here.
-export function parseEndpoint(raw: string): 'http' | 'tcp' {
+// How a compute service is reached: http (the default HTTPS domain), or one of the v6-lane
+// endpoints -- tcp, udp, or tcp+udp (raw TCP, UDP, or both on its port at its own IPv6 address).
+// Checked locally so a typo fails before any network call; which ports each protocol accepts is
+// the platform's answer, not repeated here.
+export type Endpoint = 'http' | 'tcp' | 'udp' | 'tcp+udp'
+export const ENDPOINTS: readonly Endpoint[] = ['http', 'tcp', 'udp', 'tcp+udp']
+export function parseEndpoint(raw: string): Endpoint {
   const v = raw.trim().toLowerCase()
-  if (v !== 'http' && v !== 'tcp') throw new Error(`--endpoint must be http or tcp, got: ${raw}`)
-  return v
+  if (!(ENDPOINTS as readonly string[]).includes(v)) throw new Error(`--endpoint must be http, tcp, udp or tcp+udp, got: ${raw}`)
+  return v as Endpoint
 }
+
+// tcp, udp and tcp+udp are the same v6 lane with a different protocol set: no HTTP domain, and the
+// address is endpoint_host on the service port.
+export const isV6Endpoint = (e: unknown): e is Exclude<Endpoint, 'http'> => e === 'tcp' || e === 'udp' || e === 'tcp+udp'
 
 // Where a tcp service is dialed. The host is set once a deploy has confirmed it; before that the
 // row only knows its port.
 export function tcpAddress(s: { endpoint_host?: string | null; port?: number | null }): string {
   return s.endpoint_host ? `tcp://${s.endpoint_host}:${s.port}` : `tcp/${s.port ?? '?'} (address after the first deploy)`
+}
+
+// Where a v6-lane service (tcp, udp or tcp+udp) is reached, one scheme per protocol it serves:
+// tcp://host:port, udp://host:port, or both for tcp+udp. tcp is exactly tcpAddress. Before a
+// deploy has confirmed the host, the row only knows the protocol and port.
+export function v6Address(s: { endpoint?: string | null; endpoint_host?: string | null; port?: number | null }): string {
+  if (s.endpoint === 'tcp') return tcpAddress(s)
+  const protos = s.endpoint === 'tcp+udp' ? ['tcp', 'udp'] : ['udp']
+  if (!s.endpoint_host) return `${s.endpoint === 'tcp+udp' ? 'tcp+udp' : 'udp'}/${s.port ?? '?'} (address after the first deploy)`
+  return protos.map((pr) => `${pr}://${s.endpoint_host}:${s.port}`).join(', ')
 }
 
 // Map service-add options to the platform POST body. Pure, so it's unit-tested without a network
@@ -202,7 +219,7 @@ export function serviceAddedLine(type: string, name: string, branch: string | un
   const vol = svc.volume_gib ? `  vol ${svc.volume_gib}Gi at ${svc.volume_mount_path ?? "/data"}` : ''
   // The major belongs next to the connect hint: it decides which psql/pg_dump to reach for.
   const pg = svc.type === 'postgres' ? pgBadge(svc.pg_version) : ''
-  const where = svc.endpoint === 'tcp' ? ` — ${tcpAddress(svc)}` : svc.domain ? ` — ${svc.domain}` : ''
+  const where = isV6Endpoint(svc.endpoint) ? ` — ${v6Address(svc)}` : svc.domain ? ` — ${svc.domain}` : ''
   return `added ${type} service ${name} on ${branch ?? 'default'} (${svc.id})${access}${svc.region ? `  ${svc.region}` : ''}${img}${vol}${pg}${where}`
 }
 
@@ -223,8 +240,8 @@ export function serviceListLine(s: { type: string; name: string; status: string;
         // Postgres major, so the reader picks matching pg_dump/psql BEFORE connecting (a newer client
         // dumps statements an older server cannot restore). Older platforms send no pg_version.
         : s.type === 'postgres' ? pgBadge(s.pg_version) : ''
-  // A tcp compute service has no HTTP domain; its address is the tcp one.
-  const where = s.type === 'compute' && s.endpoint === 'tcp' ? `  ${tcpAddress(s)}` : s.domain ? `  ${s.domain}` : ''
+  // A tcp/udp/tcp+udp compute service has no HTTP domain; its address is the v6-lane one.
+  const where = s.type === 'compute' && isV6Endpoint(s.endpoint) ? `  ${v6Address(s)}` : s.domain ? `  ${s.domain}` : ''
   return `${s.type}/${s.name}  [${s.status}]${extra}${where}  ${s.id}`
 }
 

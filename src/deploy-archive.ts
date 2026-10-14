@@ -2,6 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { ApiClient } from './api.js'
 import { handleApproval } from './util.js'
 import type { PackResult } from './pack.js'
+import { ENDPOINTS } from './commands/services.js'
 
 // The gateway does NOT fall back to nixpacks when it finds no Dockerfile, it fails. The platform
 // never sees the tree, so the side that packed it chooses.
@@ -119,7 +120,7 @@ export async function deployArchive(
     archive: ref,
     port: opts.port ? Number(opts.port) : undefined,
     websocket: typeof opts.websocket === 'boolean' ? opts.websocket : undefined,
-    endpoint: opts.endpoint === 'http' || opts.endpoint === 'tcp' ? opts.endpoint : undefined,
+    endpoint: (ENDPOINTS as readonly string[]).includes(opts.endpoint ?? '') ? opts.endpoint : undefined,
     replaceSource: opts.replaceSource === true ? true : undefined,
   })
   // An approval is a 202 too, told apart by its status word; anything else here is our operation.
@@ -164,7 +165,7 @@ export async function deployArchive(
       if (state === 'live') {
         const image = res.body?.imageRef
         const url = res.body?.url
-        // An endpoint tcp service has no URL: its answer is the tcp host instead. A worker has neither.
+        // A tcp/udp/tcp+udp (v6-lane) service has no URL: its answer is the v6 host instead. A worker has neither.
         const endpointHost = typeof res.body?.endpointHost === 'string' && res.body.endpointHost ? res.body.endpointHost as string : undefined
         if (typeof image !== 'string' || !image || typeof url !== 'string' || (!url && opts.port !== '0' && !endpointHost)) {
           throw new Error('the deploy finished but the platform returned no image or URL for it — check `insta status`')
