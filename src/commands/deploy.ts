@@ -6,7 +6,7 @@ import { info, die, printJson, handleApproval, renderNextActions, CliExit } from
 import { flyctlBuildAndPush, ensureFlyctl, defaultBuildRunner, stderrBuildRunner, type BuildRunner } from '../flyctl-build.js'
 import { packDirectory, windowsModeCaveat, type ArchiveLimits } from '../pack.js'
 import { deployArchive, uploadArchive, type DeployOutcome, type Uploader } from '../deploy-archive.js'
-import { parseEndpoint, parsePort, type Endpoint } from './services.js'
+import { isV6Endpoint, parseEndpoint, parsePort, type Endpoint } from './services.js'
 
 type DeployOpts = { image?: string; branch?: string; group?: string; port?: string; websocket?: boolean; endpoint?: string; replaceSource?: boolean; json?: boolean }
 
@@ -29,13 +29,15 @@ export function deployRequestBody(source: { image: string }, branch: string, opt
 }
 
 // Where the deploy answers: the HTTPS URL, or for a v6-lane service (tcp, udp, tcp+udp) its
-// address, one scheme per protocol (the platform reports no URL for one). The deploy result names
-// the host but not the protocol, so the scheme comes from --endpoint; without the flag the service
-// kept whichever v6 endpoint it had, and the address is printed without a scheme rather than
-// guessing tcp for what may be a udp service. Pure, so it's unit-tested.
-export function deployedTarget(r: { url?: string; endpointHost?: string | null }, port: string | undefined, endpoint?: Endpoint): string {
+// address, one scheme per protocol (the platform reports no URL for one). The scheme comes from the
+// RESULT's `endpoint` (instacloud-platform#681 reports it beside endpointHost, including on a
+// redeploy that passed none -- the endpoint the service kept); --endpoint is only the fallback for
+// an older platform that names the host but not the endpoint. With neither, the address prints
+// without a scheme rather than guessing tcp for what may be a udp service. Pure, so it's unit-tested.
+export function deployedTarget(r: { url?: string; endpointHost?: string | null; endpoint?: unknown }, port: string | undefined, flag?: Endpoint): string {
   if (r.endpointHost) {
-    if (endpoint === undefined || endpoint === 'http') return `${r.endpointHost}:${port ?? '?'} (endpoint unchanged; \`insta service list\` shows its protocol)`
+    const endpoint = isV6Endpoint(r.endpoint) ? r.endpoint : isV6Endpoint(flag) ? flag : undefined
+    if (endpoint === undefined) return `${r.endpointHost}:${port ?? '?'} (endpoint unchanged; \`insta service list\` shows its protocol)`
     return (endpoint === 'tcp+udp' ? ['tcp', 'udp'] : [endpoint]).map((pr) => `${pr}://${r.endpointHost}:${port ?? '?'}`).join(', ')
   }
   return r.url || '(no URL: a worker)'
@@ -216,7 +218,7 @@ export async function deploy(dir: string | undefined, opts: DeployOpts): Promise
     // The archive lane's operation already deployed. One output shape whichever lane ran, minus
     // nextActions, which the operation read does not carry.
     const d = source.deployed
-    if (opts.json) return printJson({ image: d.image, url: d.url, ...(d.endpointHost ? { endpointHost: d.endpointHost } : {}), branch: d.branch, group: d.group, machineId: d.machineId })
+    if (opts.json) return printJson({ image: d.image, url: d.url, ...(d.endpointHost ? { endpointHost: d.endpointHost } : {}), ...(d.endpoint ? { endpoint: d.endpoint } : {}), branch: d.branch, group: d.group, machineId: d.machineId })
     info(`deployed ${d.image} -> ${deployedTarget(d, effOpts.port, endpoint)} (branch ${d.branch}, group ${d.group})`)
     return
   }

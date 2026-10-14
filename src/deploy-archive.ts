@@ -2,7 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { ApiClient } from './api.js'
 import { handleApproval } from './util.js'
 import type { PackResult } from './pack.js'
-import { ENDPOINTS } from './commands/services.js'
+import { ENDPOINTS, isV6Endpoint, type Endpoint } from './commands/services.js'
 
 // The gateway does NOT fall back to nixpacks when it finds no Dockerfile, it fails. The platform
 // never sees the tree, so the side that packed it chooses.
@@ -90,7 +90,7 @@ const isAbort = (e: unknown): boolean => e instanceof Error && (e.name === 'Time
 
 // What the archive lane hands back: the deploy already happened. Same fields `/deploy` answers
 // with for an image body, so the command prints one shape whichever lane ran.
-export type DeployOutcome = { image: string; url: string; endpointHost?: string; branch: string; group: string; machineId?: string }
+export type DeployOutcome = { image: string; url: string; endpointHost?: string; endpoint?: Exclude<Endpoint, 'http'>; branch: string; group: string; machineId?: string }
 export type ArchiveDeployResult = DeployOutcome | { failed: string }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -167,6 +167,9 @@ export async function deployArchive(
         const url = res.body?.url
         // A tcp/udp/tcp+udp (v6-lane) service has no URL: its answer is the v6 host instead. A worker has neither.
         const endpointHost = typeof res.body?.endpointHost === 'string' && res.body.endpointHost ? res.body.endpointHost as string : undefined
+        // The endpoint the service is on (instacloud-platform#681), so the address gets its scheme;
+        // an older platform omits it, and a value this CLI does not know is treated as absent.
+        const endpoint = endpointHost && isV6Endpoint(res.body?.endpoint) ? res.body.endpoint as Exclude<Endpoint, 'http'> : undefined
         if (typeof image !== 'string' || !image || typeof url !== 'string' || (!url && opts.port !== '0' && !endpointHost)) {
           throw new Error('the deploy finished but the platform returned no image or URL for it — check `insta status`')
         }
@@ -176,7 +179,7 @@ export async function deployArchive(
           return v
         }
         return {
-          image, url, ...(endpointHost ? { endpointHost } : {}),
+          image, url, ...(endpointHost ? { endpointHost } : {}), ...(endpoint ? { endpoint } : {}),
           branch: optionalString('branch', res.body.branch) ?? branch,
           group: optionalString('group', res.body.group) ?? opts.group ?? '',
           machineId: optionalString('machineId', res.body.machineId),

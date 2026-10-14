@@ -95,6 +95,7 @@ describe('deploy --endpoint udp | tcp+udp', () => {
     expect(deployRequestBody({ image: 'img' }, 'main', { port: '5000', endpoint })).toMatchObject({ endpoint, port: 5000 })
   })
 
+  // An older platform: the result names the host but not the endpoint, so --endpoint is the fallback.
   it.each<[string, { url?: string; endpointHost?: string | null }, string | undefined, 'tcp' | 'udp' | 'tcp+udp' | undefined, string]>([
     ['a udp deploy', { url: '', endpointHost: HOST }, '5000', 'udp', `udp://${HOST}:5000`],
     ['a tcp+udp deploy', { url: '', endpointHost: HOST }, '5000', 'tcp+udp', `tcp://${HOST}:5000, udp://${HOST}:5000`],
@@ -104,6 +105,26 @@ describe('deploy --endpoint udp | tcp+udp', () => {
     ['a v6 redeploy without --endpoint', { url: '', endpointHost: HOST }, '5000', undefined, `${HOST}:5000 (endpoint unchanged; \`insta service list\` shows its protocol)`],
   ])('reports %s', (_label, r, port, endpoint, want) => {
     expect(deployedTarget(r, port, endpoint)).toBe(want)
+  })
+})
+
+// instacloud-platform#681: the result carries `endpoint` beside `endpointHost`, including on a
+// redeploy that passed none, and it wins over the flag.
+describe('deployedTarget reads the endpoint from the result', () => {
+  type Row = [string, { url?: string; endpointHost?: string | null; endpoint?: unknown }, 'http' | 'tcp' | 'udp' | 'tcp+udp' | undefined, string]
+  it.each<Row>([
+    ['result tcp, no flag (byte-for-byte the tcp line)', { url: '', endpointHost: HOST, endpoint: 'tcp' }, undefined, `tcp://${HOST}:5000`],
+    ['result udp, no flag', { url: '', endpointHost: HOST, endpoint: 'udp' }, undefined, `udp://${HOST}:5000`],
+    ['result tcp+udp, no flag', { url: '', endpointHost: HOST, endpoint: 'tcp+udp' }, undefined, `tcp://${HOST}:5000, udp://${HOST}:5000`],
+    ['flag tcp, result udp: the result wins', { url: '', endpointHost: HOST, endpoint: 'udp' }, 'tcp', `udp://${HOST}:5000`],
+    ['flag udp, result tcp+udp: the result wins', { url: '', endpointHost: HOST, endpoint: 'tcp+udp' }, 'udp', `tcp://${HOST}:5000, udp://${HOST}:5000`],
+    ['host without endpoint, flag udp (older platform): the flag', { url: '', endpointHost: HOST }, 'udp', `udp://${HOST}:5000`],
+    ['host without endpoint, no flag (older platform): no scheme', { url: '', endpointHost: HOST }, undefined, `${HOST}:5000 (endpoint unchanged; \`insta service list\` shows its protocol)`],
+    ['a result endpoint this CLI does not know is treated as absent', { url: '', endpointHost: HOST, endpoint: 'sctp' }, undefined, `${HOST}:5000 (endpoint unchanged; \`insta service list\` shows its protocol)`],
+    ['http: the URL, unchanged', { url: 'https://app.example' }, undefined, 'https://app.example'],
+    ['http with --endpoint http: the URL, unchanged', { url: 'https://app.example' }, 'http', 'https://app.example'],
+  ])('%s', (_label, r, flag, want) => {
+    expect(deployedTarget(r, '5000', flag)).toBe(want)
   })
 })
 
@@ -122,6 +143,16 @@ describe('archive deploy of a udp / tcp+udp service', () => {
     await expect(deployArchive(a, 'p1', ref, 'main', { port: '5000', endpoint }, Date.now, noWait)).resolves.toMatchObject({ url: '', endpointHost: HOST })
     expect(calls[0]!.body).toMatchObject({ endpoint, port: 5000 })
   })
+
+  it.each<[string, unknown, string | undefined]>([
+    ['carries the read\'s endpoint', 'udp', 'udp'],
+    ['an older platform omits it', undefined, undefined],
+    ['an unknown value is dropped', 'sctp', undefined],
+  ])('%s', async (_label, endpoint, want) => {
+    const { api: a } = api({ url: '', endpointHost: HOST, ...(endpoint !== undefined ? { endpoint } : {}) })
+    const out = await deployArchive(a, 'p1', ref, 'main', { port: '5000' }, Date.now, noWait)
+    expect((out as { endpoint?: string }).endpoint).toBe(want)
+  })
 })
 
 // End to end through deploy(): the line a person reads and the JSON an agent reads, for each lane.
@@ -132,16 +163,17 @@ describe('deploy() output for a udp service', () => {
     return dir
   }
 
-  function fakeApi() {
+  function fakeApi(resultEndpoint: string | undefined = undefined) {
+    const ep = resultEndpoint === undefined ? {} : { endpoint: resultEndpoint }
     const calls: Array<{ method: string; path: string; body?: unknown }> = []
     const rawRequest = vi.fn(async (method: string, path: string, body?: unknown) => {
       calls.push({ method, path, body })
       if (path.includes('/source-build')) return { status: 200, body: { lane: 'archive', limits: { maxArchiveBytes: 1e6, maxExtractedBytes: 1e6, maxFiles: 100 } } }
       if (path.includes('/builds/archive/')) return { status: 200, body: { state: 'unsupported', buildState: 'succeeded', steps: [], entries: [] } }
       if (path.includes('/build-uploads/')) return { status: 200, body: { state: 'valid' } }
-      if (path.includes('/archive-deploys/')) return { status: 200, body: { state: 'live', imageRef: 'img@sha256:aa', url: '', endpointHost: HOST, branch: 'main', group: 'dns' } }
+      if (path.includes('/archive-deploys/')) return { status: 200, body: { state: 'live', imageRef: 'img@sha256:aa', url: '', endpointHost: HOST, ...ep, branch: 'main', group: 'dns' } }
       if (path.includes('/archive-deploys')) return { status: 202, body: { operationId: 'op_1' } }
-      if (method === 'POST' && path === '/projects/p1/deploy') return { status: 200, body: { url: '', endpointHost: HOST, branch: 'main', group: 'dns', machineId: 'm1' } }
+      if (method === 'POST' && path === '/projects/p1/deploy') return { status: 200, body: { url: '', endpointHost: HOST, ...ep, branch: 'main', group: 'dns', machineId: 'm1' } }
       throw new Error(`unexpected call: ${method} ${path}`)
     })
     return { calls, rawRequest }
@@ -193,5 +225,23 @@ describe('deploy() output for a udp service', () => {
     const { out } = mockPlatform(rawRequest)
     await deploy(undefined, { image: 'img:2', port: '5000', endpoint: 'udp', json: true })
     expect(JSON.parse(out.join(''))).toEqual({ image: 'img:2', url: '', endpointHost: HOST, branch: 'main', group: 'dns', machineId: 'm1' })
+  })
+
+  it('image lane, plain redeploy of a tcp service: the result endpoint restores the exact tcp:// line', async () => {
+    const { calls, rawRequest } = fakeApi('tcp')
+    const { out } = mockPlatform(rawRequest)
+    await deploy(undefined, { image: 'img:2', port: '5000' })
+    expect((calls.find((c) => c.path === '/projects/p1/deploy')?.body as Record<string, unknown>).endpoint).toBeUndefined()
+    expect(out.join('')).toBe(`deployed img:2 -> tcp://${HOST}:5000 (branch main, group dns)\n`)
+  })
+
+  it('archive lane, plain redeploy of a udp service: udp:// from the read, and --json carries endpoint', async () => {
+    const { rawRequest } = fakeApi('udp')
+    const { out } = mockPlatform(rawRequest)
+    await deploy(srcDir(), { port: '5000' })
+    expect(out.join('')).toContain(`deployed img@sha256:aa -> udp://${HOST}:5000 (branch main, group dns)`)
+    out.length = 0
+    await deploy(srcDir(), { port: '5000', json: true })
+    expect(JSON.parse(out.join(''))).toMatchObject({ endpointHost: HOST, endpoint: 'udp' })
   })
 })
