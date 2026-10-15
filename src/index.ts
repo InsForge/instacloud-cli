@@ -28,6 +28,7 @@ import { buildLogs } from './commands/build-logs.js'
 import * as computeCmd from './commands/compute.js'
 import * as githubCmd from './commands/github.js'
 import * as pgCmd from './commands/postgres.js'
+import * as privateNet from './commands/private-network.js'
 import * as dbQueryCmd from './commands/db-query.js'
 import * as managedDb from './commands/managed-db.js'
 import * as storageCmd from './commands/storage.js'
@@ -385,7 +386,7 @@ const {
 } = computeCmd.splitExecArgs(process.argv)
 
 // ---- compute ----
-const compute = program.command('compute').description('Compute services: lifecycle (start/stop/suspend/restart/status), scale, limits, volume, always-on, exec, ssh, GitHub source, logs, metrics')
+const compute = program.command('compute').description('Compute services: lifecycle (start/stop/suspend/restart/status), scale, limits, volume, public access, always-on, exec, ssh, GitHub source, logs, metrics')
 compute.command('start [service]').description('Bring a compute service online (persistent — re-enables auto-wake)')
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => computeCmd.computeStart(service, o)))
 compute.command('stop [service]').description('Take a compute service offline; traffic will NOT wake it until `start`')
@@ -404,6 +405,10 @@ compute.command('scale [count] [service]').description('Set a compute service sa
 compute.command('limits [service]').description("Show or set a compute service's resource ceiling (any plan within the free cap; raising above it needs a paid plan). --memory is the dial; cpu derives from it unless --cpu is given. Billing is actual usage — the ceiling caps what the app may burn, it is not a price")
   .option('--memory <size>', 'memory ceiling, e.g. 512mb or 1gb').option('--cpu <n>', 'vCPU ceiling override (provider sizes: 1, 2, 4, 6, 8)')
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => computeCmd.computeLimits(service, o)))
+compute.command('public-access [mode] [service]').description("Show, close or re-open a compute service's public access (mode: on|off; no mode = print it and the service's private address). Every compute service is reachable by the other services in its project branch at <name>.insta.internal:<port> (TCP and UDP); off = private-only: its URL answers 403 and no longer wakes it, so only services in the same branch reach it. Immediate, no redeploy. Asks first; --yes when there is no terminal or with --json. insta-compute only (gated: service.setAccess)")
+  .option('-y, --yes', 'close without asking (required when there is no terminal, or with --json)')
+  .option('--json').option('--branch <branch>', 'branch (default: current)')
+  .action(guard((mode, service, o) => privateNet.servicePublicAccess('compute', mode, service, o)))
 compute.command('always-on <mode> [service]').description('Set a compute service always-on (mode: on|off). on = machines never scale to zero; off = scale-to-zero (the default for new compute services; refused on a worker, port 0). All plans; billing is actual usage either way')
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((mode, service, o) => computeCmd.computeAlwaysOn(mode, service, o)))
 compute.command('ssh [service]')
@@ -485,7 +490,7 @@ addObservability(pg, 'db', 'postgres')
 
 // ---- redis / mysql / mongodb (managed databases) ----
 for (const type of ['redis', 'mysql', 'mongodb'] as const) {
-  const g = program.command(type).description(`Managed ${type} services: query, status, resource ceiling, volume, always-on, logs, metrics`)
+  const g = program.command(type).description(`Managed ${type} services: query, status, resource ceiling, volume, public access, always-on, logs, metrics`)
   const query = g.command('query <service> [args...]').description(type === 'redis'
     ? 'Run a redis command against the service via the console exec API — a pre-tokenized argv, e.g. `GET mykey`'
     : `Run one quoted ${type} statement against the service via the console exec API`)
@@ -503,6 +508,10 @@ for (const type of ['redis', 'mysql', 'mongodb'] as const) {
     .option('--size <gi>', 'new size in whole Gi, e.g. 10 (must be ≥ the current size)')
     .option('--json').option('--branch <branch>', 'branch (default: current)')
     .action(guard((service, o) => computeCmd.serviceVolume(type, service, o)))
+  g.command('public-access [mode] [service]').description(`Show, close or re-open a ${type} service's public access (mode: on|off; no mode = print it and the private address). On insta-compute every ${type} is reachable from services in its project branch at <name>-${type}.insta.internal (${type.toUpperCase()}_PRIVATE_URL); off = ${type.toUpperCase()}_URL stops connecting and only apps in the branch reach it, through ${type.toUpperCase()}_PRIVATE_URL. Asks first; --yes when there is no terminal or with --json (gated: service.setAccess)`)
+    .option('-y, --yes', 'close without asking (required when there is no terminal, or with --json)')
+    .option('--json').option('--branch <branch>', 'branch (default: current)')
+    .action(guard((mode, service, o) => privateNet.servicePublicAccess(type, mode, service, o)))
   g.command('always-on <mode> [service]').description(`Set a ${type} service always-on (mode: on|off). on = machines never scale to zero; off = scale-to-zero. Billing is actual usage either way`)
     .option('--json').option('--branch <branch>', 'branch (default: current)')
     .action(guard((mode, service, o) => computeCmd.serviceAlwaysOn(type, mode, service, o)))
