@@ -53,6 +53,15 @@ describe('rollbackDisclosure', () => {
     expect(lines[3]).toBe('  pauses    auto-deploy from main')
     expect(rollbackDisclosure(row(), { port: 8080, autoDeployBranch: null, service: 'web', now: new Date() })).toHaveLength(3)
   })
+  it('a backfilled target restores only the image and says the port and start command stay', () => {
+    const lines = rollbackDisclosure(row({ backfilled: true, port: null, variablesChangedSince: undefined }), { port: null, autoDeployBranch: 'main', service: 'web', now: new Date() })
+    expect(lines.slice(1)).toEqual([
+      '  restores  image',
+      '  keeps     port and start command (not recorded for this deployment)',
+      '  keeps     variables, scale, domains, volume, databases',
+      '  pauses    auto-deploy from main',
+    ])
+  })
   it('warns when the image was never pinned', () => {
     const lines = rollbackDisclosure(row({ pinnedImage: null }), { port: null, autoDeployBranch: null, service: 'web', now: new Date() })
     expect(lines).toContain('  warning   this deployment used the tag registry/web:abc, which may point to a different image now')
@@ -67,7 +76,7 @@ describe('computeRollback', () => {
   afterEach(() => { stdout.length = 0; stderr.length = 0; process.exitCode = undefined; vi.mocked(clack.confirm).mockClear() })
   afterAll(() => { outSpy.mockRestore(); errSpy.mockRestore() })
   const PROJECT = { projectId: 'proj_1', branch: 'main' }
-  const fake = (o: { status?: number; paused?: boolean; source?: any; sourceErr?: number } = {}) => {
+  const fake = (o: { status?: number; paused?: boolean; source?: any; sourceErr?: number; rows?: ServiceDeploymentView[] } = {}) => {
     const posts: { path: string; body: any }[] = []
     const gets: string[] = []
     const api: any = {
@@ -77,7 +86,7 @@ describe('computeRollback', () => {
           if (o.sourceErr) throw new ApiError(o.sourceErr, 'no source')
           return { source: o.source ?? { type: 'github', owner: 'a', repo: 'b', branch: 'main', root_dir: null, auto_deploy: true, public: false } }
         }
-        if (path.includes('/deployments')) return { deployments: [live, row()], autoDeployPausedByRollback: false }
+        if (path.includes('/deployments')) return { deployments: o.rows ?? [live, row()], autoDeployPausedByRollback: false }
         return { services: [{ id: 'svc_1', type: 'compute', name: 'web' }] }
       },
       rawRequest: async (_m: string, path: string, body?: unknown) => {
@@ -139,9 +148,29 @@ describe('computeRollback', () => {
     expect(stdout.join('')).not.toContain('pauses')
   })
 
-  it('a full uuid skips the deployments lookup', async () => {
-    const { api, posts, gets } = fake()
+  it('a full uuid finds its row on the first page for a specific disclosure', async () => {
+    const { api, posts, gets } = fake({ rows: [live, row({ backfilled: true, port: null, variablesChangedSince: undefined })] })
     await computeRollback('web', { to: OLD, yes: true }, { api, project: PROJECT })
+    expect(gets).toContain('/projects/proj_1/services/svc_1/deployments?limit=100')
+    const out = stdout.join('')
+    expect(out).toContain('Rolling back web to 7d41e0b2 (commit 9f8e7d6, 2 hours ago)')
+    expect(out).toContain('  restores  image\n')
+    expect(out).toContain('  keeps     port and start command (not recorded for this deployment)')
+    expect(posts[0]!.body).toEqual({ deploymentId: OLD })
+  })
+
+  it('a full uuid not on the first page gets the generic disclosure and still posts', async () => {
+    const { api, posts } = fake({ rows: [live] })
+    await computeRollback('web', { to: OLD, yes: true }, { api, project: PROJECT })
+    const out = stdout.join('')
+    expect(out).toContain('Rolling back web to 7d41e0b2\n')
+    expect(out).toContain('  restores  image, port, start command')
+    expect(posts[0]!.body).toEqual({ deploymentId: OLD })
+  })
+
+  it('a full uuid with --json skips the deployments lookup', async () => {
+    const { api, posts, gets } = fake()
+    await computeRollback('web', { to: OLD, yes: true, json: true }, { api, project: PROJECT })
     expect(gets.some((g) => g.includes('/deployments'))).toBe(false)
     expect(posts[0]!.body).toEqual({ deploymentId: OLD })
   })
@@ -177,7 +206,8 @@ describe('computeRollback', () => {
 
 describe('computeRollback on a platform without the routes', () => {
   const body = (m: string) => ({ message: `Route ${m}:/projects/p/services/svc_1/x not found`, error: 'Not Found', statusCode: 404 })
-  const base = { request: async (_m: string, path: string): Promise<any> => ({ services: [{ id: 'svc_1', type: 'compute', name: 'web' }] }) }
+  const base = { request: async (_m: string, path: string): Promise<any> =>
+    (path.includes('/deployments') ? { deployments: [] } : { services: [{ id: 'svc_1', type: 'compute', name: 'web' }] }) }
   const dep = { project: { projectId: 'p' } }
   it('list GET framework 404 becomes the friendly message', async () => {
     const api: any = { ...base, request: async (_m: string, path: string) => {

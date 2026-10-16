@@ -486,9 +486,11 @@ export function rollbackDisclosure(
 ): string[] {
   const commit = target.commitSha ? `commit ${target.commitSha.slice(0, 7)}, ` : ''
   const changed = target.variablesChangedSince ? ` (${target.variablesChangedSince} changed since)` : ''
+  // A backfilled row recorded no port or start command, so the platform keeps the current ones.
   return [
     `Rolling back ${opts.service} to ${target.id.slice(0, 8)} (${commit}${relativeTime(target.createdAt, opts.now)})`,
-    `  restores  image, ${opts.port != null ? `port ${opts.port}, ` : ''}start command`,
+    target.backfilled ? '  restores  image' : `  restores  image, ${opts.port != null ? `port ${opts.port}, ` : ''}start command`,
+    ...(target.backfilled ? ['  keeps     port and start command (not recorded for this deployment)'] : []),
     `  keeps     variables${changed}, scale, domains, volume, databases`,
     ...(opts.autoDeployBranch ? [`  pauses    auto-deploy from ${opts.autoDeployBranch}`] : []),
     ...(target.pinnedImage ? [] : [`  warning   this deployment used the tag ${target.image}, which may point to a different image now`]),
@@ -546,17 +548,22 @@ export async function computeRollback(
   const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, 'compute', serviceName)
   const base = `/projects/${p.projectId}/services/${svc.id}`
 
-  // A full id goes to the server as is (it validates), no page lookup.
-  let target: ServiceDeploymentView | null = null
-  let targetId: string
-  if (opts.to && UUID_RE.test(opts.to)) targetId = opts.to
-  else {
-    let page: DeploymentsBody
-    try { page = await api.request('GET', `${base}/deployments?limit=100`) } catch (e) {
+  const firstPage = async (): Promise<DeploymentsBody> => {
+    try { return await api.request('GET', `${base}/deployments?limit=100`) } catch (e) {
       if (noRoute(e)) throw new Error(NO_ROUTE)
       throw e
     }
-    target = pickRollbackTarget(page.deployments, opts.to, svc.name)
+  }
+  // A full id goes to the server as is (it validates). The first page only makes the disclosure
+  // specific, and an id not on it gets the generic one.
+  let target: ServiceDeploymentView | null = null
+  let targetId: string
+  if (opts.to && UUID_RE.test(opts.to)) {
+    const want = opts.to.toLowerCase()
+    targetId = opts.to
+    if (!opts.json) target = (await firstPage()).deployments.find((d) => d.id.toLowerCase() === want) ?? null
+  } else {
+    target = pickRollbackTarget((await firstPage()).deployments, opts.to, svc.name)
     targetId = target.id
   }
 
