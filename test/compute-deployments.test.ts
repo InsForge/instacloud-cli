@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, afterEach, afterAll } from 'vitest'
+import { ApiError } from '../src/api.js'
 import { relativeTime } from '../src/util.js'
 import { deploymentLines, computeDeployments, type ServiceDeploymentView } from '../src/commands/compute.js'
 
@@ -71,5 +72,23 @@ describe('computeDeployments', () => {
     const { api, gets } = fake()
     await expect(computeDeployments('web', { limit: '0' }, { api, project: PROJECT })).rejects.toThrow(/--limit/)
     expect(gets).toEqual([])
+  })
+})
+
+describe('computeDeployments on a platform without the route', () => {
+  const frameworkBody = { message: 'Route GET:/projects/p/services/s/deployments not found', error: 'Not Found', statusCode: 404 }
+  const mk = (err: ApiError) => ({
+    request: async (_m: string, path: string) => {
+      if (path.includes('/deployments')) throw err
+      return { services: [{ id: 'svc_1', type: 'compute', name: 'web' }] }
+    },
+  }) as any
+  it('maps the framework 404 to the friendly message', async () => {
+    await expect(computeDeployments('web', {}, { api: mk(new ApiError(404, 'Not Found', frameworkBody)), project: { projectId: 'p' } }))
+      .rejects.toThrow('this platform does not support deployment history yet')
+  })
+  it('leaves a non-framework 404 alone', async () => {
+    await expect(computeDeployments('web', {}, { api: mk(new ApiError(404, 'no such service', { error: 'no such service' })), project: { projectId: 'p' } }))
+      .rejects.toThrow('no such service')
   })
 })

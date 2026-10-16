@@ -495,7 +495,9 @@ export function rollbackDisclosure(
   ]
 }
 
-const noRoute = (e: unknown) => e instanceof ApiError && e.status === 404 && /Route (GET|POST):/.test(e.message)
+// Fastify's default 404 carries the "Route GET:... not found" text in body.message, while ApiError.message is body.error ("Not Found").
+const noRoute = (e: unknown) =>
+  e instanceof ApiError && e.status === 404 && /^Route (GET|POST):/.test(String(e.body?.message ?? e.message))
 const NO_ROUTE = 'this platform does not support deployment history yet'
 
 async function deploymentsTarget(opts: { branch?: string }, deps?: DomainDeps) {

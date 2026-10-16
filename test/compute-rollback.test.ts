@@ -174,3 +174,24 @@ describe('computeRollback', () => {
     expect(posts).toEqual([])
   })
 })
+
+describe('computeRollback on a platform without the routes', () => {
+  const body = (m: string) => ({ message: `Route ${m}:/projects/p/services/svc_1/x not found`, error: 'Not Found', statusCode: 404 })
+  const base = { request: async (_m: string, path: string): Promise<any> => ({ services: [{ id: 'svc_1', type: 'compute', name: 'web' }] }) }
+  const dep = { project: { projectId: 'p' } }
+  it('list GET framework 404 becomes the friendly message', async () => {
+    const api: any = { ...base, request: async (_m: string, path: string) => {
+      if (path.includes('/deployments')) throw new ApiError(404, 'Not Found', body('GET'))
+      return base.request(_m, path)
+    } }
+    await expect(computeRollback('web', { yes: true }, { api, ...dep })).rejects.toThrow('this platform does not support deployment history yet')
+  })
+  it('POST framework 404 becomes the friendly message', async () => {
+    const api: any = { ...base, rawRequest: async () => { throw new ApiError(404, 'Not Found', body('POST')) } }
+    await expect(computeRollback('web', { yes: true, to: OLD }, { api, ...dep })).rejects.toThrow('this platform does not support deployment history yet')
+  })
+  it('a real 404 for the deployment is not rewritten', async () => {
+    const api: any = { ...base, rawRequest: async () => { throw new ApiError(404, 'no such deployment for this service', { error: 'no such deployment for this service' }) } }
+    await expect(computeRollback('web', { yes: true, to: OLD }, { api, ...dep })).rejects.toThrow('no such deployment for this service')
+  })
+})
