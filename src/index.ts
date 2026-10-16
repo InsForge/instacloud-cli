@@ -386,7 +386,7 @@ const {
 } = computeCmd.splitExecArgs(process.argv)
 
 // ---- compute ----
-const compute = program.command('compute').description('Compute services: lifecycle (start/stop/suspend/restart/status), scale, limits, volume, public access, always-on, exec, ssh, GitHub source, logs, metrics')
+const compute = program.command('compute').description('Compute services: lifecycle (start/stop/suspend/restart/status), deployments and rollback, scale, limits, volume, public access, always-on, exec, ssh, GitHub source, logs, metrics')
 compute.command('start [service]').description('Bring a compute service online (persistent — re-enables auto-wake)')
   .option('--json').option('--branch <branch>', 'branch (default: current)').action(guard((service, o) => computeCmd.computeStart(service, o)))
 compute.command('stop [service]').description('Take a compute service offline; traffic will NOT wake it until `start`')
@@ -447,6 +447,12 @@ compute.command('start-command [service]').description('Show or stage a compute 
   .option('--clear', 'use the image default command on the next deploy')
   .option('--json').option('--branch <branch>', 'branch (default: current)')
   .action(guard((service, o) => computeCmd.computeStartCommand(service, o)))
+compute.command('deployments [service]').description('List a compute service\'s deployment history, newest first: which one is live, what started each, and why a failed one failed')
+  .option('--limit <n>', 'rows to show (1..100, default 20)').option('--json').option('--branch <branch>', 'branch (default: current)')
+  .action(guard((service, o) => computeCmd.computeDeployments(service, o)))
+compute.command('rollback [service]').description("Roll a compute service back to an earlier deployment: restores that deployment's image, port and start command, keeps variables, scale, domains, volume and databases, and pauses GitHub auto-deploy until it is turned back on in the console (Settings → Source). With no --to, the target is the newest successful deployment before the live one that runs a different image. Gated: deploy. Asks on a terminal, anywhere else needs --yes")
+  .option('--to <id>', 'deployment id (full, or a unique prefix of at least 8 characters)').option('--yes', 'skip the confirmation').option('--json').option('--branch <branch>', 'branch (default: current)')
+  .action(guard((service, o) => computeCmd.computeRollback(service, o)))
 compute.command('volume [service]').description("Show, attach, grow, remount, or delete a compute service's persistent volume. --mount-path alone stages an existing volume path change, pending until deploy or restart; an unchanged normalized path is a no-op readback. No flag: print size, mount path, and the plan cap (any plan). --size on a volumeless service ATTACHES one (any plan up to its own plan cap — 10Gi free, 50Gi paid by default — which is also what a disk with no size named is born at; a size above the free cap is paid; the disk mounts at --mount-path (default /data) on the next deploy); on a volume-bearing one it grows (paid plans; grow-only — a provisioned disk cannot shrink). --delete DESTROYS the disk and ALL its data immediately (no detach, no undo; billing stops now, and suspend fast-wake + scale-out return). Billing is actual data stored — the size is a cap, not a price")
   .option('--mount-path <path>', 'configure mount path; existing volume changes apply on the next deploy (restarts the service)')
   .option('--size <gi>', 'new size in whole Gi, e.g. 10 (must be ≥ the current size)')

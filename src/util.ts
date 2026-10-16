@@ -306,3 +306,14 @@ export function promptPasswordFrom(
 export function promptPassword(label = 'Password: '): Promise<string> {
   return promptPasswordFrom(process.stdin, process.stdout, label)
 }
+
+/** "5 min ago", "2 hours ago", "3 days ago", then the plain date. */
+export function relativeTime(iso: string, now: Date): string {
+  const secs = Math.max(0, Math.floor((now.getTime() - new Date(iso).getTime()) / 1000))
+  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'} ago`
+  if (secs < 60) return 'just now'
+  if (secs < 3600) return `${Math.floor(secs / 60)} min ago`
+  if (secs < 86400) return plural(Math.floor(secs / 3600), 'hour')
+  if (secs < 30 * 86400) return plural(Math.floor(secs / 86400), 'day')
+  return iso.slice(0, 10)
+}
