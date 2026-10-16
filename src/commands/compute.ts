@@ -1,7 +1,9 @@
 import { AgentApprovalRequired, ApiClient, ApiError, requireProject } from '../api.js'
 import { AgentSessionMissing } from '../agent.js'
 import { safeText } from '../config.js'
-import { info, printJson, handleApproval, relayExitCode, writeFileAtomicSync, resolveThroughSymlink } from '../util.js'
+import * as clack from '@clack/prompts'
+import { info, printJson, handleApproval, relayExitCode, writeFileAtomicSync, resolveThroughSymlink, relativeTime, CliCancel } from '../util.js'
+import { parseRunLimit } from './cron.js'
 import { resolveComputeServiceId, resolveSoleService, q, parseVolumeGib, parseCount } from './services.js'
 
 type Opts = { branch?: string; group?: string; json?: boolean }
@@ -412,6 +414,185 @@ export async function computeStatus(serviceName: string | undefined, opts: LifeO
   const r = await api.request('GET', `/projects/${p.projectId}/services/${id}/state`)
   if (opts.json) return printJson(r)
   info(`compute ${serviceName ?? id}: desired=${r.desiredState}  live=${r.state}`)
+}
+
+// ---- deployments / rollback ----
+
+export type ServiceDeploymentView = {
+  id: string
+  status: 'succeeded' | 'failed'
+  trigger: string
+  image: string
+  pinnedImage: string | null
+  commitSha: string | null
+  buildId: string | null
+  buildSource: 'github' | 'archive' | null
+  port: number | null
+  startCommand: string | null
+  actor: { kind: string; userId?: string; email?: string } | null
+  rollbackOf: string | null
+  error: string | null
+  backfilled: boolean
+  createdAt: string
+  live: boolean
+  rollbackEligible: boolean
+  ineligibleReason?: 'live' | 'failed' | 'same_image'
+  variablesChangedSince?: number
+}
+type DeploymentsBody = { deployments: ServiceDeploymentView[]; next?: string; autoDeployPausedByRollback?: boolean }
+type RollbackBody = { deployment: ServiceDeploymentView; service?: unknown; autoDeployPaused?: boolean }
+
+const PAUSED_LINE = 'auto-deploy is paused. Turn it back on in the console: Settings → Source'
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const INELIGIBLE: Record<string, string> = {
+  live: 'that deployment is already live',
+  failed: 'that deployment failed, so there is nothing to roll back to',
+  same_image: 'that deployment runs the same image as the live one, use restart to redeploy it',
+}
+
+const shortImage = (d: ServiceDeploymentView) => (d.pinnedImage ? `…@sha256:${d.pinnedImage.split('@sha256:')[1]?.slice(0, 8) ?? ''}` : d.image)
+
+export function deploymentLines(rows: ServiceDeploymentView[], now: Date): string[] {
+  if (!rows.length) return ['(no deployments yet)']
+  const head = ['ID', 'STATUS', 'TRIGGER', 'COMMIT', 'IMAGE', 'WHEN']
+  const body = rows.map((d) => [
+    d.id.slice(0, 8), d.live ? 'live' : d.status, d.trigger, d.commitSha?.slice(0, 7) ?? '-', shortImage(d),
+    relativeTime(d.createdAt, now) + (d.status === 'failed' && d.error ? `  ${d.error}` : ''),
+  ])
+  const widths = head.map((h, i) => Math.max(h.length, ...body.map((r) => r[i]!.length)))
+  return [head, ...body].map((r) => r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(widths[i]!))).join('  ').trimEnd())
+}
+
+export function pickRollbackTarget(rows: ServiceDeploymentView[], to?: string, service = 'this service'): ServiceDeploymentView {
+  if (to === undefined) {
+    const liveAt = rows.findIndex((d) => d.live)
+    const found = rows.slice(liveAt + 1).find((d) => d.rollbackEligible)
+    if (!found) throw new Error(`no earlier deployment on ${service} is eligible, so there is nothing to roll back to`)
+    return found
+  }
+  const want = to.toLowerCase()
+  const exact = rows.find((d) => d.id.toLowerCase() === want)
+  const matches = exact ? [exact] : want.length >= 8 ? rows.filter((d) => d.id.toLowerCase().startsWith(want)) : []
+  if (matches.length === 0) throw new Error(`no deployment ${to} on ${service}`)
+  if (matches.length > 1) throw new Error(`deployment id prefix ${to} matches ${matches.length} deployments`)
+  const t = matches[0]!
+  if (!t.rollbackEligible) throw new Error(INELIGIBLE[t.ineligibleReason ?? ''] ?? 'that deployment cannot be rolled back to')
+  return t
+}
+
+export function rollbackDisclosure(
+  target: ServiceDeploymentView,
+  opts: { port: number | null; autoDeployBranch: string | null; service: string; now: Date },
+): string[] {
+  const commit = target.commitSha ? `commit ${target.commitSha.slice(0, 7)}, ` : ''
+  const changed = target.variablesChangedSince ? ` (${target.variablesChangedSince} changed since)` : ''
+  // A backfilled row recorded no port or start command, so the platform keeps the current ones.
+  return [
+    `Rolling back ${opts.service} to ${target.id.slice(0, 8)} (${commit}${relativeTime(target.createdAt, opts.now)})`,
+    target.backfilled ? '  restores  image' : `  restores  image, ${opts.port != null ? `port ${opts.port}, ` : ''}start command`,
+    ...(target.backfilled ? ['  keeps     port and start command (not recorded for this deployment)'] : []),
+    `  keeps     variables${changed}, scale, domains, volume, databases`,
+    ...(opts.autoDeployBranch ? [`  pauses    auto-deploy from ${opts.autoDeployBranch}`] : []),
+    ...(target.pinnedImage ? [] : [`  warning   this deployment used the tag ${target.image}, which may point to a different image now`]),
+  ]
+}
+
+// Fastify's default 404 carries the "Route GET:... not found" text in body.message, while ApiError.message is body.error ("Not Found").
+const noRoute = (e: unknown) =>
+  e instanceof ApiError && e.status === 404 && /^Route (GET|POST):/.test(String(e.body?.message ?? e.message))
+const NO_ROUTE = 'this platform does not support deployment history yet'
+
+async function deploymentsTarget(opts: { branch?: string }, deps?: DomainDeps) {
+  const { api, project: p } = await domainDeps(deps)
+  return { api, p, branch: opts.branch ?? p.branch }
+}
+
+export async function computeDeployments(
+  serviceName: string | undefined, opts: { json?: boolean; branch?: string; limit?: string }, deps?: DomainDeps,
+): Promise<void> {
+  const limit = opts.limit === undefined ? undefined : parseRunLimit(opts.limit)
+  const { api, p, branch } = await deploymentsTarget(opts, deps)
+  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
+  const id = resolveComputeServiceId(services, serviceName)
+  let body: DeploymentsBody
+  try {
+    body = await api.request('GET', `/projects/${p.projectId}/services/${id}/deployments${limit === undefined ? '' : `?limit=${limit}`}`)
+  } catch (e) {
+    if (noRoute(e)) throw new Error(NO_ROUTE)
+    throw e
+  }
+  if (opts.json) return printJson(body)
+  for (const line of deploymentLines(body.deployments, new Date())) info(line)
+  if (body.autoDeployPausedByRollback) info(`\n${PAUSED_LINE}`)
+}
+
+// The branch auto-deploy follows, or null when a rollback would pause nothing (no repo, or it is off).
+async function autoDeployBranch(api: DomainApi, projectId: string, id: string, branch: string | undefined): Promise<string | null> {
+  try {
+    const { source } = await api.request('GET', `/projects/${projectId}/services/${id}/source${q(branch)}`)
+    return source?.type === 'github' && source.auto_deploy ? source.branch : null
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null
+    throw e
+  }
+}
+
+export async function computeRollback(
+  serviceName: string | undefined, opts: { to?: string; yes?: boolean; json?: boolean; branch?: string }, deps?: DomainDeps,
+): Promise<void> {
+  // Same rule as `template rollback`: ask on a terminal, anywhere else (a pipe, --json) say --yes.
+  const tty = !opts.json && !opts.yes && !!process.stdin.isTTY && !!process.stdout.isTTY
+  if (!opts.yes && !tty) throw new Error('rollback needs --yes without a terminal to confirm on, so nothing was rolled back')
+  const { api, p, branch } = await deploymentsTarget(opts, deps)
+  const { services } = await api.request('GET', `/projects/${p.projectId}/services${q(branch)}`)
+  const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, 'compute', serviceName)
+  const base = `/projects/${p.projectId}/services/${svc.id}`
+
+  const firstPage = async (): Promise<DeploymentsBody> => {
+    try { return await api.request('GET', `${base}/deployments?limit=100`) } catch (e) {
+      if (noRoute(e)) throw new Error(NO_ROUTE)
+      throw e
+    }
+  }
+  // A full id goes to the server as is (it validates). The first page only makes the disclosure
+  // specific, and an id not on it gets the generic one.
+  let target: ServiceDeploymentView | null = null
+  let targetId: string
+  if (opts.to && UUID_RE.test(opts.to)) {
+    const want = opts.to.toLowerCase()
+    targetId = opts.to
+    if (!opts.json) target = (await firstPage()).deployments.find((d) => d.id.toLowerCase() === want) ?? null
+  } else {
+    target = pickRollbackTarget((await firstPage()).deployments, opts.to, svc.name)
+    targetId = target.id
+  }
+
+  if (!opts.json) {
+    const auto = await autoDeployBranch(api, p.projectId, svc.id, branch)
+    if (target) for (const line of rollbackDisclosure(target, { port: target.port, autoDeployBranch: auto, service: svc.name, now: new Date() })) info(line)
+    else {
+      info(`Rolling back ${svc.name} to ${targetId.slice(0, 8)}`)
+      info('  restores  image, port, start command')
+      info('  keeps     variables, scale, domains, volume, databases')
+      if (auto) info(`  pauses    auto-deploy from ${auto}`)
+    }
+    if (tty) {
+      const go = await clack.confirm({ message: 'Continue?' })
+      if (clack.isCancel(go)) throw new CliCancel()
+      if (!go) return
+    }
+  }
+
+  let res
+  try { res = await api.rawRequest('POST', `${base}/rollback`, { deploymentId: targetId }) } catch (e) {
+    if (noRoute(e)) throw new Error(NO_ROUTE)
+    throw e
+  }
+  if (handleApproval(res, opts.json)) return
+  if (opts.json) return printJson(res.body)
+  const body = res.body as RollbackBody
+  info(`rolled back ${svc.name} to ${targetId.slice(0, 8)}. ${body.deployment.id.slice(0, 8)} is live.`)
+  if (body.autoDeployPaused) info(PAUSED_LINE)
 }
 
 // ---- exec (one-shot command; no interactive shell/PTY) ----
