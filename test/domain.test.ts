@@ -210,7 +210,7 @@ describe('domain list / status', () => {
       hostnames: [{ hostname: 'both.com', state: 'failed', service: 'web' }, { hostname: 'www.both.com', state: 'failed', service: 'web' }] }
     const { deps: d } = deps({ '/orgs/org1/domains': { items: [purchased, empty, moving, sub, both] } })
     await domainList({}, d)
-    expect(out()).toContain('myapp.com  attaching  (expires 2027-09-10, auto-renews)')
+    expect(out()).toContain('myapp.com  attaching  (expires 2027-09-10)  auto-renew on')
     expect(out()).toContain('api.myapp.com  active → api')
     expect(out()).toContain('www.myapp.com  failed → web — already attached to another compute service')
     expect(out()).toContain('nothing serving — insta domain attach old.com\n')
@@ -227,6 +227,15 @@ describe('domain list / status', () => {
     await domainStatus('MyApp.com', {}, d)
     expect(out()).not.toContain('order o1')
     expect(out()).toContain('api.myapp.com  active → api')
+  })
+  it.each([true, false])('list and status show auto-renew=%s without an expiry date', async (autorenew) => {
+    const { deps: d } = deps({ '/domains/orders': { items: [] }, '/orgs/org1/domains': { items: [{ ...purchased, expiresAt: null, autorenew }] } })
+    await domainList({}, d)
+    await domainStatus('myapp.com', {}, d)
+    expect(out().match(/myapp\.com  attaching  auto-renew (on|off)/g)).toEqual([
+      `myapp.com  attaching  auto-renew ${autorenew ? 'on' : 'off'}`,
+      `myapp.com  attaching  auto-renew ${autorenew ? 'on' : 'off'}`,
+    ])
   })
   it('a canceled checkout says how to order again', async () => {
     const { deps: d } = deps({ '/domains/orders': { items: [{ ...order, status: 'canceled', failedReason: 'checkout expired before payment' }] }, '/orgs/org1/domains': { items: [] } })

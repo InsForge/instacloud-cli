@@ -101,7 +101,7 @@ export async function domainAttach(host: string, opts: { branch?: string; group?
 // ---- list / status ----
 
 function domainLines(d: Purchased, linked = true): string[] {
-  const out = [`${d.domainName}  ${d.status}${d.expiresAt ? `  (expires ${d.expiresAt.slice(0, 10)}${d.autorenew ? ', auto-renews' : ''})` : ''}`]
+  const out = [`${d.domainName}  ${d.status}${d.expiresAt ? `  (expires ${d.expiresAt.slice(0, 10)})` : ''}  auto-renew ${d.autorenew ? 'on' : 'off'}`]
   // Vacuously true for a domain with no hostnames, which is every domain until something attaches.
   // Not while delegated: the platform fails every hostname on the way out, and refuses the attach.
   if (linked && !d.delegated && d.hostnames.every((h) => h.state === 'failed')) {
