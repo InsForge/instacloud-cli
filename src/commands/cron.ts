@@ -229,11 +229,11 @@ export function jobShowLines(j: CronJob, serviceName?: string): string[] {
   // decrypts it. Saying so beats an empty "value" column that reads as "this header is set to
   // nothing". Secret-backed headers get a row each, because the secret NAME is readable and is the
   // thing an operator needs when a rotation or a missing secret is the question.
-  const refs = Object.entries(refsOf(j.request))
-  const literal = j.request.headerNames.filter((n) => findHeader(refsOf(j.request), n) === undefined)
+  const refs = refsOf(j.request)
+  const literal = j.request.headerNames.filter((n) => findHeader(refs, n) === undefined)
   const rows = [
     ...(literal.length ? [`${literal.join(', ')}  (names only — values are encrypted at rest and never returned)`] : []),
-    ...refs.map(([h, s]) => `${h} ← secret ${s}  (resolved at send time)`),
+    ...Object.entries(refs).map(([h, s]) => `${h} ← secret ${s}  (resolved at send time)`),
   ]
   if (!rows.length) lines.push('  headers      (none)')
   rows.forEach((r, i) => lines.push(`  ${i ? '           ' : 'headers    '}  ${r}`))

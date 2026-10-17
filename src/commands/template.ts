@@ -384,6 +384,11 @@ export type TemplateDeployDeps = {
   fetchGitHub?: (t: GitHubTarget) => Promise<FetchedTemplate>
 }
 
+// The poll route is keyed by deployment id, not project: name the project so agent mode signs
+// with the project-bound session (a bootstrap session is rejected as "for a different project").
+const readDeployment = (api: TemplateApi, projectId: string) => (id: string) =>
+  api.request('GET', `/template-deployments/${id}`, undefined, { projectId })
+
 export async function templateDeploy(target: string, opts: TemplateDeployOpts = {}, deps: TemplateDeployDeps = {}): Promise<void> {
   const given = parseSetFlags(opts.set ?? []) // a typo'd --set fails before any network access
   // --json asked for parseable output: every human progress line is suppressed so stdout carries
@@ -463,9 +468,7 @@ export async function templateDeploy(target: string, opts: TemplateDeployOpts = 
     info(`deploying template ${codeLabel} to branch ${branchName}${acceptedRegion ? ` in ${acceptedRegion}` : ''} (${deploymentId})`)
     for (const line of publicBucketLines(services)) info(line)
   }
-  // The poll route is keyed by deployment id, not project: name the project so agent mode signs
-  // with the project-bound session (a bootstrap session is rejected as "for a different project").
-  const dep = await watchDeployment((id) => api.request('GET', `/template-deployments/${id}`, undefined, { projectId: p.projectId }), deploymentId, quiet ? () => {} : info, deps.wait)
+  const dep = await watchDeployment(readDeployment(api, p.projectId), deploymentId, quiet ? () => {} : info, deps.wait)
   if (opts.json) return printJson(source ? { source, ...dep } : dep)
   info(`template ${codeLabel} deployed to branch ${branchName}`)
   for (const u of deploymentUrls(dep)) info(`  ${u}`)
@@ -570,10 +573,10 @@ export async function templateUpgrade(service: string, opts: TemplateUpgradeOpts
   const ask = deps.ask ?? promptVariable
 
   const target = await deploymentOfService(api, p.projectId, branchName, service, 'upgrade')
-  // The poll and preview routes are keyed by deployment id, not project: name the project so agent
-  // mode signs with the project-bound session, exactly as templateDeploy does.
-  // The preview is a GET and raises coded 409s of its own (template_superseded among them), so it
-  // gets the same reading as the POST rather than the raw "<sentence> (HTTP 409)" the guard prints.
+  // The preview route is keyed by deployment id, not project, so it names the project as
+  // readDeployment does. It is a GET and raises coded 409s of its own (template_superseded among
+  // them), so it gets the same reading as the POST rather than the raw "<sentence> (HTTP 409)" the
+  // guard prints.
   let plan
   try {
     ;({ plan } = await api.request('GET', `/template-deployments/${target.deploymentId}/upgrade`, undefined, { projectId: p.projectId }))
@@ -613,7 +616,7 @@ export async function templateUpgrade(service: string, opts: TemplateUpgradeOpts
 
   const deploymentId = res.body.deploymentId ?? (res.body.deployment ?? res.body).id
   if (!quiet) info(`upgrading ${service} to ${plan.to_version} (${deploymentId})`)
-  const dep = await watchDeployment((id) => api.request('GET', `/template-deployments/${id}`, undefined, { projectId: p.projectId }), deploymentId, quiet ? () => {} : info, deps.wait)
+  const dep = await watchDeployment(readDeployment(api, p.projectId), deploymentId, quiet ? () => {} : info, deps.wait)
   if (quiet) return printJson(dep)
   info(`${service} is on ${plan.to_version}`)
   info(`next: \`insta template rollback ${service}\` returns it to ${plan.from_version}`)
@@ -668,7 +671,7 @@ export async function templateRollback(service: string, opts: TemplateRollbackOp
   if (handleApproval(res, opts.json)) return
   const deploymentId = res.body.deploymentId ?? (res.body.deployment ?? res.body).id
   out(`rolling ${service} back (${deploymentId})`)
-  const dep = await watchDeployment((id) => api.request('GET', `/template-deployments/${id}`, undefined, { projectId: p.projectId }), deploymentId, out, deps.wait)
+  const dep = await watchDeployment(readDeployment(api, p.projectId), deploymentId, out, deps.wait)
   if (quiet) return printJson(dep)
   info(`${service} is back on ${(dep.deployment ?? dep).template_version ?? 'its previous version'}`)
   renderNextActions(dep.nextActions)
