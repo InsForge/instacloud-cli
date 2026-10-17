@@ -284,11 +284,12 @@ cron.command('preview <expression>').description('Validate an expression and pri
   .option('--json').action(guard((expression, o) => cronCmd.cronPreview(expression, o)))
 
 // ---- domain (bought here, or bring your own; hostnames on compute services; DNS of bought zones) ----
-const dom = program.command('domain').description('Domains: buy through InstaCloud or bring your own — attach / check / detach hostnames on compute services; DNS records of bought domains')
-dom.command('search <keyword>').description('Search purchasable names with prices (a label like "myapp" or a full name like "myapp.com")')
+const dom = program.command('domain').description('Domains: attach, check and detach hostnames on compute services, and manage domains already bought through InstaCloud')
+// search, buy and zone delegate are hidden while the platform pauses new orders and BYO delegation.
+dom.command('search <keyword>', { hidden: true }).description('Search purchasable names with prices (a label like "myapp" or a full name like "myapp.com")')
   .option('--tlds <list>', 'comma-separated TLDs to include').option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((keyword, o) => domainCmd.domainSearch(keyword, o)))
-dom.command('buy <name>').description('Buy a domain — pay at the printed Stripe Checkout link. It serves nothing until you attach it (gated: domain.purchase)')
+dom.command('buy <name>', { hidden: true }).description('Buy a domain — pay at the printed Stripe Checkout link. It serves nothing until you attach it (gated: domain.purchase)')
   .option('--years <n>', 'registration term in years (default 1)')
   .option('--no-open', 'print the checkout URL instead of opening a browser').option('--json')
   .action(guard((name, o) => domainCmd.domainBuy(name, o)))
@@ -321,14 +322,14 @@ ns.command('reset <domain>').description("Put the zone back on the registrar's o
   .option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((domain, o) => domainCmd.domainNameserversReset(domain, o)))
 
-const zone = dom.command('zone').description("Bring-your-own domains served from an InstaCloud-managed zone (nameserver delegation): point the domain's registrar at the pair `zone delegate` answers, and every attach's records — apexes included — are published for you. The alternative stays available: `insta domain attach` alone prints records to paste into your own zone")
-zone.command('delegate <domain>').description("Delegate a domain you own elsewhere: builds its managed zone (seeded by a provider record scan — a HEURISTIC, so review `zone records` and add anything missing at your current provider BEFORE switching nameservers; re-running delegate re-imports) and answers the two nameservers to set at your registrar. A domain carrying live MX records is refused — move mail first or keep the records path (org admin; gated: zone.delegate — agent mode gates from a linked project, an unlinked --org call falls under org administration instead)")
+const zone = dom.command('zone').description("Bring-your-own domains already delegated to an InstaCloud-managed zone: list them, review their records, or release them. For a hostname under a domain you own elsewhere, `insta domain attach` prints the records to add in your own DNS")
+zone.command('delegate <domain>', { hidden: true }).description("Delegate a domain you own elsewhere: builds its managed zone (seeded by a provider record scan — a HEURISTIC, so review `zone records` against your current DNS BEFORE switching nameservers) and answers the two nameservers to set at your registrar. A domain carrying live MX records is refused — move mail first or keep the records path (org admin; gated: zone.delegate — agent mode gates from a linked project, an unlinked --org call falls under org administration instead)")
   .option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((domain, o) => domainCmd.zoneDelegate(domain, o)))
 zone.command('list').description("The org's delegated zones: which are still waiting for the nameserver switch and which are serving")
   .option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((o) => domainCmd.zoneList(o)))
-zone.command('records <domain>').description("Every record in the delegated zone — the pre-switch review. The scan seeds common records but is not exhaustive: compare against your current DNS and add what is missing at your CURRENT provider, then re-run `zone delegate` to re-import")
+zone.command('records <domain>').description("Every record in the delegated zone, for review before you switch nameservers. The provider scan seeds common records but is not exhaustive, so compare it against your current DNS first")
   .option('--org <id>', "target org (default: linked project's org)").option('--json')
   .action(guard((domain, o) => domainCmd.zoneRecords(domain, o)))
 zone.command('release <domain>').description("Release a delegated zone: the platform's records are pruned and the zone deleted. Point the nameservers back at your own provider; hostnames re-verify on the records path (org admin; gated: zone.delegate — agent mode gates from a linked project, an unlinked --org call falls under org administration instead)")

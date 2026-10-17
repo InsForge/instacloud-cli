@@ -40,7 +40,8 @@ describe('domain search', () => {
     expect(calls[0]).toMatchObject({ method: 'GET', path: '/orgs/org1/domains/search?q=MyApp&tlds=com%2Cdev' })
     expect(out()).toContain('myapp.com  $15.59  (renews $23.99/yr)')
     expect(out()).toContain('myapp.dev  unavailable — Domain unavailable')
-    expect(out()).toContain('buy one: insta domain buy myapp.com')
+    // New orders are paused, so the results name no buy command.
+    expect(out()).not.toContain('insta domain buy')
   })
   it('--org overrides the linked org; --json is the platform body', async () => {
     const { deps: d, calls } = deps({ '/domains/search': { results: [quote] } })
@@ -228,20 +229,19 @@ describe('domain list / status', () => {
     expect(out()).not.toContain('order o1')
     expect(out()).toContain('api.myapp.com  active → api')
   })
-  it('a canceled checkout says how to order again', async () => {
+  // New orders are paused (platform #689), so a canceled checkout names no way to order again.
+  it('a canceled checkout says why and does not send the reader to buy again', async () => {
     const { deps: d } = deps({ '/domains/orders': { items: [{ ...order, status: 'canceled', failedReason: 'checkout expired before payment' }] }, '/orgs/org1/domains': { items: [] } })
     await domainStatus('myapp.com', {}, d)
     expect(out()).toContain('canceled — checkout expired before payment')
-    expect(out()).toContain('order again: insta domain buy myapp.com')
-  })
-  // `buy` and `attach` take no --org: they act on the linked project's org, so naming another one
-  // would send the reader to a command that acts somewhere else.
-  it('drops the follow-up commands when --org names an org they do not act on', async () => {
-    const routes = { '/domains/orders': { items: [{ ...order, status: 'canceled', failedReason: 'x' }] }, '/orgs/org9/domains': { items: [] } }
-    const { deps: d } = deps(routes)
-    await domainStatus('myapp.com', { org: 'org9' }, d)
-    expect(out()).toContain('canceled')
+    expect(out()).toContain('the checkout closed without payment')
     expect(out()).not.toContain('insta domain buy')
+  })
+  it('an empty list says so without pointing at search', async () => {
+    const { deps: d } = deps({ '/orgs/org1/domains': { items: [] } })
+    await domainList({}, d)
+    expect(out()).toContain('no domains bought through InstaCloud in this org')
+    expect(out()).not.toContain('insta domain search')
   })
   it('status of a name never bought here fails plainly, --json included', async () => {
     const { deps: d } = deps({ '/domains/orders': { items: [] }, '/orgs/org1/domains': { items: [] } })

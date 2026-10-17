@@ -37,8 +37,6 @@ export async function domainSearch(keyword: string, opts: { tlds?: string; org?:
   const r = await api.request<{ results: Quote[] }>('GET', `/orgs/${orgId}/domains/search?${qs}`)
   if (opts.json) return printJson(r)
   for (const line of searchLines(r.results)) info(line)
-  const buyable = r.results.find((x) => x.purchasable)
-  if (buyable) info(`buy one: insta domain buy ${buyable.domainName}`)
 }
 
 // ---- buy / attach ----
@@ -125,9 +123,9 @@ function domainLines(d: Purchased, linked = true): string[] {
   return out
 }
 
-function orderStatusLines(o: Order, linked = true): string[] {
+function orderStatusLines(o: Order): string[] {
   const out = [`order ${o.id}: ${o.domainName} — ${o.status}${o.failedReason ? ` — ${o.failedReason}` : ''}`]
-  if (linked && o.status === 'canceled') out.push(`  the checkout closed without payment — order again: insta domain buy ${o.domainName}`)
+  if (o.status === 'canceled') out.push('  the checkout closed without payment')
   return out
 }
 
@@ -135,7 +133,7 @@ export async function domainList(opts: { org?: string; json?: boolean }, deps?: 
   const { api, orgId } = await orgDeps(opts, deps)
   const r = await api.request<{ items: Purchased[] }>('GET', `/orgs/${orgId}/domains`)
   if (opts.json) return printJson(r)
-  if (!r.items.length) return info('no domains bought through InstaCloud in this org (search: insta domain search <keyword>)')
+  if (!r.items.length) return info('no domains bought through InstaCloud in this org')
   for (const d of r.items) for (const line of domainLines(d, !opts.org)) info(line)
 }
 
@@ -150,7 +148,7 @@ export async function domainStatus(name: string, opts: { org?: string; json?: bo
   const order = orders.find((o) => o.domainName === host) ?? null
   if (!domain && !order) die(`${host} was not bought through this org`)
   if (opts.json) return printJson({ domain, order })
-  for (const line of domain ? domainLines(domain, !opts.org) : orderStatusLines(order!, !opts.org)) info(line)
+  for (const line of domain ? domainLines(domain, !opts.org) : orderStatusLines(order!)) info(line)
 }
 
 // ---- nameservers and transferring out ----
@@ -382,10 +380,9 @@ export function zoneRecordLines(records: ZoneRecord[]): string[] {
  * into the zone itself — apexes included — instead of printing them for hand-copying. The zone is
  * SEEDED by the provider's record scan, which is a heuristic: the review-then-switch contract
  * (printed, and enforced by nothing else) is to compare `zone records` against the domain's current
- * DNS and add what is missing at the CURRENT provider — re-running delegate re-imports — before
- * re-pointing. A domain carrying live MX records is refused outright: a DNS move that can drop
- * mail is never done implicitly. 202 approval_required in agent mode (zone.delegate); org admin
- * either way.
+ * DNS before re-pointing. A domain carrying live MX records is refused outright: a DNS move that
+ * can drop mail is never done implicitly. 202 approval_required in agent mode (zone.delegate); org
+ * admin either way.
  */
 const orgArgOf = (opts: RecordsOpts): string => (opts.org ? ` --org ${opts.org}` : '')
 
@@ -402,7 +399,7 @@ export async function zoneDelegate(domainName: string, opts: RecordsOpts, deps?:
   if (opts.json) return printJson(res.body)
   const z = res.body as OrgZone
   for (const line of zoneLines(z, opts.org)) info(line)
-  info(`the zone was seeded by a provider scan — a heuristic. Check \`insta domain zone records ${z.domainName}${orgArgOf(opts)}\` against your current DNS, add anything missing at your CURRENT provider (re-running delegate re-imports), and only then switch the nameservers.`)
+  info(`the zone was seeded by a provider scan, which can miss records. Check \`insta domain zone records ${z.domainName}${orgArgOf(opts)}\` against your current DNS, and only then switch the nameservers.`)
 }
 
 export async function zoneList(opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
@@ -421,7 +418,7 @@ export async function zoneList(opts: RecordsOpts, deps?: DomainDeps): Promise<vo
     }
   } while (cursor)
   if (opts.json) return printJson(r)
-  if (!r.items.length) return info('no delegated zones — start one: insta domain zone delegate <domain>')
+  if (!r.items.length) return info('no delegated zones')
   for (const z of r.items) for (const line of zoneLines(z, opts.org)) info(line)
 }
 
@@ -430,7 +427,7 @@ export async function zoneRecords(domainName: string, opts: RecordsOpts, deps?: 
   const r = await api.request<{ items: ZoneRecord[] }>('GET', `${zonePath(orgId, domainName)}/records`)
   if (opts.json) return printJson(r)
   for (const line of zoneRecordLines(r.items)) info(line)
-  if (r.items.length) info(`every type shows here (the scan is a heuristic) — add anything missing at your current DNS provider and re-run \`insta domain zone delegate ${domainName.trim().toLowerCase()}${orgArgOf(opts)}\` to re-import before switching nameservers`)
+  if (r.items.length) info('every type shows here. The provider scan can miss records, so compare them against your current DNS before switching nameservers')
 }
 
 /**

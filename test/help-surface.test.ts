@@ -124,6 +124,26 @@ describe('group shapes', () => {
     expect(run(['compute', 'scale', '--help']).stdout).toContain('Usage: insta compute scale [options] [count] [service]')
     expect(run(['storage', 'set-access', '--help']).stdout).toContain('Usage: insta storage set-access [options] <access>')
   }, 30_000)
+  // New domain orders and BYO delegation are paused (platform #689, #687). Hidden, not removed,
+  // so re-enabling them is unhiding. The Usage line proves each path resolved to itself.
+  it('hides domain search, buy and zone delegate from help but keeps them registered', () => {
+    const domainHelp = run(['domain', '--help']).stdout
+    const domain = commandNames(domainHelp)
+    expect(domain).not.toContain('search')
+    expect(domain).not.toContain('buy')
+    expect(domain).toContain('zone')
+    expect(commandNames(run(['domain', 'zone', '--help']).stdout)).toEqual(['list', 'records', 'release'])
+    expect(`${run(['--help']).stdout}${domainHelp}`).not.toMatch(/\bbuy\b|zone delegate/i)
+    for (const [path, usage] of [
+      [['domain', 'search'], 'Usage: insta domain search [options] <keyword>'],
+      [['domain', 'buy'], 'Usage: insta domain buy [options] <name>'],
+      [['domain', 'zone', 'delegate'], 'Usage: insta domain zone delegate [options] <domain>'],
+    ] as const) {
+      const r = run([...path, '--help'])
+      expect(r.status, path.join(' ')).toBe(0)
+      expect(r.stdout, path.join(' ')).toContain(usage)
+    }
+  }, 30_000)
   it('reads source-build output under `build logs`, not a top-level `build-logs`', () => {
     expect(commandNames(run(['build', '--help']).stdout)).toContain('logs')
     const r = run(['build', 'logs', '--help'])
