@@ -37,6 +37,50 @@ test('unlinked directories still resolve to null (walk stops at fs root)', async
   expect(await readProject(lone)).toBeNull()
 })
 
+test.each(['file', 'env'])('rejects path-changing project IDs from %s', async (source) => {
+  const { root } = linkedProjectWithSubdir()
+  mkdirSync(join(root, '.insta'), { recursive: true })
+  const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  const exitCode = process.exitCode
+  try {
+    for (const projectId of ['../..', '.', '%2e%2e', 'p/q', 'p\\q', 'p?x=y', 'p#fragment', 'p\n']) {
+      if (source === 'env') vi.stubEnv('INSTA_PROJECT_ID', projectId)
+      else writeFileSync(join(root, '.insta', 'project.json'), JSON.stringify({ ...proj, projectId }))
+      await expect(resolveProjectLink(root)).rejects.toBeInstanceOf(CliExit)
+      expect(err.mock.calls.at(-1)?.[0]).toBe('error: invalid project ID: expected letters, numbers, underscores, or hyphens\n')
+    }
+  } finally {
+    err.mockRestore()
+    process.exitCode = exitCode
+    vi.unstubAllEnvs()
+  }
+})
+
+test.each([{}, null, { projectId: '' }, { projectId: 42 }, { projectId: ['p-1'] }])('rejects a malformed project binding %j', async (binding) => {
+  const { root } = linkedProjectWithSubdir()
+  mkdirSync(join(root, '.insta'), { recursive: true })
+  writeFileSync(join(root, '.insta', 'project.json'), JSON.stringify(binding))
+  const exitCode = process.exitCode
+  try {
+    await expect(resolveProjectLink(root)).rejects.toBeInstanceOf(CliExit)
+  } finally {
+    process.exitCode = exitCode
+  }
+})
+
+test.each(['p_ABC-123', '8bb9d1e2-26f9-4f70-8202-4b53f9c899ae'])('preserves a valid project ID %s', async (projectId) => {
+  const { root } = linkedProjectWithSubdir()
+  mkdirSync(join(root, '.insta'), { recursive: true })
+  writeFileSync(join(root, '.insta', 'project.json'), JSON.stringify({ ...proj, projectId }))
+  expect((await resolveProjectLink(root))?.link.projectId).toBe(projectId)
+  vi.stubEnv('INSTA_PROJECT_ID', projectId)
+  try {
+    expect((await resolveProjectLink(root))?.link.projectId).toBe(projectId)
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})
+
 // ---- the control plane lives in a machine-local sidecar, not the committed binding --------------
 // A project id is only meaningful on the control plane that minted it. INSTA_API_URL outranks the
 // persisted config (config.ts readGlobal), so it pins "which plane the CLI is pointed at".
@@ -256,11 +300,16 @@ test('a committed project id cannot put a C1 escape introducer on the terminal',
   await writeProject(proj, root)
   // U+009B is CSI on its own: terminals that honour 8-bit controls start a sequence from it alone.
   writeFileSync(linkFile(root), JSON.stringify({ ...proj, projectId: 'p-2\u009b31m' }))
-  const f = (await resolveProjectLink(root))?.foreign
-  expect(f?.reason).toBe('changed')
-  const msg = foreignLinkMessage(f!)
-  expect(msg).toContain('p-231m')
-  expect(msg).not.toContain('\u009b')
+  const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  const exitCode = process.exitCode
+  try {
+    await expect(resolveProjectLink(root)).rejects.toBeInstanceOf(CliExit)
+    expect(err.mock.calls[0]?.[0]).toContain('invalid project ID')
+    expect(err.mock.calls[0]?.[0]).not.toContain('\u009b')
+  } finally {
+    err.mockRestore()
+    process.exitCode = exitCode
+  }
 })
 
 // The record is sanitized when READ, not only when printed: the comparison uses it too. A copied
