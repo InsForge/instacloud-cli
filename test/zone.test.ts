@@ -42,6 +42,8 @@ describe('domain zone delegate', () => {
     // The review-then-switch contract is the safety of the whole flow — it prints every time.
     expect(out()).toContain('insta domain zone records byo.example')
     expect(out()).toContain('only then switch the nameservers')
+    // BYO delegation is paused (platform #687), so re-running delegate is no longer a step.
+    expect(out()).not.toContain('re-running delegate')
   })
   it('under --org naming ANOTHER org the call goes projectless — the wrong project must not sign', async () => {
     const { deps: d, calls } = deps({}, { status: 200, body: awaiting })
@@ -72,6 +74,7 @@ describe('domain zone list', () => {
     const { deps: d2 } = deps({ '/zones': { items: [] } })
     await zoneList({}, d2)
     expect(out()).toContain('no delegated zones')
+    expect(out()).not.toContain('zone delegate')
   })
   it('combines pages into the existing JSON response and stops on the terminal cursor', async () => {
     const second = { ...awaiting, domainName: 'second.example' }
@@ -93,7 +96,7 @@ describe('domain zone list', () => {
 })
 
 describe('domain zone records', () => {
-  it('lists EVERY type (the review must see CAA) and prints the add-then-reimport reminder', async () => {
+  it('lists EVERY type (the review must see CAA) and prints the compare-before-switching reminder', async () => {
     const { deps: d, calls } = deps({
       '/zones/byo.example/records': { items: [
         { type: 'CNAME', host: '@', answer: 'edge.example', proxied: true },
@@ -105,11 +108,9 @@ describe('domain zone records', () => {
     expect(calls[0]).toMatchObject({ method: 'GET', path: '/orgs/org1/zones/byo.example/records' })
     expect(out()).toContain('CAA')
     expect(out()).toContain('(proxied)')
-    // The instruction is copy-pasteable VERBATIM: domain and org scope included.
-    expect(out()).toContain('re-run `insta domain zone delegate byo.example` to re-import')
-    stdout.length = 0
-    await zoneRecords('Byo.Example', { org: 'org9' }, d)
-    expect(out()).toContain('re-run `insta domain zone delegate byo.example --org org9` to re-import')
+    expect(out()).toContain('compare them against your current DNS before switching nameservers')
+    // BYO delegation is paused (platform #687): the reminder no longer sends anyone to re-run it.
+    expect(out()).not.toContain('zone delegate')
   })
   it('says plainly when the scan has not landed yet', () => {
     expect(zoneRecordLines([])[0]).toContain('run this again in a moment')
