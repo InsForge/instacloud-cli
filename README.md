@@ -229,7 +229,7 @@ build never reaches a production installer.
 | `insta branch` | `create` · `list` · `switch` · `delete` · `merge` |
 | `insta service` (`services`, `svc`) | `add` · `list` · `remove` · `rename` |
 | `insta secrets` | Write `.env`, plus `list` · `set` · `unset` · `bind` · `unbind` · `bindings` · `sources` · `tree` |
-| `insta domain` | Bought or bring-your-own: `attach` · `check` · `detach`; buy through InstaCloud: `search` · `buy` · `list` · `status` · `records …` |
+| `insta domain` | Bought or bring-your-own: `attach` · `check` · `detach`. Domains already bought through InstaCloud: `list` · `status` · `records …` |
 | `insta compute` | `start` · `stop` · `suspend` · `restart` · `status` · `scale` · `limits` · `volume` · `always-on` · `exec` · `ssh` · `repo` · `connect-repo` · `watch-paths` · `disconnect-repo` · `logs` · `metrics` |
 | `insta postgres` | `url` (print the DSN) · `connect` (psql) · `stats` · `limits` · `restart` · `volume` · `always-on` · `private-access` · `public-access` · `logs` · `metrics` — every verb takes `[service]` |
 | `insta redis` · `mysql` · `mongodb` | `query` · `status` · `limits` · `volume` · `always-on` · `logs` · `metrics` |
