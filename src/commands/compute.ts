@@ -411,7 +411,22 @@ export async function computeStatus(serviceName: string | undefined, opts: LifeO
   const id = resolveComputeServiceId(services, serviceName)
   const r = await api.request('GET', `/projects/${p.projectId}/services/${id}/state`)
   if (opts.json) return printJson(r)
-  info(`compute ${serviceName ?? id}: desired=${r.desiredState}  live=${r.state}`)
+  for (const line of statusLines(serviceName ?? id, r)) info(line)
+}
+
+type LastFailure = { kind: 'deploy' | 'build'; at: string; reason: string; buildId?: string; buildSource?: 'github' | 'archive' }
+
+/** `insta compute status` lines. The platform sends `lastFailure` only while the newest deploy
+ *  attempt is a failure, so `live=none` comes with its reason instead of sending the user to dig
+ *  through `compute repo --json` or the build record (insta-platform #646). */
+export function statusLines(label: string, r: { desiredState?: string; state?: string; lastFailure?: LastFailure }): string[] {
+  const lines = [`compute ${label}: desired=${r.desiredState}  live=${r.state}`]
+  const f = r.lastFailure
+  if (!f) return lines
+  const at = Number.isNaN(Date.parse(f.at)) ? f.at : `${new Date(f.at).toISOString().slice(0, 16).replace('T', ' ')} UTC`
+  lines.push(`last ${f.kind} failed ${at}: ${f.reason}`)
+  if (f.buildId) lines.push(`  → insta build logs ${f.buildId} --source ${f.buildSource ?? 'github'}`)
+  return lines
 }
 
 // ---- exec (one-shot command; no interactive shell/PTY) ----
