@@ -319,8 +319,7 @@ export async function resolveDbUrl(
   service: string | undefined,
   json?: boolean,
 ): Promise<DbUrlResolution | null> {
-  const { services } = await api.request('GET', `/projects/${projectId}/services${q(branch)}`)
-  const svc = resolveSoleService(services as Array<{ id: string; type: string; name: string }>, 'postgres', service)
+  const svc = await resolvePostgres(api, projectId, branch, service)
   const res = await api.rawRequest('GET', `/projects/${projectId}/services/${svc.id}/credentials`)
   if (handleApproval(res, json)) return null
   const url = res.body?.credentials?.DATABASE_URL
@@ -473,7 +472,7 @@ export function accessErrorMessage(e: ApiError, ctx: { service: string; branch?:
   return `${ctx.what} failed (${e.status}): ${e.message}`
 }
 
-async function resolvePostgres(api: ApiClient, projectId: string, branch: string | undefined, service: string | undefined) {
+async function resolvePostgres(api: { request: (m: string, p: string) => Promise<any> }, projectId: string, branch: string | undefined, service: string | undefined) {
   const { services } = await api.request('GET', `/projects/${projectId}/services${q(branch)}`)
   return resolveSoleService(services as Array<{ id: string; type: string; name: string }>, 'postgres', service)
 }

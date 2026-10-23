@@ -20,6 +20,19 @@ async function orgDeps(opts: { org?: string }, deps?: DomainDeps): Promise<{ api
   return { api: await ApiClient.load(), orgId: await resolveOrgId(opts) }
 }
 
+// The org mutations still sign for a PROJECT in agent mode: `domain.delegate` and `zone.delegate`
+// are read at the session project, and a bootstrap session names none, so the platform refuses it.
+// A user token needs no project, so the link stays optional and the verb keeps working from an
+// unlinked directory. The link only counts when it belongs to the org being mutated: under `--org`
+// naming ANOTHER org, signing with this directory's project would evaluate authorization against
+// the wrong project's policy, so the call goes projectless and the platform's org-administration
+// path judges it instead.
+async function signingScope(orgId: string, deps?: DomainDeps): Promise<{ projectId: string } | undefined> {
+  const link = deps?.project ?? (await readProject()) ?? undefined
+  const projectId = link && link.orgId === orgId ? link.projectId : undefined
+  return projectId ? { projectId } : undefined
+}
+
 export function searchLines(results: Quote[]): string[] {
   if (!results.length) return ['no results']
   const w = Math.max(...results.map((r) => r.domainName.length))
@@ -167,15 +180,7 @@ const domainPath = (orgId: string, domainName: string): string =>
  */
 export async function domainDelegate(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
   const { api, orgId } = await orgDeps(opts, deps)
-  // The org route still signs for a PROJECT in agent mode — `domain.delegate` is read there, the
-  // same precedent `buy` documents above — but a user token needs none, so the link stays optional
-  // and the verb keeps working from an unlinked directory. The link only counts when it belongs to
-  // the org being mutated: under `--org` naming ANOTHER org, signing with this directory's project
-  // would evaluate authorization against the wrong project's policy, so the call goes projectless
-  // and the platform's org-administration path judges it instead.
-  const link = deps?.project ?? (await readProject()) ?? undefined
-  const projectId = link && link.orgId === orgId ? link.projectId : undefined
-  const res = await api.rawRequest('POST', `${domainPath(orgId, domainName)}/delegate`, undefined, projectId ? { projectId } : undefined)
+  const res = await api.rawRequest('POST', `${domainPath(orgId, domainName)}/delegate`, undefined, await signingScope(orgId, deps))
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const d = res.body as Purchased
@@ -187,7 +192,7 @@ export async function domainDelegate(domainName: string, opts: RecordsOpts, deps
   // attach` line domainLines just printed, which IS the remedy there (attach works as usual
   // under managed custody).
   if (!d.hostnames.length || d.hostnames.some((h) => h.state !== 'failed')) {
-    info(`hostnames re-verify on the managed zone by themselves — watch: insta domain status ${d.domainName}${opts.org ? ` --org ${opts.org}` : ''}`)
+    info(`hostnames re-verify on the managed zone by themselves — watch: insta domain status ${d.domainName}${orgArgOf(opts)}`)
   }
 }
 
@@ -374,6 +379,8 @@ export function zoneRecordLines(records: ZoneRecord[]): string[] {
     `  ${r.type.padEnd(typeW)}  ${r.host.padEnd(hostW)}  ${r.answer.padEnd(answerW)}${r.ttl !== undefined ? `  ttl ${r.ttl}` : ''}${r.priority !== undefined ? `  prio ${r.priority}` : ''}${r.proxied ? '  (proxied)' : ''}`)
 }
 
+const orgArgOf = (opts: RecordsOpts): string => (opts.org ? ` --org ${opts.org}` : '')
+
 /**
  * Delegate a bring-your-own domain: the platform builds a managed zone for it and answers the two
  * nameservers to set at the domain's own registrar. From then on every attach publishes its records
@@ -384,17 +391,9 @@ export function zoneRecordLines(records: ZoneRecord[]): string[] {
  * can drop mail is never done implicitly. 202 approval_required in agent mode (zone.delegate); org
  * admin either way.
  */
-const orgArgOf = (opts: RecordsOpts): string => (opts.org ? ` --org ${opts.org}` : '')
-
 export async function zoneDelegate(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
   const { api, orgId } = await orgDeps(opts, deps)
-  // Same precedent as `domain delegate`: the org route signs for the linked project in agent mode
-  // (zone.delegate is read at the session project), but only when the link belongs to the org
-  // being mutated — under `--org` naming another org the call goes projectless and the platform's
-  // org-administration path judges it.
-  const link = deps?.project ?? (await readProject()) ?? undefined
-  const projectId = link && link.orgId === orgId ? link.projectId : undefined
-  const res = await api.rawRequest('POST', zonePath(orgId), { domainName }, projectId ? { projectId } : undefined)
+  const res = await api.rawRequest('POST', zonePath(orgId), { domainName }, await signingScope(orgId, deps))
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const z = res.body as OrgZone
@@ -437,9 +436,7 @@ export async function zoneRecords(domainName: string, opts: RecordsOpts, deps?: 
  */
 export async function zoneRelease(domainName: string, opts: RecordsOpts, deps?: DomainDeps): Promise<void> {
   const { api, orgId } = await orgDeps(opts, deps)
-  const link = deps?.project ?? (await readProject()) ?? undefined
-  const projectId = link && link.orgId === orgId ? link.projectId : undefined
-  const res = await api.rawRequest('DELETE', zonePath(orgId, domainName), undefined, projectId ? { projectId } : undefined)
+  const res = await api.rawRequest('DELETE', zonePath(orgId, domainName), undefined, await signingScope(orgId, deps))
   if (handleApproval(res, opts.json)) return
   if (opts.json) return printJson(res.body)
   const r = res.body as { domainName: string; released: boolean }
