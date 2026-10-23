@@ -84,10 +84,10 @@ export const ACCOUNT_ROUTES: ReadonlySet<string> = new Set(['agent', 'auth', 'me
 export async function agentHeaders(api: SessionApi, method: string, path: string, rawBody: string, scope: AgentScope = {}): Promise<Record<string, string>> {
   // A key minted by agent auth is already an agent principal on the platform and may not enroll a session.
   if (!mode || api.agentCredential) return {}
-  if (canonicalTarget(path) === '/agent/sessions' && method === 'POST') return {
+  const target = canonicalTarget(path)
+  if (target === '/agent/sessions' && method === 'POST') return {
     'Insta-Actor-Type': 'agent', 'Insta-Agent-Source': mode.source, 'Insta-Agent-Client': mode.client,
   }
-  const target = canonicalTarget(path)
   const match = target.match(/^\/projects\/([^/?]+)/)
   const projectId = scope.projectId ?? (match ? decodeURIComponent(match[1]!) : undefined)
   if (!projectId && !ACCOUNT_ROUTES.has(target.split('/')[1]?.split('?')[0] ?? '')) {

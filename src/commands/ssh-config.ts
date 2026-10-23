@@ -678,11 +678,11 @@ export function upsertCertAuthority(existing: string, hostPattern: string, caKey
 export function planCertAuthority(existing: string, hostPattern: string, caKey: string): CertAuthorityPlan {
   const key = caKey.trim()
   const lines = existing.split('\n')
-  const removed: string[] = [], removedAt: number[] = []
+  const removed: string[] = [], removedAt: number[] = [], keptLines: string[] = []
   lines.forEach((l, i) => {
-    if (isSupersededAnchor(l, hostPattern, key)) { removed.push(l); removedAt.push(i) }
+    if (isSupersededAnchor(l, hostPattern, key)) { removed.push(l); removedAt.push(i) } else keptLines.push(l)
   })
-  const kept = lines.filter((l) => !isSupersededAnchor(l, hostPattern, key)).join('\n')
+  const kept = keptLines.join('\n')
   const base = kept === '' ? '' : kept.endsWith('\n') ? kept : kept + '\n'
   const line = renderCertAuthority(hostPattern, key)
   return { next: base + line, line: line.trimEnd(), removed, removedAt }

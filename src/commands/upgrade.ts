@@ -171,6 +171,13 @@ export function writeCache(c: CheckCache): void {
   writeFileSync(cachePath(), JSON.stringify(c))
 }
 
+// Record a freshly observed `latest` as checked `now`, keeping whatever else the cache holds (lastAutoAt).
+function recordLatest(latest: string, now: number): CheckCache {
+  const cache: CheckCache = { ...(readCache() ?? { checkedAt: 0, latest }), checkedAt: now, latest }
+  writeCache(cache)
+  return cache
+}
+
 // May this cached answer stand in for a live registry call? An entry that is old, malformed, or
 // provably behind the build we are running must not suppress the check — that is exactly how a
 // wrong `latest` pins an install to an old version indefinitely. Note the deliberate `>= 0`:
@@ -278,7 +285,7 @@ export async function upgrade(current: string, deps: UpgradeDeps = {}): Promise<
 
   if (latest) {
     // Record what we just learned so the start-up nudge can't keep quoting a stale answer.
-    writeCache({ ...(readCache() ?? { checkedAt: 0, latest }), checkedAt: now, latest })
+    recordLatest(latest, now)
     if (cmpSemver(latest, current) <= 0) {
       say(`✓ insta ${current} is already the latest release — nothing to upgrade`)
       return
@@ -319,7 +326,7 @@ export async function upgrade(current: string, deps: UpgradeDeps = {}): Promise<
     say(`insta install finished, but the installed version could not be read — run \`insta --version\` to confirm`)
     return
   }
-  writeCache({ ...(readCache() ?? { checkedAt: 0, latest: observed }), checkedAt: now, latest: observed })
+  recordLatest(observed, now)
   if (cmpSemver(observed, current) > 0) {
     say(`✓ insta upgraded ${current} → ${observed}`)
     return
@@ -351,8 +358,7 @@ export async function backgroundCheck(current: string, deps: CheckDeps = {}): Pr
   const latest = await resolveLatest(deps.fetchImpl ?? fetch)
   if (!latest) return 'none' // offline / registry down — try again next TTL
   const now = deps.now ?? Date.now()
-  const cache: CheckCache = { ...(readCache() ?? { checkedAt: 0, latest }), checkedAt: now, latest }
-  writeCache(cache)
+  const cache = recordLatest(latest, now)
 
   const channel = deps.channel ?? detectChannel()
   const action = decideAction(cache, current, deps.auto ?? autoEnabled(), channel, now)

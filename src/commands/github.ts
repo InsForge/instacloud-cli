@@ -97,6 +97,13 @@ const sleepSeconds = (s: number) => new Promise<void>((r) => setTimeout(r, s * 1
 // Node fires a timer of ~1ms for anything it cannot represent — a huge delay overflows, a negative one
 // is clamped — so both ends are pinned or the wait becomes a hot poll of GitHub through us.
 const pollDelay = (s: number) => Math.min(Math.max(s, 1), 60)
+// The next poll interval after a failed poll. A dropped link, or the per-IP limiter this cadence
+// already tripped on the login flow, must not end an authorization the person may be one click from
+// finishing; any other platform refusal does.
+const backOff = (e: unknown, interval: number): number => {
+  if (e instanceof ApiError && e.status !== 429) throw e
+  return pollDelay(interval + 5)
+}
 
 // GitHub shows the person a code to type; the platform holds the device code and finishes the exchange,
 // so nothing secret passes through the CLI.
@@ -121,10 +128,7 @@ export async function authorizeTerminal(api: ApiClient, wait: (s: number) => Pro
     try {
       answer = await api.request<GitHubDevicePoll>('POST', '/me/github/device/poll', { state: start.state })
     } catch (e) {
-      // A dropped link, or the per-IP limiter this cadence already tripped on the login flow, must not
-      // end an authorization the person may be one click from finishing.
-      if (e instanceof ApiError && e.status !== 429) throw e
-      interval = pollDelay(interval + 5)
+      interval = backOff(e, interval)
       continue
     }
     if (!answer.pending) {
@@ -183,8 +187,7 @@ export async function findCallerRepo(api: ApiClient, ref: RepoRef, authorize: ty
     try {
       mine = await api.request<GitHubView>('GET', '/me/github/repos', undefined, { signal: AbortSignal.timeout(remaining) })
     } catch (e) {
-      if (e instanceof ApiError && e.status !== 429) throw e
-      interval = pollDelay(interval + 5)
+      interval = backOff(e, interval)
       continue
     }
     const ready = lookup(mine.repos)
