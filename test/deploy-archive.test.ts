@@ -120,16 +120,25 @@ describe('deployArchive — the gated call and the poll after it', () => {
     expect(process.exitCode).toBe(2)
   })
 
-  it('accepts an empty worker URL but rejects it for a TCP deploy', async () => {
+  it('accepts the empty URL of a worker and of a private HTTP service', async () => {
+    // A private-only service on a real port goes live with url '' (SUP2-536, SUP2-543).
     for (const port of ['0', '8080']) {
       const { api: a, calls } = api([
         { status: 202, body: { operationId: 'op_1' } },
         { status: 200, body: { ...live, url: '' } },
       ])
-      const result = deployArchive(a, 'p1', ref, 'main', { port }, Date.now, noWait)
-      if (port === '0') await expect(result).resolves.toMatchObject({ url: '', image: live.imageRef })
-      else await expect(result).rejects.toThrow(/no image or URL/)
+      await expect(deployArchive(a, 'p1', ref, 'main', { port }, Date.now, noWait)).resolves.toMatchObject({ url: '', image: live.imageRef })
       expect(calls[0]!.body.port).toBe(Number(port))
+    }
+  })
+
+  it('still rejects a live deploy with no image or a non-string URL', async () => {
+    for (const body of [{ ...live, imageRef: '' }, { ...live, url: undefined }]) {
+      const { api: a } = api([
+        { status: 202, body: { operationId: 'op_1' } },
+        { status: 200, body },
+      ])
+      await expect(deployArchive(a, 'p1', ref, 'main', { port: '8080' }, Date.now, noWait)).rejects.toThrow(/no image or URL/)
     }
   })
 
