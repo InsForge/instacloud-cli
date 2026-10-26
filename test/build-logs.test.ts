@@ -50,7 +50,7 @@ describe('build logs', () => {
   it('strips bidi overrides, invisible marks and C1 controls while keeping tabs and newlines', () => {
     const printer = new BuildLogPrinter()
     const write = vi.fn()
-    printer.print({ ...base, state: 'ready', output: [{ step: 'step1', name: 'RUN test', entries: [entry('a\u202eb\u0085c\u2066d\u2069e\u200ef\u200fg\u202ah\u009fi\n'), entry('col1\tcol2\n'), entry('plain text ok\n')] }] }, write)
+    printer.print({ ...base, state: 'ready', output: [{ step: 'step1', name: 'RUN test', entries: [entry('a\u202eb\u0080\u0085c\u2066d\u2069e\u200ef\u200fg\u202ah\u009fi\n'), entry('col1\tcol2\n'), entry('plain text ok\n')] }] }, write)
     expect(write.mock.calls.map(([text]) => text)).toEqual(['RUN test\n', 'abcdefghi\n', 'col1\tcol2\n', 'plain text ok\n'])
   })
 
