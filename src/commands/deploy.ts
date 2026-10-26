@@ -43,7 +43,7 @@ export function deployedTarget(r: { url?: string; endpointHost?: string | null; 
   if (r.url) return r.url
   // No URL is a worker (port 0) or a private-only service; a redeploy that passed no --port can be either.
   if (port === '0') return '(no URL: a worker)'
-  return `(no public URL: ${port === undefined ? 'a worker or ' : ''}a private service — \`insta service list\` shows its private address)`
+  return `(no public URL: ${port === undefined ? 'a worker or ' : ''}a private service — \`insta compute public-access <service>\` shows its private address)`
 }
 
 // What a source directory resolved to. flyctl and local-docker build an image locally and hand it

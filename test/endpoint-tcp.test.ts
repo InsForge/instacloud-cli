@@ -73,8 +73,8 @@ describe('deploy --endpoint', () => {
     ['a tcp deploy', { url: '', endpointHost: HOST }, '7000', 'tcp', `tcp://${HOST}:7000`],
     ['an http deploy', { url: 'https://app.example' }, '7000', undefined, 'https://app.example'],
     ['a worker', { url: '' }, '0', undefined, '(no URL: a worker)'],
-    ['a private HTTP service', { url: '' }, '8080', undefined, '(no public URL: a private service — `insta service list` shows its private address)'],
-    ['a redeploy with no URL and no --port', { url: '' }, undefined, undefined, '(no public URL: a worker or a private service — `insta service list` shows its private address)'],
+    ['a private HTTP service', { url: '' }, '8080', undefined, '(no public URL: a private service — `insta compute public-access <service>` shows its private address)'],
+    ['a redeploy with no URL and no --port', { url: '' }, undefined, undefined, '(no public URL: a worker or a private service — `insta compute public-access <service>` shows its private address)'],
   ])('reports %s', (_label, r, port, endpoint, want) => {
     expect(deployedTarget(r, port, endpoint)).toBe(want)
   })
@@ -101,6 +101,13 @@ describe('archive deploy of a tcp service', () => {
   it('still refuses an empty URL with no tcp host', async () => {
     const { api: a } = api({ url: '' })
     await expect(deployArchive(a, 'p1', ref, 'main', { port: '7000', endpoint: 'tcp' }, Date.now, noWait)).rejects.toThrow(/no image or URL/)
+  })
+
+  // A redeploy passes no --endpoint, but the platform reports the endpoint the service kept: a tcp
+  // service answered with neither a URL nor a host is still refused, not taken for a private HTTP one.
+  it('refuses an empty URL with no host when the platform reports a v6 endpoint on a redeploy', async () => {
+    const { api: a } = api({ url: '', endpoint: 'tcp' })
+    await expect(deployArchive(a, 'p1', ref, 'main', { port: '7000' }, Date.now, noWait)).rejects.toThrow(/no image or URL/)
   })
 })
 

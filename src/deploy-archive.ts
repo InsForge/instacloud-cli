@@ -172,8 +172,9 @@ export async function deployArchive(
         const endpoint = endpointHost && isV6Endpoint(res.body?.endpoint) ? res.body.endpoint as Exclude<Endpoint, 'http'> : undefined
         // An empty url is an answer, not a missing one: a worker has none, and neither does a
         // private-only HTTP service (the platform's insta-compute adapter returns '' for one). Only a
-        // deploy that asked for a v6 endpoint is owed something in its place: the host.
-        if (typeof image !== 'string' || !image || typeof url !== 'string' || (!url && !endpointHost && isV6Endpoint(opts.endpoint))) {
+        // v6-endpoint service is owed something in its place, the host: one this deploy asked for
+        // with --endpoint, or one the platform reports (a redeploy keeps its endpoint and passes none).
+        if (typeof image !== 'string' || !image || typeof url !== 'string' || (!url && !endpointHost && (isV6Endpoint(opts.endpoint) || isV6Endpoint(res.body?.endpoint)))) {
           throw new Error('the deploy finished but the platform returned no image or URL for it — check `insta status`')
         }
         const optionalString = (field: string, v: unknown): string | undefined => {
