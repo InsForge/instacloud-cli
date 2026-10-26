@@ -100,7 +100,7 @@ export async function readBuildLogs(api: Api, projectId: string, source: BuildSo
   return { ...first, nextCursor: undefined, state: pending ? 'pending' : first.state, steps, output }
 }
 
-const safeText = (text: string) => stripVTControlCharacters(text).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+const safeText = (text: string) => stripVTControlCharacters(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
 
 export class BuildLogPrinter {
   private seen = new Map<string, number>()
