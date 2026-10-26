@@ -40,7 +40,10 @@ export function deployedTarget(r: { url?: string; endpointHost?: string | null; 
     if (endpoint === undefined) return `${r.endpointHost}:${port ?? '?'} (endpoint unchanged; \`insta service list\` shows its protocol)`
     return (endpoint === 'tcp+udp' ? ['tcp', 'udp'] : [endpoint]).map((pr) => `${pr}://${r.endpointHost}:${port ?? '?'}`).join(', ')
   }
-  return r.url || '(no URL: a worker)'
+  if (r.url) return r.url
+  // No URL is a worker (port 0) or a private-only service; a redeploy that passed no --port can be either.
+  if (port === '0') return '(no URL: a worker)'
+  return `(no public URL: ${port === undefined ? 'a worker or ' : ''}a private service — \`insta service list\` shows its private address)`
 }
 
 // What a source directory resolved to. flyctl and local-docker build an image locally and hand it

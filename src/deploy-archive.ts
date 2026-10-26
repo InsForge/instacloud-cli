@@ -170,7 +170,10 @@ export async function deployArchive(
         // The endpoint the service is on (instacloud-platform#681), so the address gets its scheme;
         // an older platform omits it, and a value this CLI does not know is treated as absent.
         const endpoint = endpointHost && isV6Endpoint(res.body?.endpoint) ? res.body.endpoint as Exclude<Endpoint, 'http'> : undefined
-        if (typeof image !== 'string' || !image || typeof url !== 'string' || (!url && opts.port !== '0' && !endpointHost)) {
+        // An empty url is an answer, not a missing one: a worker has none, and neither does a
+        // private-only HTTP service (the platform's insta-compute adapter returns '' for one). Only a
+        // deploy that asked for a v6 endpoint is owed something in its place: the host.
+        if (typeof image !== 'string' || !image || typeof url !== 'string' || (!url && !endpointHost && isV6Endpoint(opts.endpoint))) {
           throw new Error('the deploy finished but the platform returned no image or URL for it — check `insta status`')
         }
         const optionalString = (field: string, v: unknown): string | undefined => {
