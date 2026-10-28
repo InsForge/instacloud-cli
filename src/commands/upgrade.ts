@@ -46,7 +46,7 @@ export function resolveRunSpec(
   npmExecpath = spec.env.npm_execpath,
   execPath = process.execPath,
   platform: NodeJS.Platform = process.platform,
-): RunSpec {
+): RunSpec & { windowsVerbatimArguments?: boolean } {
   const resolved = resolveSpawnable(spec.cmd, spec.args, npmExecpath, execPath, platform, spec.env)
   return { ...spec, ...resolved }
 }
@@ -220,7 +220,7 @@ export function autoEnabled(home = homedir()): boolean {
 const spawnRun: Runner = ({ cmd, args, env }) =>
   new Promise<void>((resolve, reject) => {
     const resolved = resolveRunSpec({ cmd, args, env })
-    const p = spawn(resolved.cmd, resolved.args, { stdio: 'inherit', env })
+    const p = spawn(resolved.cmd, resolved.args, { stdio: 'inherit', env, windowsVerbatimArguments: resolved.windowsVerbatimArguments })
     p.on('error', reject)
     p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`upgrade failed (exit ${code})`))))
   })
@@ -238,7 +238,7 @@ const observeInstalled: Observer = (channel, installDir) =>
       // INSTA_NO_AUTOUPDATE: the child must not kick off yet another upgrade while we are reading it.
       const env: NodeJS.ProcessEnv = { ...process.env, INSTA_NO_AUTOUPDATE: '1' }
       const resolved = resolveRunSpec({ cmd, args: ['--version'], env })
-      const p = spawn(resolved.cmd, resolved.args, { stdio: ['ignore', 'pipe', 'ignore'], env })
+      const p = spawn(resolved.cmd, resolved.args, { stdio: ['ignore', 'pipe', 'ignore'], env, windowsVerbatimArguments: resolved.windowsVerbatimArguments })
       p.stdout.on('data', (d) => (out += String(d)))
       p.on('error', () => resolve(null))
       p.on('close', () => {

@@ -34,13 +34,13 @@ const defaultRunner: Runner = (cmdIn, argsIn, inherit = false) =>
   new Promise((resolve) => {
     // resolveSpawnable: on Windows `npx` is a .cmd shim spawn() refuses without a shell —
     // re-enter npm's CLI script via node instead (same treatment as `insta agent setup`).
-    const { cmd, args } = resolveSpawnable(cmdIn, argsIn)
+    const { cmd, args, windowsVerbatimArguments } = resolveSpawnable(cmdIn, argsIn)
     const env: NodeJS.ProcessEnv = { ...process.env, AI_AGENT: process.env.AI_AGENT || 'insta' }
     // npx exports its flags as npm_config_* to children; npm_config_package would pin the inner
     // `npx -y skills …` to whatever package launched this CLI (see setup.ts defaultRunner).
     delete env.npm_config_package
     delete env.npm_config_call
-    const p = spawn(cmd, args, { stdio: inherit ? 'inherit' : 'ignore', env })
+    const p = spawn(cmd, args, { stdio: inherit ? 'inherit' : 'ignore', env, windowsVerbatimArguments })
     p.on('error', () => resolve({ ok: false })) // e.g. npx not on PATH
     p.on('close', (code) => resolve({ ok: code === 0 }))
   })

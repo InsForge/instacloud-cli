@@ -55,7 +55,7 @@ test('the Windows version probe resolves the installed shim through a copied `Pa
   const shim = join(shimBin, 'insta.CMD')
   writeFileSync(shim, '@echo off\n')
   const cmdExe = win32.join(process.env.SYSTEMROOT ?? process.env.windir ?? 'C:\\Windows', 'System32', 'cmd.exe')
-  const wrapped = { cmd: cmdExe, args: ['/d', '/s', '/c', shim, '--version'] }
+  const wrapped = { cmd: cmdExe, args: ['/d', '/v:off', '/s', '/c', `""${shim}" "--version""`], windowsVerbatimArguments: true }
 
   // Windows' real casing, as a spread of process.env preserves it.
   const copied = { Path: shimBin, PATHEXT: '.CMD', INSTA_NO_AUTOUPDATE: '1' }
