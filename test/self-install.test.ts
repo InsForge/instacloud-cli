@@ -164,14 +164,12 @@ test('resolveSpawnable re-enters npm/npx as node scripts so Windows .cmd shims a
   // Non-npm commands on Windows (claude is an npm-installed .cmd shim too) go through cmd.exe,
   // resolved to the shim's ABSOLUTE PATH first — cmd.exe searches the current directory before
   // PATH, so a bare name would let a claude.cmd planted in the project dir shadow the real CLI.
-  // Args stay UNquoted: libuv quotes spaced args when building the child command line, so
-  // pre-quoting would double up and deliver literal quote characters to the target.
   const shimBin = mkdtempSync(join(tmpdir(), 'insta-shim-'))
   const claudeShim = join(shimBin, 'claude.CMD')
   writeFileSync(claudeShim, '@echo off\n')
   const winEnv = { PATH: shimBin, PATHEXT: '.COM;.EXE;.BAT;.CMD' }
   expect(resolveSpawnable('claude', ['mcp', 'add', '--header', 'Authorization: Bearer x'], npmCli, winNode, 'win32', winEnv, 'C:\\Windows'))
-    .toEqual({ cmd: 'C:\\Windows\\System32\\cmd.exe', args: ['/d', '/s', '/c', claudeShim, 'mcp', 'add', '--header', 'Authorization: Bearer x'] })
+    .toEqual({ cmd: 'C:\\Windows\\System32\\cmd.exe', args: ['/d', '/v:off', '/s', '/c', `""${claudeShim}" "mcp" "add" "--header" "Authorization: Bearer x""`], windowsVerbatimArguments: true })
   // Not on PATH → passthrough; the bare spawn fails and the probe treats it as not-installed.
   expect(resolveSpawnable('claude', ['--version'], npmCli, winNode, 'win32', { PATH: '' }))
     .toEqual({ cmd: 'claude', args: ['--version'] })

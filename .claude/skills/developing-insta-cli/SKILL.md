@@ -118,7 +118,7 @@ skipped because its argv is split before commander ever sees it — there, pass 
 | `npm error code EOTP` | Publish needs `--otp=<fresh 2FA code>` |
 | `npm publish` ENOENT package.json | Ran outside the repo root |
 | `npx insta@latest` behind the GH release | `publish-npm` job failed (OIDC trust/config?) — see step 4 |
-| `'C:\Program' is not recognized` from a spawned tool (win CI only) | `resolveSpawnable`'s cmd.exe hop strips the quotes around a spaced executable path (`C:\Program Files\…`). It exists for npm-installed `.cmd` shims — a real `.exe` (git, …) must be spawned directly, which finds it through PATHEXT anyway |
+| `'C:\Program' is not recognized` from a spawned tool (win CI only) | Callers of `resolveSpawnable` must pass its `windowsVerbatimArguments` option to `spawn`; cmd.exe needs the resolver's outer command quotes and inner argument quotes intact. Spawn real `.exe` files directly. |
 | CLI hits the wrong server in tests | Persisted `~/.insta/config.json` apiUrl; set `INSTA_API_URL` (≥0.0.7) or move the config aside |
 | `insta --api-url X compute exec …` works but `insta compute exec --api-url X …` says unknown option | exec's argv is split before commander (`splitExecArgs`); pass `--api-url` at the root for exec |
 

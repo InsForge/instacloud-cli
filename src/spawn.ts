@@ -54,7 +54,7 @@ export function resolveSpawnable(
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
   systemRoot: string = process.env.SYSTEMROOT ?? process.env.windir ?? 'C:\\Windows',
-): { cmd: string; args: string[] } {
+): { cmd: string; args: string[]; windowsVerbatimArguments?: boolean } {
   const execIsNode = /(^|[\\/])node(\.exe)?$/i.test(execPath)
   if ((cmd === 'npm' || cmd === 'npx') && execIsNode) {
     if (npmExecpath && /(^|[\\/])np[mx](-cli)?\.[cm]?js$/.test(npmExecpath)) {
@@ -69,13 +69,16 @@ export function resolveSpawnable(
   }
 
   const bareShim = !/[\\/]/.test(cmd) && !/\.exe$/i.test(cmd)
-  if (platform === 'win32' && bareShim && !args.some((arg) => /[&|<>^%"]/.test(arg))) {
+  if (platform === 'win32' && bareShim && !args.some((arg) => /[&|<>^%"\r\n]/.test(arg))) {
     const absolute = whichOnPath(cmd, env, platform)
-    // The resolved path itself also becomes cmd.exe input. If a PATH directory contains a shell
-    // metacharacter, fail via the caller's normal bare-spawn fallback rather than interpret it.
-    // Pin cmd.exe to System32 too: CreateProcess-style lookup checks cwd before PATH.
-    if (absolute && !/[&|<>^%"]/.test(absolute)) {
-      return { cmd: win32.join(systemRoot, 'System32', 'cmd.exe'), args: ['/d', '/s', '/c', absolute, ...args] }
+    if (absolute && !/[&|<>^%"\r\n]/.test(absolute)) {
+      const command = [absolute, ...args].map((arg) => `"${arg.replace(/\\+$/, '$&$&')}"`).join(' ')
+      // cmd /s consumes the outer quotes; libuv must not escape the inner argument quotes.
+      return {
+        cmd: win32.join(systemRoot, 'System32', 'cmd.exe'),
+        args: ['/d', '/v:off', '/s', '/c', `"${command}"`],
+        windowsVerbatimArguments: true,
+      }
     }
   }
   return { cmd, args }

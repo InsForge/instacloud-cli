@@ -172,7 +172,7 @@ export async function ensureCliInstalled(
 // guidance. Ignoring stdin keeps the installer's own output intact. (-y means no prompt anyway.)
 const defaultRunner: Runner = (cmdIn, argsIn) =>
   new Promise((resolve) => {
-    const { cmd, args } = resolveSpawnable(cmdIn, argsIn)
+    const { cmd, args, windowsVerbatimArguments } = resolveSpawnable(cmdIn, argsIn)
     const env: NodeJS.ProcessEnv = { ...process.env, AI_AGENT: process.env.AI_AGENT || 'insta', FORCE_COLOR: '0' }
     // When THIS process was launched by npx, npx exports its flags as npm_config_* env vars.
     // npm_config_package pins package resolution for every nested npm/npx child — the inner
@@ -181,7 +181,7 @@ const defaultRunner: Runner = (cmdIn, argsIn) =>
     // (deliberate user configuration).
     delete env.npm_config_package
     delete env.npm_config_call
-    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], env })
+    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], env, windowsVerbatimArguments })
     let output = ''
     const grab = (chunk: Buffer) => { output += chunk.toString() }
     p.stdout?.on('data', grab)
