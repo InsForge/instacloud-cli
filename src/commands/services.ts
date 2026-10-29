@@ -6,6 +6,8 @@ export const SERVICE_TYPES = ['postgres', 'storage', 'compute', 'redis', 'mysql'
 export type ServiceType = (typeof SERVICE_TYPES)[number]
 const SERVICE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
 
+// ---- pure, unit-tested helpers (throw plain Errors; the CLI guard turns them into clean output) ----
+
 export function q(branch?: string): string {
   return branch ? `?branch=${encodeURIComponent(branch)}` : ''
 }
@@ -22,8 +24,6 @@ export function qs(params: Record<string, string | undefined>): string {
   const s = u.toString()
   return s ? `?${s}` : ''
 }
-
-// ---- pure, unit-tested helpers (throw plain Errors; the CLI guard turns them into clean output) ----
 
 // Validate a service-type argument against the allowed set for a command.
 export function assertType(type: string, allowed: readonly string[] = SERVICE_TYPES): asserts type is ServiceType {
