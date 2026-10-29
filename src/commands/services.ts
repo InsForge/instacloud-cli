@@ -18,7 +18,7 @@ export function q(branch?: string): string {
 // them bare. Swapping one helper for the other changes the wire format for such values.
 export function qs(params: Record<string, string | undefined>): string {
   const u = new URLSearchParams()
-  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') u.set(k, String(v))
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') u.set(k, v)
   const s = u.toString()
   return s ? `?${s}` : ''
 }

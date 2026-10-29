@@ -14,6 +14,13 @@ describe('qs', () => {
   it('skips undefined and empty-string values, keeping the rest in insertion order', () => {
     expect(qs({ branch: 'main', group: undefined, prefix: '', limit: '50' })).toBe('?branch=main&limit=50')
   })
+  // Only undefined and '' count as absent. '0' is a real value: metrics' `--from` can resolve to epoch 0
+  // and arrives here stringified. (The string '0' is truthy, so this does not distinguish the current
+  // guard from `if (v)`; it pins the contract for whoever widens the signature to numbers later.)
+  it('keeps a "0" value rather than treating it as absent', () => {
+    expect(qs({ limit: '0' })).toBe('?limit=0')
+    expect(qs({ from: '0', to: '0' })).toBe('?from=0&to=0')
+  })
   it('encodes values the URLSearchParams way (space becomes "+", "+" and "&" are escaped)', () => {
     expect(qs({ prefix: 'a b+c&d' })).toBe('?prefix=a+b%2Bc%26d')
   })
