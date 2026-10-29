@@ -6,17 +6,10 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { ApiClient, requireProject } from '../api.js'
 import { info, printJson, handleApproval } from '../util.js'
-import { q, resolveSoleService, parseAccess } from './services.js'
+import { q, qs, resolveSoleService, parseAccess } from './services.js'
 import { fmtBytes } from './postgres.js' // the repo's tested bytes formatter — don't grow a third copy
 
 type Common = { branch?: string; service?: string; json?: boolean }
-
-function qs(params: Record<string, string | undefined>): string {
-  const u = new URLSearchParams()
-  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') u.set(k, String(v))
-  const s = u.toString()
-  return s ? `?${s}` : ''
-}
 
 // Page size the listing route accepts. Junk must fail here, not travel as `limit=NaN`.
 export function parseObjectLimit(raw: string): number {

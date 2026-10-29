@@ -1,8 +1,41 @@
 import { describe, it, expect } from 'vitest'
 import {
   assertType, assertServiceName, parseCount, parsePort, parseAccess, resolveServiceId, resolveComputeServiceId, SERVICE_TYPES,
-  servicesAddRequestBody, servicesAdd, serviceListLine, serviceAddedLine, parsePgVersion,
+  servicesAddRequestBody, servicesAdd, serviceListLine, serviceAddedLine, parsePgVersion, q, qs,
 } from '../src/commands/services.js'
+
+// `qs` is shared by storage and metrics, so its contract is pinned here rather than only through
+// the path builders of those modules.
+describe('qs', () => {
+  it('returns an empty string, not a bare "?", when every param is absent', () => {
+    expect(qs({})).toBe('')
+    expect(qs({ branch: undefined, group: '' })).toBe('')
+  })
+  it('skips undefined and empty-string values, keeping the rest in insertion order', () => {
+    expect(qs({ branch: 'main', group: undefined, prefix: '', limit: '50' })).toBe('?branch=main&limit=50')
+  })
+  // Only undefined and '' count as absent. '0' is a real value: metrics' `--from` can resolve to epoch 0
+  // and arrives here stringified. (The string '0' is truthy, so this does not distinguish the current
+  // guard from `if (v)`; it pins the contract for whoever widens the signature to numbers later.)
+  it('keeps a "0" value rather than treating it as absent', () => {
+    expect(qs({ limit: '0' })).toBe('?limit=0')
+    expect(qs({ from: '0', to: '0' })).toBe('?from=0&to=0')
+  })
+  it('encodes values the URLSearchParams way (space becomes "+", "+" and "&" are escaped)', () => {
+    expect(qs({ prefix: 'a b+c&d' })).toBe('?prefix=a+b%2Bc%26d')
+  })
+  // q() uses encodeURIComponent, which differs from URLSearchParams on a space ('%20' vs '+') and on
+  // the characters it leaves bare (! ' ( ) ~). For everything else the two helpers agree.
+  it('agrees with q() for an alphanumeric branch path', () => {
+    expect(qs({ branch: 'feat/x' })).toBe(q('feat/x'))
+    expect(qs({ branch: undefined })).toBe(q(undefined))
+  })
+  it('diverges from q() on a space and on the punctuation encodeURIComponent leaves bare', () => {
+    const v = "a~b'c(d)e!f*g h"
+    expect(qs({ branch: v })).toBe('?branch=a%7Eb%27c%28d%29e%21f*g+h')
+    expect(q(v)).toBe("?branch=a~b'c(d)e!f*g%20h")
+  })
+})
 
 describe('assertType', () => {
   it('accepts valid service types', () => {
