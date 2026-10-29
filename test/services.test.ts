@@ -17,8 +17,9 @@ describe('qs', () => {
   it('encodes values the URLSearchParams way (space becomes "+", "+" and "&" are escaped)', () => {
     expect(qs({ prefix: 'a b+c&d' })).toBe('?prefix=a+b%2Bc%26d')
   })
-  // q() uses encodeURIComponent, so the two helpers only diverge on a literal space.
-  it('agrees with q() for a branch name without spaces', () => {
+  // q() uses encodeURIComponent, which differs from URLSearchParams on a space ('%20' vs '+') and on
+  // the characters it leaves bare (! ' ( ) ~). For everything else the two helpers agree.
+  it('agrees with q() for a branch name without those characters', () => {
     expect(qs({ branch: 'feat/x' })).toBe(q('feat/x'))
     expect(qs({ branch: undefined })).toBe(q(undefined))
   })
