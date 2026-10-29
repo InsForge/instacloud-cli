@@ -1,8 +1,28 @@
 import { describe, it, expect } from 'vitest'
 import {
   assertType, assertServiceName, parseCount, parsePort, parseAccess, resolveServiceId, resolveComputeServiceId, SERVICE_TYPES,
-  servicesAddRequestBody, servicesAdd, serviceListLine, serviceAddedLine, parsePgVersion,
+  servicesAddRequestBody, servicesAdd, serviceListLine, serviceAddedLine, parsePgVersion, q, qs,
 } from '../src/commands/services.js'
+
+// `qs` is shared by storage and metrics, so its contract is pinned here rather than only through
+// the path builders of those modules.
+describe('qs', () => {
+  it('returns an empty string, not a bare "?", when every param is absent', () => {
+    expect(qs({})).toBe('')
+    expect(qs({ branch: undefined, group: '' })).toBe('')
+  })
+  it('skips undefined and empty-string values, keeping the rest in insertion order', () => {
+    expect(qs({ branch: 'main', group: undefined, prefix: '', limit: '50' })).toBe('?branch=main&limit=50')
+  })
+  it('encodes values the URLSearchParams way (space becomes "+", "+" and "&" are escaped)', () => {
+    expect(qs({ prefix: 'a b+c&d' })).toBe('?prefix=a+b%2Bc%26d')
+  })
+  // q() uses encodeURIComponent, so the two helpers only diverge on a literal space.
+  it('agrees with q() for a branch name without spaces', () => {
+    expect(qs({ branch: 'feat/x' })).toBe(q('feat/x'))
+    expect(qs({ branch: undefined })).toBe(q(undefined))
+  })
+})
 
 describe('assertType', () => {
   it('accepts valid service types', () => {

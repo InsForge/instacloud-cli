@@ -10,6 +10,9 @@ export function q(branch?: string): string {
   return branch ? `?branch=${encodeURIComponent(branch)}` : ''
 }
 
+// Multi-param form of `q`, shared by storage and metrics. Skips undefined and '' (so a caller can
+// never send an intentionally-empty param) and returns '' rather than a bare '?' when nothing is
+// left. Encodes via URLSearchParams, so a space becomes '+' where `q` would emit '%20'.
 export function qs(params: Record<string, string | undefined>): string {
   const u = new URLSearchParams()
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') u.set(k, String(v))
