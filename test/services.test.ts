@@ -19,9 +19,14 @@ describe('qs', () => {
   })
   // q() uses encodeURIComponent, which differs from URLSearchParams on a space ('%20' vs '+') and on
   // the characters it leaves bare (! ' ( ) ~). For everything else the two helpers agree.
-  it('agrees with q() for a branch name without those characters', () => {
+  it('agrees with q() for an alphanumeric branch path', () => {
     expect(qs({ branch: 'feat/x' })).toBe(q('feat/x'))
     expect(qs({ branch: undefined })).toBe(q(undefined))
+  })
+  it('diverges from q() on a space and on the punctuation encodeURIComponent leaves bare', () => {
+    const v = "a~b'c(d)e!f*g h"
+    expect(qs({ branch: v })).toBe('?branch=a%7Eb%27c%28d%29e%21f*g+h')
+    expect(q(v)).toBe("?branch=a~b'c(d)e!f*g%20h")
   })
 })
 
