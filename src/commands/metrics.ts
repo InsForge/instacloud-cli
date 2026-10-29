@@ -1,12 +1,6 @@
 import { ApiClient, requireProject } from '../api.js'
 import { info, printJson } from '../util.js'
-
-function qs(params: Record<string, string | undefined>): string {
-  const u = new URLSearchParams()
-  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') u.set(k, String(v))
-  const s = u.toString()
-  return s ? `?${s}` : ''
-}
+import { qs } from './services.js'
 
 // One printed series line. Pure seam so the formatting is testable without a backend.
 //

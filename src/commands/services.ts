@@ -10,6 +10,13 @@ export function q(branch?: string): string {
   return branch ? `?branch=${encodeURIComponent(branch)}` : ''
 }
 
+export function qs(params: Record<string, string | undefined>): string {
+  const u = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') u.set(k, String(v))
+  const s = u.toString()
+  return s ? `?${s}` : ''
+}
+
 // ---- pure, unit-tested helpers (throw plain Errors; the CLI guard turns them into clean output) ----
 
 // Validate a service-type argument against the allowed set for a command.
