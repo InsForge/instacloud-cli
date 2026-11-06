@@ -208,6 +208,12 @@ export type ForeignLink = {
   currentApiUrl: string
 }
 
+function validateProjectId(id: unknown): void {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(id)) {
+    die('invalid project ID: expected letters, numbers, underscores, or hyphens')
+  }
+}
+
 /** The link that applies to `cwd`, and whether it was made against a DIFFERENT control plane. A
  *  project id means nothing on another control plane (cloud, staging and every insta-oss box each
  *  have their own). */
@@ -215,6 +221,7 @@ export async function resolveProjectLink(cwd = process.cwd()): Promise<{ link: P
   // Linkless targeting (CI / one-offs / agents): INSTA_PROJECT_ID resolves the project with no
   // link file, and beats one when both exist — an explicit parameter outranks ambient state.
   if (process.env.INSTA_PROJECT_ID) {
+    validateProjectId(process.env.INSTA_PROJECT_ID)
     return {
       link: {
         projectId: process.env.INSTA_PROJECT_ID,
@@ -231,6 +238,7 @@ export async function resolveProjectLink(cwd = process.cwd()): Promise<{ link: P
   } catch {
     return null
   }
+  validateProjectId(link?.projectId)
   // No sidecar (a teammate who just cloned): nothing says which control plane the link belongs
   // to, so it resolves unchecked.
   const record = await readLinkPlane(root)
