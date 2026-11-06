@@ -1,14 +1,15 @@
+import { randomBytes } from 'node:crypto'
 import { chmodSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import {
   computeVerdict, inferPort, envKeysFromDotEnvExample, buildReport, renderReport,
-  contextStats, contextCheck, jsonReport,
+  contextStats, contextCheck, archiveFit, jsonReport,
   type BuildCheck, type ContextStats,
 } from '../src/commands/build.js'
 import type { BuildRunner } from '../src/flyctl-build.js'
-import { contextEntries } from '../src/pack.js'
+import { contextEntries, packDirectory } from '../src/pack.js'
 
 const check = (over: Partial<BuildCheck>): BuildCheck =>
   ({ id: 'x', severity: 'info', status: 'pass', title: 't', ...over })
@@ -92,7 +93,7 @@ describe('contextStats', () => {
 })
 
 describe('contextCheck', () => {
-  const base: ContextStats = { totalBytes: 1024, nodeModulesBytes: 0, truncated: false, hasDockerignore: false }
+  const base: ContextStats = { totalBytes: 1024, nodeModulesBytes: 0, incompressibleBytes: 0, entries: 3, truncated: false, hasDockerignore: false }
   it('passes a small clean context', () => {
     expect(contextCheck(base).status).toBe('pass')
   })
@@ -118,6 +119,114 @@ describe('contextCheck', () => {
   })
 })
 
+const MiB = 1024 * 1024
+
+describe('archive ceiling (SUP2-1094)', () => {
+  const base: ContextStats = { totalBytes: 1024, nodeModulesBytes: 0, incompressibleBytes: 0, entries: 3, truncated: false, hasDockerignore: true }
+  const limits = { maxArchiveBytes: 256 * MiB, maxExtractedBytes: 1024 * MiB, maxFiles: 10000 }
+
+  it('says nothing about the ceiling for a context under it', () => {
+    expect(archiveFit({ ...base, totalBytes: 200 * MiB }, limits)).toEqual({})
+    expect(contextCheck({ ...base, totalBytes: 200 * MiB }, limits).detail).not.toContain('256.0 MiB')
+  })
+
+  it('names the compressed upload limit when the uncompressed size is over it (the reported case: 315 MB)', () => {
+    const c = contextCheck({ ...base, totalBytes: 315.3 * MiB }, limits)
+    expect(c.status).toBe('fail')
+    expect(c.detail).toContain('256.0 MiB')
+    expect(c.detail).toMatch(/only if it compresses below that/)
+    expect(c.nextAction).toMatch(/xz\/zstd/)
+  })
+
+  it('does not call a large but compressible context undeployable', () => {
+    const f = archiveFit({ ...base, totalBytes: 400 * MiB }, limits)
+    expect(f.over).toBeUndefined()
+    expect(f.maybe).toBeDefined()
+  })
+
+  it('does not call already-compressed files a certain overflow (stored zips still shrink)', () => {
+    const f = archiveFit({ ...base, totalBytes: 320 * MiB, incompressibleBytes: 300 * MiB }, limits)
+    expect(f.over).toBeUndefined()
+    expect(f.maybe).toMatch(/already-compressed files alone are 300\.0 MiB.*likely not fit/)
+    const c = contextCheck({ ...base, totalBytes: 320 * MiB, incompressibleBytes: 300 * MiB }, limits)
+    expect(c.detail).not.toContain('too large for')
+    expect(c.status).toBe('fail')
+  })
+
+  it('counts tar headers and padding: a payload just under the limit can still overflow', () => {
+    const f = archiveFit({ ...base, totalBytes: 256 * MiB - 1000, entries: 5000 }, limits)
+    expect(f.maybe).toMatch(/close to the limit once tar headers and compression framing are counted/)
+    // the reviewed near-cap case: 268,405,456 random bytes really packed to 268,460,038 (> 268,435,456)
+    expect(archiveFit({ ...base, totalBytes: 268_405_456, entries: 2 }, limits).maybe).toBeDefined()
+    expect(archiveFit({ ...base, totalBytes: 256 * MiB - 100 * 1024 * 1024 }, limits)).toEqual({})
+  })
+
+  it('stays quiet when incompressible payload plus framing is clearly under the limit', () => {
+    expect(archiveFit({ ...base, totalBytes: 100 * MiB, incompressibleBytes: 100 * MiB }, limits)).toEqual({})
+  })
+
+  it('says how much is already compressed when only the compressed size can tell', () => {
+    expect(archiveFit({ ...base, totalBytes: 300 * MiB, incompressibleBytes: 200 * MiB }, limits).maybe).toContain('200.0 MiB of it is already compressed')
+  })
+
+  it('flags the extracted-size and entry limits, which the walk alone settles', () => {
+    expect(archiveFit({ ...base, totalBytes: 1100 * MiB }, limits).over).toContain('extracted-size limit')
+    expect(archiveFit({ ...base, entries: 10001 }, limits).over).toContain('10,000-entry archive limit')
+  })
+
+  it('uses the limits it is given, not the defaults', () => {
+    expect(archiveFit({ ...base, totalBytes: 300 * MiB }, { ...limits, maxArchiveBytes: 512 * MiB })).toEqual({})
+  })
+})
+
+describe('archive estimate vs the real packer (SUP2-1094)', () => {
+  const dir = () => mkdtempSync(join(tmpdir(), 'insta-build-'))
+
+  it('never undershoots the packed archive for incompressible data', () => {
+    const d = dir()
+    writeFileSync(join(d, 'data.bin'), randomBytes(6 * MiB))
+    writeFileSync(join(d, 'Dockerfile'), 'FROM scratch\n')
+    const packed = packDirectory(d).archive.length
+    const ctx = contextStats(d)
+    // A cap one byte under the real archive must not pass silently.
+    const limits = { maxArchiveBytes: packed - 1, maxExtractedBytes: 1024 * MiB, maxFiles: 10000 }
+    expect(archiveFit(ctx.archive!, limits).maybe).toBeDefined()
+    // ...and a cap 1% above it is not flagged: the margin is tight enough to stay useful.
+    expect(archiveFit(ctx.archive!, { ...limits, maxArchiveBytes: Math.ceil(packed * 1.01) })).toEqual({})
+  })
+
+  it('judges archive limits on the packer ignore selection (.gitignore fallback)', () => {
+    const d = dir()
+    writeFileSync(join(d, 'Dockerfile'), 'FROM scratch\n')
+    writeFileSync(join(d, '.gitignore'), 'local.bin\n')
+    writeFileSync(join(d, 'local.bin'), 'x'.repeat(5000))
+    const ctx = contextStats(d)
+    const limits = { maxArchiveBytes: 256 * MiB, maxExtractedBytes: 4000, maxFiles: 2 }
+    expect(ctx.totalBytes).toBeGreaterThan(4000) // the docker context still sees it
+    expect(archiveFit(ctx.archive!, limits)).toEqual({})
+    expect(contextCheck(ctx, limits).detail).not.toContain('too large for')
+    expect(packDirectory(d, limits).entries).toBe(ctx.archive!.entries)
+  })
+
+  it('labels the ceiling as an offline default in the human-readable check', () => {
+    const c = contextCheck({ totalBytes: 1100 * MiB, nodeModulesBytes: 0, incompressibleBytes: 0, entries: 3, truncated: false, hasDockerignore: true })
+    expect(c.detail).toMatch(/offline defaults — the server's limits win at deploy/)
+  })
+})
+
+describe('contextStats compressed-file accounting', () => {
+  it('counts already-compressed files and every entry, directories included', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'insta-build-'))
+    mkdirSync(join(dir, 'ckpt'))
+    writeFileSync(join(dir, 'ckpt', 'model.tar.gz'), 'x'.repeat(5000))
+    writeFileSync(join(dir, 'logo.png'), 'x'.repeat(1000))
+    writeFileSync(join(dir, 'app.js'), 'x'.repeat(100))
+    const ctx = contextStats(dir)
+    expect(ctx.incompressibleBytes).toBe(6000)
+    expect(ctx.entries).toBe(contextEntries(dir).length)
+  })
+})
+
 describe('jsonReport', () => {
   it('strips Dockerfile content without --explain and keeps it with — stdout stays parseable JSON either way', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'insta-build-'))
@@ -126,6 +235,7 @@ describe('jsonReport', () => {
     const bare = JSON.parse(JSON.stringify(jsonReport(r, false)))
     expect(bare.dockerfile.content).toBeUndefined()
     expect(bare.dockerfile.source).toBe('nixpacks')
+    expect(bare.archiveLimits).toEqual({ maxArchiveBytes: 256 * 1024 * 1024, maxExtractedBytes: 1024 * 1024 * 1024, maxFiles: 10000, source: 'default' })
     const full = JSON.parse(JSON.stringify(jsonReport(r, true)))
     expect(full.dockerfile.content).toContain('FROM node:18')
   })
