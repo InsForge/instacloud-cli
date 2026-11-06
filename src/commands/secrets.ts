@@ -1,5 +1,5 @@
-import { writeFile } from 'node:fs/promises'
-import { appendFileSync, existsSync, readFileSync } from 'node:fs'
+import { open } from 'node:fs/promises'
+import { appendFileSync, constants, existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ApiClient, requireProject } from '../api.js'
 import { info, printJson, serializeEnv, handleApproval, die } from '../util.js'
@@ -107,7 +107,14 @@ export async function secrets(
   warnCollisions(b.collisions, branchHint(branch, d.linkedBranch))
   if (opts.print) { process.stdout.write(serializeEnv(bundle)); return }
   const out = opts.output ?? '.env'
-  await writeFile(out, serializeEnv(bundle))
+  const file = await open(out, constants.O_WRONLY | constants.O_CREAT, 0o600)
+  try {
+    await file.chmod((await file.stat()).mode & 0o600)
+    await file.truncate(0)
+    await file.writeFile(serializeEnv(bundle))
+  } finally {
+    await file.close()
+  }
   const scope = opts.service ? `${opts.service}, branch ${branch}` : `branch ${branch}`
   info(`wrote ${Object.keys(bundle).length} secrets to ${out} (${scope})`)
   if (ensureIgnored(process.cwd(), out)) info(`  .gitignore += ${out} (credentials must never be committed)`)
