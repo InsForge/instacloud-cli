@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import {
   computeVerdict, inferPort, envKeysFromDotEnvExample, buildReport, renderReport,
-  contextStats, contextCheck, jsonReport,
+  contextStats, contextCheck, archiveFit, jsonReport,
   type BuildCheck, type ContextStats,
 } from '../src/commands/build.js'
 import type { BuildRunner } from '../src/flyctl-build.js'
@@ -92,7 +92,7 @@ describe('contextStats', () => {
 })
 
 describe('contextCheck', () => {
-  const base: ContextStats = { totalBytes: 1024, nodeModulesBytes: 0, truncated: false, hasDockerignore: false }
+  const base: ContextStats = { totalBytes: 1024, nodeModulesBytes: 0, incompressibleBytes: 0, entries: 3, truncated: false, hasDockerignore: false }
   it('passes a small clean context', () => {
     expect(contextCheck(base).status).toBe('pass')
   })
@@ -118,6 +118,63 @@ describe('contextCheck', () => {
   })
 })
 
+const MiB = 1024 * 1024
+
+describe('archive ceiling (SUP2-1094)', () => {
+  const base: ContextStats = { totalBytes: 1024, nodeModulesBytes: 0, incompressibleBytes: 0, entries: 3, truncated: false, hasDockerignore: true }
+  const limits = { maxArchiveBytes: 256 * MiB, maxExtractedBytes: 1024 * MiB, maxFiles: 10000 }
+
+  it('says nothing about the ceiling for a context under it', () => {
+    expect(archiveFit({ ...base, totalBytes: 200 * MiB }, limits)).toEqual({})
+    expect(contextCheck({ ...base, totalBytes: 200 * MiB }, limits).detail).not.toContain('256.0 MiB')
+  })
+
+  it('names the compressed upload limit when the uncompressed size is over it (the reported case: 315 MB)', () => {
+    const c = contextCheck({ ...base, totalBytes: 315.3 * MiB }, limits)
+    expect(c.status).toBe('fail')
+    expect(c.detail).toContain('256.0 MiB')
+    expect(c.detail).toMatch(/only if it compresses below that/)
+    expect(c.nextAction).toMatch(/xz\/zstd/)
+  })
+
+  it('does not call a large but compressible context undeployable', () => {
+    const f = archiveFit({ ...base, totalBytes: 400 * MiB }, limits)
+    expect(f.over).toBeUndefined()
+    expect(f.maybe).toBeDefined()
+  })
+
+  it('is certain when already-compressed files alone exceed the upload limit', () => {
+    const c = contextCheck({ ...base, totalBytes: 320 * MiB, incompressibleBytes: 300 * MiB }, limits)
+    expect(c.detail).toMatch(/too large for `insta deploy <dir>`: already-compressed files alone are 300\.0 MiB/)
+  })
+
+  it('says how much is already compressed when only the compressed size can tell', () => {
+    expect(archiveFit({ ...base, totalBytes: 300 * MiB, incompressibleBytes: 200 * MiB }, limits).maybe).toContain('200.0 MiB of it is already compressed')
+  })
+
+  it('flags the extracted-size and entry limits, which the walk alone settles', () => {
+    expect(archiveFit({ ...base, totalBytes: 1100 * MiB }, limits).over).toContain('extracted-size limit')
+    expect(archiveFit({ ...base, entries: 10001 }, limits).over).toContain('10,000-entry archive limit')
+  })
+
+  it('uses the limits it is given, not the defaults', () => {
+    expect(archiveFit({ ...base, totalBytes: 300 * MiB }, { ...limits, maxArchiveBytes: 512 * MiB })).toEqual({})
+  })
+})
+
+describe('contextStats compressed-file accounting', () => {
+  it('counts already-compressed files and every entry, directories included', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'insta-build-'))
+    mkdirSync(join(dir, 'ckpt'))
+    writeFileSync(join(dir, 'ckpt', 'model.tar.gz'), 'x'.repeat(5000))
+    writeFileSync(join(dir, 'logo.png'), 'x'.repeat(1000))
+    writeFileSync(join(dir, 'app.js'), 'x'.repeat(100))
+    const ctx = contextStats(dir)
+    expect(ctx.incompressibleBytes).toBe(6000)
+    expect(ctx.entries).toBe(contextEntries(dir).length)
+  })
+})
+
 describe('jsonReport', () => {
   it('strips Dockerfile content without --explain and keeps it with — stdout stays parseable JSON either way', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'insta-build-'))
@@ -126,6 +183,7 @@ describe('jsonReport', () => {
     const bare = JSON.parse(JSON.stringify(jsonReport(r, false)))
     expect(bare.dockerfile.content).toBeUndefined()
     expect(bare.dockerfile.source).toBe('nixpacks')
+    expect(bare.archiveLimits).toEqual({ maxArchiveBytes: 256 * 1024 * 1024, maxExtractedBytes: 1024 * 1024 * 1024, maxFiles: 10000, source: 'default' })
     const full = JSON.parse(JSON.stringify(jsonReport(r, true)))
     expect(full.dockerfile.content).toContain('FROM node:18')
   })

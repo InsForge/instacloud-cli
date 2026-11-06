@@ -6,7 +6,7 @@ import { resolve, join } from 'node:path'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { info, printJson, die } from '../util.js'
 import { dockerfileExposedPort } from './deploy.js'
-import { contextEntries } from '../pack.js'
+import { contextEntries, ARCHIVE_LIMITS, type ArchiveLimits } from '../pack.js'
 import { nixpacksPlan, nixpacksGeneratedDockerfile, nixpacksAvailable, quietRunner, type NixpacksPlan } from '../nixpacks.js'
 import type { BuildRunner } from '../flyctl-build.js'
 
@@ -33,6 +33,9 @@ export type BuildReport = {
   }
   dockerfile: { source: 'user' | 'nixpacks' | null; path?: string; content?: string }
   checks: BuildCheck[]
+  // The ceilings `insta deploy <dir>` packs against on the archive lane. These are the CLI's
+  // defaults: build is offline, so it cannot ask the server, whose negotiated figures win at deploy.
+  archiveLimits: ArchiveLimits & { source: 'default' }
   verdict: 'deployable' | 'needs-attention' | 'failed'
 }
 
@@ -72,38 +75,90 @@ export function envKeysFromDotEnvExample(content: string): string[] {
 const CONTEXT_WARN_BYTES = 100 * 1024 * 1024
 const WALK_CAP = 50_000 // entries; hitting it marks the stats truncated (size becomes a floor)
 
-export type ContextStats = { totalBytes: number; nodeModulesBytes: number; truncated: boolean; hasDockerignore: boolean }
+export type ContextStats = {
+  totalBytes: number
+  nodeModulesBytes: number
+  // Bytes in files that are already compressed (by extension): gzip -9 barely shrinks them, so
+  // they are a floor on the compressed archive the deploy uploads.
+  incompressibleBytes: number
+  // Every entry, directories included: the build worker's file cap counts tar headers.
+  entries: number
+  truncated: boolean
+  hasDockerignore: boolean
+}
+
+const COMPRESSED_EXT = /\.(gz|tgz|xz|txz|zst|bz2|tbz2|lz4|br|zip|7z|rar|jar|whl|png|jpe?g|gif|webp|avif|heic|mp[34]|m4[av]|mov|webm|mkv|ogg|opus|flac|woff2?|parquet)$/i
 
 export function contextStats(dir: string, cap = WALK_CAP): ContextStats {
   const entries = contextEntries(dir, cap + 1)
   let totalBytes = 0
   let nodeModulesBytes = 0
-  for (const e of entries.slice(0, cap)) {
+  let incompressibleBytes = 0
+  const counted = entries.slice(0, cap)
+  for (const e of counted) {
     totalBytes += e.size
     if (e.path.split('/').includes('node_modules')) nodeModulesBytes += e.size
+    if (!e.dir && COMPRESSED_EXT.test(e.path)) incompressibleBytes += e.size
   }
-  return { totalBytes, nodeModulesBytes, truncated: entries.length > cap, hasDockerignore: existsSync(join(dir, '.dockerignore')) }
+  return {
+    totalBytes,
+    nodeModulesBytes,
+    incompressibleBytes,
+    entries: counted.length,
+    truncated: entries.length > cap,
+    hasDockerignore: existsSync(join(dir, '.dockerignore')),
+  }
 }
 
 const mb = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)} MB`
+const mib = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)} MiB`
 
-export function contextCheck(ctx: ContextStats): BuildCheck {
+// Where this context stands against the archive lane's ceilings. `over` is certain (the deploy
+// will refuse it); `maybe` means only the compressed size can tell, and build does not compress.
+// Uncompressed size alone never proves an overflow: a 400 MB tree of text can pack to 50 MiB.
+export function archiveFit(ctx: ContextStats, limits: ArchiveLimits = ARCHIVE_LIMITS): { over?: string; maybe?: string } {
+  if (ctx.entries > limits.maxFiles) {
+    return { over: `${ctx.entries.toLocaleString('en-US')}${ctx.truncated ? '+' : ''} entries (directories count), over the ${limits.maxFiles.toLocaleString('en-US')}-entry archive limit` }
+  }
+  if (ctx.totalBytes > limits.maxExtractedBytes) {
+    return { over: `${mib(ctx.totalBytes)} uncompressed, over the ${mib(limits.maxExtractedBytes)} extracted-size limit` }
+  }
+  if (ctx.incompressibleBytes > limits.maxArchiveBytes) {
+    return { over: `already-compressed files alone are ${mib(ctx.incompressibleBytes)}, over the ${mib(limits.maxArchiveBytes)} compressed upload limit` }
+  }
+  if (ctx.totalBytes > limits.maxArchiveBytes) {
+    const already = ctx.incompressibleBytes > 0 ? ` (${mib(ctx.incompressibleBytes)} of it is already compressed and will not shrink)` : ''
+    return { maybe: `${mib(ctx.totalBytes)} uncompressed${already} — deploy uploads it as a gzip archive capped at ${mib(limits.maxArchiveBytes)}, so it ships only if it compresses below that` }
+  }
+  return {}
+}
+
+export function contextCheck(ctx: ContextStats, limits: ArchiveLimits = ARCHIVE_LIMITS): BuildCheck {
   const shipsNodeModules = ctx.nodeModulesBytes > 0
   const tooBig = ctx.totalBytes > CONTEXT_WARN_BYTES
+  const fit = archiveFit(ctx, limits)
   const size = `${mb(ctx.totalBytes)}${ctx.truncated ? '+' : ''}`
-  const detail = shipsNodeModules
+  const base = shipsNodeModules
     ? `node_modules (${mb(ctx.nodeModulesBytes)}) would ship in the ${size} build context`
     : ctx.truncated
       ? `over ${WALK_CAP.toLocaleString('en-US')} entries — scan truncated, ${size} is a floor`
-      : `${size}${tooBig ? ' — large contexts make remote builds slow' : ''}`
-  const bad = shipsNodeModules || tooBig || ctx.truncated
+      : `${size}${tooBig && !fit.over && !fit.maybe ? ' — large contexts make remote builds slow' : ''}`
+  const ceiling = fit.over ? `too large for \`insta deploy <dir>\`: ${fit.over}` : fit.maybe
+  const detail = ceiling ? `${base}; ${ceiling}` : base
+  const bad = shipsNodeModules || tooBig || ctx.truncated || !!ceiling
+  const ignore = `${ctx.hasDockerignore ? 'extend your' : 'add a'} .dockerignore (node_modules, build artifacts, secrets)`
+  // An intentional large asset (a model checkpoint, a dataset) is not something to ignore away:
+  // say what else gets it under the ceiling.
+  const nextAction = ceiling
+    ? `${ignore}; for a large file the app needs, recompress it more tightly (xz/zstd) or fetch it at start-up from storage instead of shipping it in the source`
+    : ignore
   return {
     id: 'context',
     severity: 'warning',
     status: bad ? 'fail' : 'pass',
     title: 'build context',
     detail,
-    ...(bad ? { nextAction: `${ctx.hasDockerignore ? 'extend your' : 'add a'} .dockerignore (node_modules, build artifacts, secrets)` } : {}),
+    ...(bad ? { nextAction } : {}),
   }
 }
 
@@ -216,6 +271,7 @@ export async function buildReport(
     plan: { builder, providers: np?.providers ?? [], installCommand: np?.installCommand, buildCommand: np?.buildCommand, startCommand: np?.startCommand, port, portRationale: rationale, envKeys },
     dockerfile,
     checks,
+    archiveLimits: { ...ARCHIVE_LIMITS, source: 'default' },
     verdict: computeVerdict(checks),
   }
 }
