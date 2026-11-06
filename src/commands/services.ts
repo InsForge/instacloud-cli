@@ -6,11 +6,24 @@ export const SERVICE_TYPES = ['postgres', 'storage', 'compute', 'redis', 'mysql'
 export type ServiceType = (typeof SERVICE_TYPES)[number]
 const SERVICE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
 
+// ---- pure, unit-tested helpers (throw plain Errors; the CLI guard turns them into clean output) ----
+
 export function q(branch?: string): string {
   return branch ? `?branch=${encodeURIComponent(branch)}` : ''
 }
 
-// ---- pure, unit-tested helpers (throw plain Errors; the CLI guard turns them into clean output) ----
+// Multi-param form of `q`, shared by storage and metrics. Skips undefined and '' and returns ''
+// rather than a bare '?' when nothing is left. That means a caller can never send an
+// intentionally-empty param (e.g. `?prefix=`); if you need one, don't reach for this helper.
+// Encodes via URLSearchParams (form-urlencoded), which escapes more than `q`'s encodeURIComponent
+// does: a space becomes '+' rather than '%20', and `~ ' ( ) !` are percent-encoded where `q` leaves
+// them bare. Swapping one helper for the other changes the wire format for such values.
+export function qs(params: Record<string, string | undefined>): string {
+  const u = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') u.set(k, v)
+  const s = u.toString()
+  return s ? `?${s}` : ''
+}
 
 // Validate a service-type argument against the allowed set for a command.
 export function assertType(type: string, allowed: readonly string[] = SERVICE_TYPES): asserts type is ServiceType {
