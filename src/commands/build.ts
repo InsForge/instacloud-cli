@@ -113,9 +113,19 @@ export function contextStats(dir: string, cap = WALK_CAP): ContextStats {
 const mb = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)} MB`
 const mib = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)} MiB`
 
+// Worst-case bytes the tar + gzip framing adds on top of the file contents: a 512-byte header and
+// up to 511 bytes of block padding per entry, the two closing blocks, and gzip's stored-block
+// framing (5 bytes per 64 KiB) for data that does not compress. pack.ts compresses the tar, not the
+// bare files, so the upload limit applies to totalBytes plus this.
+export function archiveOverheadBytes(ctx: ContextStats, payloadBytes = ctx.totalBytes): number {
+  return ctx.entries * 1023 + 1024 + Math.ceil(payloadBytes / 65535) * 5 + 32
+}
+
 // Where this context stands against the archive lane's ceilings. `over` is certain (the deploy
-// will refuse it); `maybe` means only the compressed size can tell, and build does not compress.
-// Uncompressed size alone never proves an overflow: a 400 MB tree of text can pack to 50 MiB.
+// will refuse it, from the walk alone); `maybe` means only the compressed size can tell, and build
+// does not compress. Neither uncompressed size nor file extensions prove a compressed overflow: a
+// 400 MB tree of text can pack to 50 MiB, and a stored or repetitive .zip/.png still shrinks under
+// gzip -9. Only the extracted-size and entry limits are decided by the walk, so only they are `over`.
 export function archiveFit(ctx: ContextStats, limits: ArchiveLimits = ARCHIVE_LIMITS): { over?: string; maybe?: string } {
   if (ctx.entries > limits.maxFiles) {
     return { over: `${ctx.entries.toLocaleString('en-US')}${ctx.truncated ? '+' : ''} entries (directories count), over the ${limits.maxFiles.toLocaleString('en-US')}-entry archive limit` }
@@ -123,12 +133,13 @@ export function archiveFit(ctx: ContextStats, limits: ArchiveLimits = ARCHIVE_LI
   if (ctx.totalBytes > limits.maxExtractedBytes) {
     return { over: `${mib(ctx.totalBytes)} uncompressed, over the ${mib(limits.maxExtractedBytes)} extracted-size limit` }
   }
-  if (ctx.incompressibleBytes > limits.maxArchiveBytes) {
-    return { over: `already-compressed files alone are ${mib(ctx.incompressibleBytes)}, over the ${mib(limits.maxArchiveBytes)} compressed upload limit` }
+  const already = ctx.incompressibleBytes > 0 ? ` (${mib(ctx.incompressibleBytes)} of it is already compressed and will barely shrink)` : ''
+  if (ctx.incompressibleBytes + archiveOverheadBytes(ctx, ctx.incompressibleBytes) > limits.maxArchiveBytes) {
+    return { maybe: `already-compressed files alone are ${mib(ctx.incompressibleBytes)}, which will likely not fit the ${mib(limits.maxArchiveBytes)} compressed upload limit (extension-based estimate, only the packed archive is exact)` }
   }
-  if (ctx.totalBytes > limits.maxArchiveBytes) {
-    const already = ctx.incompressibleBytes > 0 ? ` (${mib(ctx.incompressibleBytes)} of it is already compressed and will not shrink)` : ''
-    return { maybe: `${mib(ctx.totalBytes)} uncompressed${already} — deploy uploads it as a gzip archive capped at ${mib(limits.maxArchiveBytes)}, so it ships only if it compresses below that` }
+  if (ctx.totalBytes + archiveOverheadBytes(ctx) > limits.maxArchiveBytes) {
+    const near = ctx.totalBytes <= limits.maxArchiveBytes ? ` — close to the limit once tar headers are counted` : ''
+    return { maybe: `${mib(ctx.totalBytes)} uncompressed${already}${near} — deploy uploads it as a tar.gz archive capped at ${mib(limits.maxArchiveBytes)}, so it ships only if it compresses below that` }
   }
   return {}
 }

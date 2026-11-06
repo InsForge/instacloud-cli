@@ -143,9 +143,23 @@ describe('archive ceiling (SUP2-1094)', () => {
     expect(f.maybe).toBeDefined()
   })
 
-  it('is certain when already-compressed files alone exceed the upload limit', () => {
+  it('does not call already-compressed files a certain overflow (stored zips still shrink)', () => {
+    const f = archiveFit({ ...base, totalBytes: 320 * MiB, incompressibleBytes: 300 * MiB }, limits)
+    expect(f.over).toBeUndefined()
+    expect(f.maybe).toMatch(/already-compressed files alone are 300\.0 MiB.*likely not fit/)
     const c = contextCheck({ ...base, totalBytes: 320 * MiB, incompressibleBytes: 300 * MiB }, limits)
-    expect(c.detail).toMatch(/too large for `insta deploy <dir>`: already-compressed files alone are 300\.0 MiB/)
+    expect(c.detail).not.toContain('too large for')
+    expect(c.status).toBe('fail')
+  })
+
+  it('counts tar headers and padding: a payload just under the limit can still overflow', () => {
+    const f = archiveFit({ ...base, totalBytes: 256 * MiB - 1000, entries: 5000 }, limits)
+    expect(f.maybe).toMatch(/close to the limit once tar headers are counted/)
+    expect(archiveFit({ ...base, totalBytes: 256 * MiB - 100 * 1024 * 1024 }, limits)).toEqual({})
+  })
+
+  it('stays quiet when incompressible payload plus framing is clearly under the limit', () => {
+    expect(archiveFit({ ...base, totalBytes: 100 * MiB, incompressibleBytes: 100 * MiB }, limits)).toEqual({})
   })
 
   it('says how much is already compressed when only the compressed size can tell', () => {
