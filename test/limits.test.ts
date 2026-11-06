@@ -45,10 +45,10 @@ import { parseDbCpu, parseDbMemory, fmtMib, alwaysOnArgs, alwaysOnLine, alwaysOn
 
 describe('parseCpu (compute --cpu override)', () => {
   it('accepts exactly the provider grid the help text advertises', () => {
-    for (const n of [1, 2, 4, 6, 8]) expect(parseCpu(String(n))).toBe(n)
+    for (const n of [1, 2, 4, 6, 8, 16]) expect(parseCpu(String(n))).toBe(n)
   })
   it('throws locally on junk AND on off-grid sizes instead of deferring to the server', () => {
-    for (const raw of ['abc', '', '-2', '1.5', 'two', '3', '100']) {
+    for (const raw of ['abc', '', '-2', '1.5', 'two', '3', '12', '32', '100']) {
       expect(() => parseCpu(raw), raw).toThrow(/invalid cpu/)
     }
   })
