@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import { chmodSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,7 +9,7 @@ import {
   type BuildCheck, type ContextStats,
 } from '../src/commands/build.js'
 import type { BuildRunner } from '../src/flyctl-build.js'
-import { contextEntries } from '../src/pack.js'
+import { contextEntries, packDirectory } from '../src/pack.js'
 
 const check = (over: Partial<BuildCheck>): BuildCheck =>
   ({ id: 'x', severity: 'info', status: 'pass', title: 't', ...over })
@@ -154,7 +155,9 @@ describe('archive ceiling (SUP2-1094)', () => {
 
   it('counts tar headers and padding: a payload just under the limit can still overflow', () => {
     const f = archiveFit({ ...base, totalBytes: 256 * MiB - 1000, entries: 5000 }, limits)
-    expect(f.maybe).toMatch(/close to the limit once tar headers are counted/)
+    expect(f.maybe).toMatch(/close to the limit once tar headers and compression framing are counted/)
+    // the reviewed near-cap case: 268,405,456 random bytes really packed to 268,460,038 (> 268,435,456)
+    expect(archiveFit({ ...base, totalBytes: 268_405_456, entries: 2 }, limits).maybe).toBeDefined()
     expect(archiveFit({ ...base, totalBytes: 256 * MiB - 100 * 1024 * 1024 }, limits)).toEqual({})
   })
 
@@ -173,6 +176,41 @@ describe('archive ceiling (SUP2-1094)', () => {
 
   it('uses the limits it is given, not the defaults', () => {
     expect(archiveFit({ ...base, totalBytes: 300 * MiB }, { ...limits, maxArchiveBytes: 512 * MiB })).toEqual({})
+  })
+})
+
+describe('archive estimate vs the real packer (SUP2-1094)', () => {
+  const dir = () => mkdtempSync(join(tmpdir(), 'insta-build-'))
+
+  it('never undershoots the packed archive for incompressible data', () => {
+    const d = dir()
+    writeFileSync(join(d, 'data.bin'), randomBytes(6 * MiB))
+    writeFileSync(join(d, 'Dockerfile'), 'FROM scratch\n')
+    const packed = packDirectory(d).archive.length
+    const ctx = contextStats(d)
+    // A cap one byte under the real archive must not pass silently.
+    const limits = { maxArchiveBytes: packed - 1, maxExtractedBytes: 1024 * MiB, maxFiles: 10000 }
+    expect(archiveFit(ctx.archive!, limits).maybe).toBeDefined()
+    // ...and a cap 1% above it is not flagged: the margin is tight enough to stay useful.
+    expect(archiveFit(ctx.archive!, { ...limits, maxArchiveBytes: Math.ceil(packed * 1.01) })).toEqual({})
+  })
+
+  it('judges archive limits on the packer ignore selection (.gitignore fallback)', () => {
+    const d = dir()
+    writeFileSync(join(d, 'Dockerfile'), 'FROM scratch\n')
+    writeFileSync(join(d, '.gitignore'), 'local.bin\n')
+    writeFileSync(join(d, 'local.bin'), 'x'.repeat(5000))
+    const ctx = contextStats(d)
+    const limits = { maxArchiveBytes: 256 * MiB, maxExtractedBytes: 4000, maxFiles: 2 }
+    expect(ctx.totalBytes).toBeGreaterThan(4000) // the docker context still sees it
+    expect(archiveFit(ctx.archive!, limits)).toEqual({})
+    expect(contextCheck(ctx, limits).detail).not.toContain('too large for')
+    expect(packDirectory(d, limits).entries).toBe(ctx.archive!.entries)
+  })
+
+  it('labels the ceiling as an offline default in the human-readable check', () => {
+    const c = contextCheck({ totalBytes: 1100 * MiB, nodeModulesBytes: 0, incompressibleBytes: 0, entries: 3, truncated: false, hasDockerignore: true })
+    expect(c.detail).toMatch(/offline defaults — the server's limits win at deploy/)
   })
 })
 

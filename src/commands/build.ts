@@ -6,7 +6,7 @@ import { resolve, join } from 'node:path'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { info, printJson, die } from '../util.js'
 import { dockerfileExposedPort } from './deploy.js'
-import { contextEntries, ARCHIVE_LIMITS, type ArchiveLimits } from '../pack.js'
+import { contextEntries, archiveEntries, type Found, ARCHIVE_LIMITS, type ArchiveLimits } from '../pack.js'
 import { nixpacksPlan, nixpacksGeneratedDockerfile, nixpacksAvailable, quietRunner, type NixpacksPlan } from '../nixpacks.js'
 import type { BuildRunner } from '../flyctl-build.js'
 
@@ -75,6 +75,15 @@ export function envKeysFromDotEnvExample(content: string): string[] {
 const CONTEXT_WARN_BYTES = 100 * 1024 * 1024
 const WALK_CAP = 50_000 // entries; hitting it marks the stats truncated (size becomes a floor)
 
+// What the deploy archive would hold: the packer's ignore selection (.gitignore fallback), not the
+// docker context's, so the archive ceilings are judged on the files that are actually packed.
+export type ArchiveStats = {
+  totalBytes: number
+  incompressibleBytes: number
+  entries: number
+  truncated: boolean
+}
+
 export type ContextStats = {
   totalBytes: number
   nodeModulesBytes: number
@@ -85,12 +94,13 @@ export type ContextStats = {
   entries: number
   truncated: boolean
   hasDockerignore: boolean
+  // Absent in hand-built stats: archiveFit then falls back to the fields above.
+  archive?: ArchiveStats
 }
 
 const COMPRESSED_EXT = /\.(gz|tgz|xz|txz|zst|bz2|tbz2|lz4|br|zip|7z|rar|jar|whl|png|jpe?g|gif|webp|avif|heic|mp[34]|m4[av]|mov|webm|mkv|ogg|opus|flac|woff2?|parquet)$/i
 
-export function contextStats(dir: string, cap = WALK_CAP): ContextStats {
-  const entries = contextEntries(dir, cap + 1)
+function tally(entries: Found[], cap: number): { stats: ArchiveStats; nodeModulesBytes: number } {
   let totalBytes = 0
   let nodeModulesBytes = 0
   let incompressibleBytes = 0
@@ -100,33 +110,39 @@ export function contextStats(dir: string, cap = WALK_CAP): ContextStats {
     if (e.path.split('/').includes('node_modules')) nodeModulesBytes += e.size
     if (!e.dir && COMPRESSED_EXT.test(e.path)) incompressibleBytes += e.size
   }
+  return { stats: { totalBytes, incompressibleBytes, entries: counted.length, truncated: entries.length > cap }, nodeModulesBytes }
+}
+
+export function contextStats(dir: string, cap = WALK_CAP): ContextStats {
+  const { stats, nodeModulesBytes } = tally(contextEntries(dir, cap + 1), cap)
   return {
-    totalBytes,
+    ...stats,
     nodeModulesBytes,
-    incompressibleBytes,
-    entries: counted.length,
-    truncated: entries.length > cap,
     hasDockerignore: existsSync(join(dir, '.dockerignore')),
+    archive: tally(archiveEntries(dir, cap + 1), cap).stats,
   }
 }
 
 const mb = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)} MB`
 const mib = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)} MiB`
 
-// Worst-case bytes the tar + gzip framing adds on top of the file contents: a 512-byte header and
-// up to 511 bytes of block padding per entry, the two closing blocks, and gzip's stored-block
-// framing (5 bytes per 64 KiB) for data that does not compress. pack.ts compresses the tar, not the
-// bare files, so the upload limit applies to totalBytes plus this.
-export function archiveOverheadBytes(ctx: ContextStats, payloadBytes = ctx.totalBytes): number {
-  return ctx.entries * 1023 + 1024 + Math.ceil(payloadBytes / 65535) * 5 + 32
+// Worst-case bytes tar and gzip add on top of the file contents: a 512-byte header and up to 511
+// bytes of block padding per entry, the two closing blocks, and the compressor's expansion on data
+// it cannot shrink. pack.ts gzips the tar with fflate level 9, whose framing on random input
+// measures ~0.02% (not the 5 bytes per 64 KiB of a stored-only stream); 0.1% is five times that.
+export function archiveOverheadBytes(a: Pick<ArchiveStats, 'entries'>, payloadBytes: number): number {
+  const tar = payloadBytes + a.entries * 1023 + 1024
+  return tar - payloadBytes + Math.ceil(tar / 1000) + 1024
 }
+
+const DEFAULTS_NOTE = "offline defaults — the server's limits win at deploy"
 
 // Where this context stands against the archive lane's ceilings. `over` is certain (the deploy
 // will refuse it, from the walk alone); `maybe` means only the compressed size can tell, and build
 // does not compress. Neither uncompressed size nor file extensions prove a compressed overflow: a
 // 400 MB tree of text can pack to 50 MiB, and a stored or repetitive .zip/.png still shrinks under
 // gzip -9. Only the extracted-size and entry limits are decided by the walk, so only they are `over`.
-export function archiveFit(ctx: ContextStats, limits: ArchiveLimits = ARCHIVE_LIMITS): { over?: string; maybe?: string } {
+export function archiveFit(ctx: ArchiveStats, limits: ArchiveLimits = ARCHIVE_LIMITS): { over?: string; maybe?: string } {
   if (ctx.entries > limits.maxFiles) {
     return { over: `${ctx.entries.toLocaleString('en-US')}${ctx.truncated ? '+' : ''} entries (directories count), over the ${limits.maxFiles.toLocaleString('en-US')}-entry archive limit` }
   }
@@ -137,8 +153,8 @@ export function archiveFit(ctx: ContextStats, limits: ArchiveLimits = ARCHIVE_LI
   if (ctx.incompressibleBytes + archiveOverheadBytes(ctx, ctx.incompressibleBytes) > limits.maxArchiveBytes) {
     return { maybe: `already-compressed files alone are ${mib(ctx.incompressibleBytes)}, which will likely not fit the ${mib(limits.maxArchiveBytes)} compressed upload limit (extension-based estimate, only the packed archive is exact)` }
   }
-  if (ctx.totalBytes + archiveOverheadBytes(ctx) > limits.maxArchiveBytes) {
-    const near = ctx.totalBytes <= limits.maxArchiveBytes ? ` — close to the limit once tar headers are counted` : ''
+  if (ctx.totalBytes + archiveOverheadBytes(ctx, ctx.totalBytes) > limits.maxArchiveBytes) {
+    const near = ctx.totalBytes <= limits.maxArchiveBytes ? ` — close to the limit once tar headers and compression framing are counted` : ''
     return { maybe: `${mib(ctx.totalBytes)} uncompressed${already}${near} — deploy uploads it as a tar.gz archive capped at ${mib(limits.maxArchiveBytes)}, so it ships only if it compresses below that` }
   }
   return {}
@@ -147,14 +163,15 @@ export function archiveFit(ctx: ContextStats, limits: ArchiveLimits = ARCHIVE_LI
 export function contextCheck(ctx: ContextStats, limits: ArchiveLimits = ARCHIVE_LIMITS): BuildCheck {
   const shipsNodeModules = ctx.nodeModulesBytes > 0
   const tooBig = ctx.totalBytes > CONTEXT_WARN_BYTES
-  const fit = archiveFit(ctx, limits)
+  const fit = archiveFit(ctx.archive ?? ctx, limits)
   const size = `${mb(ctx.totalBytes)}${ctx.truncated ? '+' : ''}`
   const base = shipsNodeModules
     ? `node_modules (${mb(ctx.nodeModulesBytes)}) would ship in the ${size} build context`
     : ctx.truncated
       ? `over ${WALK_CAP.toLocaleString('en-US')} entries — scan truncated, ${size} is a floor`
       : `${size}${tooBig && !fit.over && !fit.maybe ? ' — large contexts make remote builds slow' : ''}`
-  const ceiling = fit.over ? `too large for \`insta deploy <dir>\`: ${fit.over}` : fit.maybe
+  const found = fit.over ? `too large for \`insta deploy <dir>\`: ${fit.over}` : fit.maybe
+  const ceiling = found ? `${found} [archive limits are ${DEFAULTS_NOTE}]` : undefined
   const detail = ceiling ? `${base}; ${ceiling}` : base
   const bad = shipsNodeModules || tooBig || ctx.truncated || !!ceiling
   const ignore = `${ctx.hasDockerignore ? 'extend your' : 'add a'} .dockerignore (node_modules, build artifacts, secrets)`

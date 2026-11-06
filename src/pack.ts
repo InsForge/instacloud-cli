@@ -193,6 +193,16 @@ export function contextEntries(absDir: string, cap = Infinity): Found[] {
   return entries
 }
 
+// The entries packDirectory would archive: the same ignore selection (a root .dockerignore, else
+// .gitignore at the root and nested), unlike contextEntries. Symlinks are skipped, not rejected:
+// the packer errors on them, which is a different message than a size ceiling.
+export function archiveEntries(absDir: string, cap = Infinity): Found[] {
+  const entries: Found[] = []
+  const { ig, files, flavour } = rootIgnore(absDir)
+  walk(absDir, '', entries, [], ig, files, flavour, cap)
+  return entries
+}
+
 const mib = (n: number): string => `${(n / (1024 * 1024)).toFixed(1)} MiB`
 
 // Windows has no POSIX exec bit for lstat to report, so a script packs as 0644 and the image
