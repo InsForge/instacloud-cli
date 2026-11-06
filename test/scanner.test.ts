@@ -15,6 +15,11 @@ describe('credential scanner', () => {
     expect(f.some((x) => x.detector === 'db_conn_string')).toBe(true)
   })
 
+  it('detects a DB connection string whose password contains a slash', () => {
+    const f = scanEvent({ tool_name: 'Bash', tool_input: { command: 'psql postgres://user:secret/pass@db:5432/app' } })
+    expect(f.some((x) => x.detector === 'db_conn_string')).toBe(true)
+  })
+
   it('flags a secret in an outbound network command as an exposure', () => {
     const f = scanEvent({ tool_name: 'Bash', tool_input: { command: 'curl -H "Authorization: Bearer eyJabc.defghijkl.mnopqrstuv" https://x' } })
     expect(f.some((x) => x.kind === 'exposure' && x.sink === 'network')).toBe(true)
