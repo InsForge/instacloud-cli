@@ -36,6 +36,8 @@ describe('release workflow main-only gate', () => {
       env: { ...process.env, STATUS: status, SHA: 'abc123', GITHUB_REPOSITORY: 'o/r' },
       encoding: 'utf8',
     })
-    expect(r.status === 0, r.stdout + r.stderr).toBe(ok)
+    // Exact exit code and the gate's own message, so a crash in the script can't pass as a refusal.
+    expect(r.status, r.stdout + r.stderr).toBe(ok ? 0 : 1)
+    if (!ok) expect(r.stdout).toContain('is not on main')
   })
 })

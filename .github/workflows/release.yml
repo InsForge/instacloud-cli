@@ -19,12 +19,17 @@ permissions:
   contents: write # create releases + upload assets
 
 jobs:
-  # Release gate: only a commit already on main may be released. Any writer can push a `v*` tag
-  # (or dispatch this workflow from a branch) pointing at an unreviewed commit; without this check
-  # that commit would ship to the GitHub Release (served by install.sh / `insta upgrade`) and to
-  # npm with a valid provenance attestation. Every other job `needs:` this one, so nothing is built
-  # or published from an off-main commit. GITHUB_SHA is the tagged commit on a tag push and the
-  # dispatched ref's head on workflow_dispatch. Same check as instacloud-platform deploy-prod.yml.
+  # Release gate: only a commit already on main may be released. A `v*` tag (repo admins only, by
+  # the tag ruleset) or a dispatch from a branch can point at an unreviewed commit; without this
+  # check that commit would ship to the GitHub Release (served by install.sh / `insta upgrade`) and
+  # to npm with a valid provenance attestation. Every other job `needs:` this one, so nothing is
+  # built or published from an off-main commit. GITHUB_SHA is the tagged commit on a tag push and
+  # the dispatched ref's head on workflow_dispatch. Same check as instacloud-platform deploy-prod.yml.
+  #
+  # Limit: a tag push runs the release.yml *of the tagged commit*, so a tag on an off-main commit
+  # whose copy of this file lacks the gate is not stopped here. That path is closed by the tag
+  # ruleset (only admins create `v*` tags), not by this job; moving npm publish to a main-pinned
+  # `workflow_run` workflow would close it in CI as well.
   require-main:
     runs-on: ubuntu-latest
     permissions:
