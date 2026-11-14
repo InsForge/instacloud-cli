@@ -371,6 +371,13 @@ describe('redact', () => {
     expect(out).not.toContain('hunter2')
   })
 
+  it('scrubs URL credentials whose password contains a slash', () => {
+    expect(redactSensitive('postgres://user:pa/ss@db/app')).toBe('postgres://[REDACTED]@db/app')
+    const out = redactSensitive('connect failed: postgres://admin:hun/ter2@db.example.com:5432/app')
+    expect(out).toContain('postgres://[REDACTED]@db.example.com')
+    expect(out).not.toContain('hun/')
+  })
+
   it('redacts real insta_ tokens but keeps insta_* tool names', () => {
     const out = redactSensitive(`insta_deploy failed with token insta_${'x'.repeat(30)}`)
     expect(out).toContain('insta_deploy')
