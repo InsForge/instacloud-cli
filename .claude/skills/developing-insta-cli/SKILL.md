@@ -98,6 +98,11 @@ skipped because its argv is split before commander ever sees it — there, pass 
 
 1. **Bump**: PR changing `package.json` version (main is protected — never commit the bump directly). Merge it via the flow above.
 2. **Tag**: `git checkout main && git pull && git tag vX.Y.Z && git push origin vX.Y.Z`.
+   Two guards apply. The workflow's first job, `require-main`, fails the whole release (nothing is
+   built, no GitHub Release, no npm publish) unless the tagged commit is on `main` (GitHub compare
+   `<sha>...main` is `ahead` or `identical`); a `workflow_dispatch` run is checked the same way.
+   And a repository ruleset on `refs/tags/v*` restricts creating, moving, or deleting release tags
+   to repo admins, so only an admin can cut a release.
 3. **Binaries (automatic)**: the `release` workflow builds 5 platform binaries + SHA256SUMS and publishes a GitHub Release. `install.sh`, `agents.sh`, and `insta upgrade` serve users from it immediately.
 4. **npm (automatic on tag — OIDC trusted publishing)**: the `publish-npm` job authenticates via
    OpenID Connect (npmjs.com → `insta` → Trusted Publisher = this repo's `release.yml`); no token
@@ -117,6 +122,8 @@ skipped because its argv is split before commander ever sees it — there, pass 
 | John-bot ignored the request | Batched links — resend ONE link per message |
 | `npm error code EOTP` | Publish needs `--otp=<fresh 2FA code>` |
 | `npm publish` ENOENT package.json | Ran outside the repo root |
+| `release` run fails at `require-main` ("not on main") | The tag points at a commit that isn't on `main` (e.g. tagged a feature branch, or before the squash-merge). Delete the tag, tag the merged `main` commit, push again |
+| `git push origin vX.Y.Z` rejected by a ruleset | Only repo admins may create/update/delete `v*` tags — ask an admin to cut the release |
 | `npx insta@latest` behind the GH release | `publish-npm` job failed (OIDC trust/config?) — see step 4 |
 | `'C:\Program' is not recognized` from a spawned tool (win CI only) | Callers of `resolveSpawnable` must pass its `windowsVerbatimArguments` option to `spawn`; cmd.exe needs the resolver's outer command quotes and inner argument quotes intact. Spawn real `.exe` files directly. |
 | CLI hits the wrong server in tests | Persisted `~/.insta/config.json` apiUrl; set `INSTA_API_URL` (≥0.0.7) or move the config aside |

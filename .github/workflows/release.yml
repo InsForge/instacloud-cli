@@ -19,7 +19,35 @@ permissions:
   contents: write # create releases + upload assets
 
 jobs:
+  # Release gate: only a commit already on main may be released. A `v*` tag (repo admins only, by
+  # the tag ruleset) or a dispatch from a branch can point at an unreviewed commit; without this
+  # check that commit would ship to the GitHub Release (served by install.sh / `insta upgrade`) and
+  # to npm with a valid provenance attestation. Every other job `needs:` this one, so nothing is
+  # built or published from an off-main commit. GITHUB_SHA is the tagged commit on a tag push and
+  # the dispatched ref's head on workflow_dispatch. Same check as instacloud-platform deploy-prod.yml.
+  #
+  # Limit: a tag push runs the release.yml *of the tagged commit*, so a tag on an off-main commit
+  # whose copy of this file lacks the gate is not stopped here. That path is closed by the tag
+  # ruleset (only admins create `v*` tags), not by this job; moving npm publish to a main-pinned
+  # `workflow_run` workflow would close it in CI as well.
+  require-main:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require the commit to be on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$SHA...main" --jq .status)"
+          case "$status" in
+            ahead|identical) echo "$SHA is on main ($status)" ;;
+            *) echo "::error::$SHA is not on main (compare status: $status). Merge it to main first, then tag the main commit."; exit 1 ;;
+          esac
+
   build:
+    needs: require-main
     runs-on: ubuntu-latest # Bun cross-compiles every target from one runner
     strategy:
       fail-fast: false
@@ -57,7 +85,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [require-main, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -116,10 +144,11 @@ jobs:
 
   # npm half of the release: publishes `insta` to the registry via OIDC trusted publishing — no
   # token secret, no NPM_TOKEN, and nothing to rotate (the step comment below carries the detail
-  # and the one setting it depends on). Gated on the binaries building, tag pushes only.
+  # and the one setting it depends on). Gated on the on-main check and the binaries building, tag
+  # pushes only.
   # --provenance attests the build (public repo + OIDC).
   publish-npm:
-    needs: release
+    needs: [require-main, release]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
